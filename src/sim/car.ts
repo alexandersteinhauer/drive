@@ -32,7 +32,10 @@ export class Wheel {
   spin = 0;
   steer = 0;
   driveTorque = 0;
-  absFactor = 1;
+  /** ABS brake pressure multiplier, 0..1. */
+  absPressure = 1;
+  /** Contact patch speed along the wheel heading (m/s). */
+  vx = 0;
 
   constructor(
     readonly axle: AxleConfig,
@@ -49,7 +52,8 @@ export class Wheel {
     this.contact = false;
     this.length = this.axle.restLength;
     this.compression = this.load = this.omega = this.driveTorque = 0;
-    this.absFactor = 1;
+    this.absPressure = 1;
+    this.vx = 0;
   }
 }
 
@@ -307,6 +311,7 @@ export class Car {
 
     r.subVectors(w.contactPoint, this.position);
     vc.crossVectors(this.angularVelocity, r).add(this.velocity);
+    w.vx = vc.dot(tf);
     w.tire.update(
       this.cfg.tire,
       this.curve,
@@ -483,21 +488,33 @@ export class Car {
     const inertia = a.wheelInertia + (a.driven ? this.reflectedInertia / 2 : 0);
     w.omega += ((w.driveTorque - w.tire.fx * a.wheelRadius) / inertia) * dt;
 
-    if (this.cfg.abs) {
-      const locking =
-        w.contact &&
-        brake > 0 &&
-        w.tire.kx < -1.2 * this.cfg.tire.peakSlipX &&
-        Math.abs(this.speed) > 2;
-      w.absFactor = clamp(w.absFactor + (locking ? -12 : 8) * dt, 0.3, 1);
-    }
+    this.updateAbs(w, dt, brake);
     let friction =
-      a.brakeTorque * brake * w.absFactor +
+      a.brakeTorque * brake * w.absPressure +
       this.cfg.tire.rollingResistance * w.load * a.wheelRadius;
     if (!a.steered) friction += this.cfg.handbrakeTorque * handbrake;
     const dw = (friction * dt) / inertia;
     w.omega = Math.abs(w.omega) <= dw ? 0 : w.omega - Math.sign(w.omega) * dw;
     w.spin += w.omega * dt;
+  }
+
+  /**
+   * Anti-lock brakes, per wheel. Like a real ABS it watches wheel slip (from wheel speed
+   * against ground speed) and modulates brake pressure: dump fast when the wheel slips
+   * past the tire's peak, hold near it, rebuild when there is grip to spare. Off below
+   * walking pace so the car can still come to a full stop.
+   */
+  private updateAbs(w: Wheel, dt: number, brake: number): void {
+    if (!this.cfg.abs || brake <= 0 || !w.contact || Math.abs(w.vx) < 1.5) {
+      w.absPressure = 1;
+      return;
+    }
+    // Negative while braking, in either direction of travel.
+    const slip = (w.omega * w.axle.wheelRadius - w.vx) / w.vx;
+    const peak = this.cfg.tire.peakSlipX;
+    if (slip < -1.1 * peak) w.absPressure -= 30 * dt;
+    else if (slip > -0.7 * peak) w.absPressure += 5 * dt;
+    w.absPressure = clamp(w.absPressure, 0, 1);
   }
 
   /** Penalty contacts for the body box corners, for crashes and rollovers. */

@@ -59,11 +59,11 @@ let camSide = 0;
 
 // C cycles through these.
 const models = [
-  { config: sportsCoupe, paint: 0xd2552d },
   { config: electricCoupe, paint: 0x2f7fc4 },
+  { config: sportsCoupe, paint: 0xd2552d },
 ];
 let model = 0;
-let car = new Car(sportsCoupe, land);
+let car = new Car(models[0]!.config, land);
 placeOnRoad(15);
 let view = new CarView(car, models[0]!.paint);
 scene.add(view.root);

@@ -171,6 +171,63 @@ describe("car", () => {
   });
 });
 
+/** Full braking from 100 km/h with a steering input; returns distance, lock fraction and max body slip. */
+function brakeTest(abs: boolean, steer: number) {
+  const cfg = structuredClone(electricCoupe);
+  cfg.abs = abs;
+  const car = makeCar(cfg);
+  accelerateTo(car, 100);
+  const start = car.position.clone();
+  let locked = 0;
+  let fast = 0;
+  let maxSlip = 0;
+  run(
+    car,
+    20,
+    () => ({ ...idle, brake: 1, steer }),
+    () => {
+      if (car.speed > 3) {
+        fast++;
+        if (car.wheels.some((w) => w.omega === 0)) locked++;
+      }
+      const v = car.velocity
+        .clone()
+        .applyQuaternion(car.orientation.clone().invert());
+      maxSlip = Math.max(maxSlip, Math.abs(Math.atan2(v.x, -v.z)));
+      return car.speed < 0.3;
+    },
+  );
+  return {
+    distance: car.position.distanceTo(start),
+    locked: locked / fast,
+    maxSlip: (maxSlip * 180) / Math.PI,
+  };
+}
+
+describe("abs", () => {
+  test("stops shorter than locked wheels", () => {
+    const on = brakeTest(true, 0);
+    const off = brakeTest(false, 0);
+    console.log(
+      `abs straight: ${on.distance.toFixed(1)} m vs ${off.distance.toFixed(1)} m locked`,
+    );
+    expect(on.locked).toBe(0);
+    expect(off.locked).toBeGreaterThan(0.5);
+    expect(on.distance).toBeLessThan(off.distance - 3);
+  });
+
+  test("keeps the car steerable while braking in a turn", () => {
+    const on = brakeTest(true, 0.5);
+    const off = brakeTest(false, 0.5);
+    console.log(
+      `abs turning: body slip ${on.maxSlip.toFixed(0)} deg vs ${off.maxSlip.toFixed(0)} deg locked`,
+    );
+    expect(on.locked).toBe(0);
+    expect(on.maxSlip).toBeLessThan(15);
+    expect(off.maxSlip).toBeGreaterThan(30);
+  });
+});
+
 describe("electric car", () => {
   test("settles at rest without creeping", () => {
     const car = makeCar(electricCoupe);
