@@ -139,7 +139,9 @@ describe("car", () => {
   });
 
   test("power oversteer can be provoked from a corner", () => {
-    const car = makeCar();
+    const cfg = structuredClone(sportsCoupe);
+    cfg.esc.enabled = false;
+    const car = makeCar(cfg);
     accelerateTo(car, 50);
     car.gear = 2;
     let maxSlip = 0;
@@ -171,16 +173,18 @@ describe("car", () => {
   });
 });
 
-/** Full braking from 100 km/h with a steering input; returns distance, lock fraction and max body slip. */
+/** Full braking from 100 km/h with a steering input; returns distance, lock fraction and how far the car turned. */
 function brakeTest(abs: boolean, steer: number) {
   const cfg = structuredClone(electricCoupe);
   cfg.abs = abs;
+  // Isolate ABS from stability control.
+  cfg.esc.enabled = false;
   const car = makeCar(cfg);
   accelerateTo(car, 100);
   const start = car.position.clone();
   let locked = 0;
   let fast = 0;
-  let maxSlip = 0;
+  let turned = 0;
   run(
     car,
     20,
@@ -190,17 +194,15 @@ function brakeTest(abs: boolean, steer: number) {
         fast++;
         if (car.wheels.some((w) => w.omega === 0)) locked++;
       }
-      const v = car.velocity
-        .clone()
-        .applyQuaternion(car.orientation.clone().invert());
-      maxSlip = Math.max(maxSlip, Math.abs(Math.atan2(v.x, -v.z)));
+      // How far the car turns while braking: locked fronts can't steer it.
+      turned += Math.abs(car.angularVelocity.y) * DT;
       return car.speed < 0.3;
     },
   );
   return {
     distance: car.position.distanceTo(start),
     locked: locked / fast,
-    maxSlip: (maxSlip * 180) / Math.PI,
+    turned: (turned * 180) / Math.PI,
   };
 }
 
@@ -220,12 +222,55 @@ describe("abs", () => {
     const on = brakeTest(true, 0.5);
     const off = brakeTest(false, 0.5);
     console.log(
-      `abs turning: body slip ${on.maxSlip.toFixed(0)} deg vs ${off.maxSlip.toFixed(0)} deg locked`,
+      `abs turning: car turned ${on.turned.toFixed(0)} deg vs ${off.turned.toFixed(0)} deg locked`,
     );
     expect(on.locked).toBe(0);
-    expect(on.maxSlip).toBeLessThan(15);
-    expect(off.maxSlip).toBeGreaterThan(30);
+    expect(on.turned).toBeGreaterThan(1.5 * off.turned);
   });
+});
+
+/**
+ * A quick keyboard lane change at 100 km/h, off the throttle: full right for 0.5 s, full left
+ * for 0.5 s, then straight. Keyboard steering ramps like Input does. Returns max body slip in degrees.
+ */
+function laneChange(cfg: CarConfig, esc: boolean): number {
+  const config = structuredClone(cfg);
+  config.esc.enabled = esc;
+  const car = makeCar(config);
+  accelerateTo(car, 100);
+  let steer = 0;
+  let maxSlip = 0;
+  run(car, 4, (t) => {
+    const target = t < 0.5 ? 1 : t < 1 ? -1 : 0;
+    const rate = (target > steer ? steer < 0 : steer > 0) ? 6 : 3.5;
+    steer =
+      target > steer
+        ? Math.min(target, steer + rate * DT)
+        : Math.max(target, steer - rate * DT);
+    const v = car.velocity
+      .clone()
+      .applyQuaternion(car.orientation.clone().invert());
+    if (car.speed > 5)
+      maxSlip = Math.max(maxSlip, Math.abs(Math.atan2(v.x, -v.z)));
+    return { ...idle, steer };
+  });
+  return (maxSlip * 180) / Math.PI;
+}
+
+describe("stability control", () => {
+  for (const [name, cfg] of [
+    ["electric", electricCoupe],
+    ["petrol", sportsCoupe],
+  ] as const)
+    test(`keeps the ${name} car straight through a lane change that spins it without`, () => {
+      const on = laneChange(cfg, true);
+      const off = laneChange(cfg, false);
+      console.log(
+        `esc lane change (${name}): body slip ${on.toFixed(1)} deg vs ${off.toFixed(1)} deg without`,
+      );
+      expect(off).toBeGreaterThan(30);
+      expect(on).toBeLessThan(8);
+    });
 });
 
 describe("electric car", () => {

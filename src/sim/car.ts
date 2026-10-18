@@ -32,6 +32,8 @@ export class Wheel {
   spin = 0;
   steer = 0;
   driveTorque = 0;
+  /** Extra brake torque requested by stability control. */
+  escTorque = 0;
   /** ABS brake pressure multiplier, 0..1. */
   absPressure = 1;
   /** Contact patch speed along the wheel heading (m/s). */
@@ -53,6 +55,7 @@ export class Wheel {
     this.length = this.axle.restLength;
     this.compression = this.load = this.omega = this.driveTorque = 0;
     this.absPressure = 1;
+    this.escTorque = 0;
     this.vx = 0;
   }
 }
@@ -103,6 +106,10 @@ export class Car {
   private sinceShift = 0;
   private reflectedInertia = 0;
   private tcsFactor = 1;
+  private escCut = 1;
+  private regenScale = 1;
+  /** True while stability control is intervening. */
+  escActive = false;
   private throttle = 0;
 
   constructor(
@@ -191,6 +198,7 @@ export class Car {
     this.antiRoll(this.wheels[0]!, this.wheels[1]!);
     this.antiRoll(this.wheels[2]!, this.wheels[3]!);
     for (const w of this.wheels) this.updateTire(w, dt);
+    this.updateStability(dt);
 
     this.updateDrivetrain(dt, throttle);
     for (const w of this.wheels)
@@ -361,6 +369,9 @@ export class Car {
       this.tcsFactor = clamp(this.tcsFactor + (slipping ? -8 : 4) * dt, 0, 1);
       throttle *= this.tcsFactor;
     }
+    if (this.escCut < 1) {
+      throttle *= this.escCut;
+    }
     const pt = this.cfg.powertrain;
     const total =
       pt.type === "electric"
@@ -385,9 +396,12 @@ export class Car {
       Math.min(torque, power / Math.max(Math.abs(omega), 1));
     const drive =
       omega * RPM > m.maxRpm ? 0 : throttle * limit(m.maxTorque, m.maxPower);
-    // Regen fades out near standstill so the car rolls to a stop instead of reversing.
+    // Regen fades out near standstill so the car rolls to a stop instead of reversing, and is
+    // scaled back while cornering or when the rear tires slip, since it only brakes the
+    // driven wheels and would otherwise unsettle the car.
     const regen =
       (1 - throttle) *
+      this.regenScale *
       limit(m.regenTorque, m.regenPower) *
       smoothstep(0, 60, omega);
     return (drive - regen) * m.ratio * dir * m.efficiency;
@@ -490,12 +504,80 @@ export class Car {
 
     this.updateAbs(w, dt, brake);
     let friction =
-      a.brakeTorque * brake * w.absPressure +
+      (a.brakeTorque * brake + w.escTorque) * w.absPressure +
       this.cfg.tire.rollingResistance * w.load * a.wheelRadius;
     if (!a.steered) friction += this.cfg.handbrakeTorque * handbrake;
     const dw = (friction * dt) / inertia;
     w.omega = Math.abs(w.omega) <= dw ? 0 : w.omega - Math.sign(w.omega) * dw;
     w.spin += w.omega * dt;
+  }
+
+  /**
+   * Stability control and regen management. ESC targets the yaw rate of a linear bicycle
+   * model: r = v * delta / (L + K * v^2), capped at what the tires can deliver (mu * g / v).
+   * Rotating faster than that, or sliding past the body slip limit, is oversteer: brake the
+   * outer front wheel to straighten the car. Rotating slower is understeer: brake the inner
+   * rear wheel, gently, to help it turn. Drive torque is cut in proportion while it acts.
+   */
+  private updateStability(dt: number): void {
+    const esc = this.cfg.esc;
+    for (const w of this.wheels) w.escTorque = 0;
+    // Yaw rate positive to the right, matching steering.
+    const yaw = -this.angularVelocity.dot(up);
+    const v = this.speed;
+    const lateral = this.velocity.dot(right);
+    const g = GRAVITY * this.cfg.tire.muY;
+
+    // Regen: full below 0.15 g of cornering, none from 0.5 g; dropped while the rear slips.
+    const ay = Math.abs(v * yaw) / GRAVITY;
+    const rearSlip = this.wheels.some(
+      (w) =>
+        w.axle.driven &&
+        w.contact &&
+        w.tire.kx < -0.7 * this.cfg.tire.peakSlipX,
+    );
+    const regenTarget = rearSlip ? 0 : clamp(1 - (ay - 0.15) / 0.35, 0, 1);
+    this.regenScale += (regenTarget - this.regenScale) * Math.min(1, dt * 15);
+
+    if (!esc.enabled || v < 5) {
+      this.escCut = 1;
+      this.escActive = false;
+      return;
+    }
+    const steered = this.wheels.filter((w) => w.axle.steered);
+    const delta = steered.reduce((s, w) => s + w.steer, 0) / steered.length;
+    const L = this.wheelbase;
+    const limit = (0.9 * g) / v;
+    const target = clamp(
+      (v * delta) / (L + esc.understeerGradient * v * v),
+      -limit,
+      limit,
+    );
+    let error = yaw - target;
+    // Body slip beyond the limit is oversteer even when the yaw rate looks right (a drift).
+    const beta = Math.atan2(lateral, v);
+    const excessBeta =
+      beta - clamp(beta, -esc.slipAngleLimit, esc.slipAngleLimit);
+    error -= esc.slipAngleGain * excessBeta;
+
+    const excess =
+      Math.abs(error) - (esc.deadband + esc.deadbandRatio * Math.abs(target));
+    if (excess <= 0) {
+      this.escCut = Math.min(1, this.escCut + dt * 4);
+      this.escActive = false;
+      return;
+    }
+    // Rotating further in the direction it is already going (or against the steering) is oversteer.
+    const oversteer =
+      Math.sign(error) === Math.sign(yaw) || Math.abs(target) < 0.02;
+    // To yaw left (error > 0 means too far right) brake the left side, and vice versa.
+    const side = -Math.sign(error);
+    const torque = Math.min(esc.maxTorque, esc.gain * excess);
+    for (const w of this.wheels)
+      if (w.side === side && w.axle.steered === oversteer)
+        w.escTorque = oversteer ? torque : torque * 0.5;
+    this.escCut = clamp(1 - excess * (oversteer ? 4 : 2), 0, 1);
+    this.escActive = true;
   }
 
   /**
@@ -505,7 +587,12 @@ export class Car {
    * walking pace so the car can still come to a full stop.
    */
   private updateAbs(w: Wheel, dt: number, brake: number): void {
-    if (!this.cfg.abs || brake <= 0 || !w.contact || Math.abs(w.vx) < 1.5) {
+    if (
+      !this.cfg.abs ||
+      (brake <= 0 && w.escTorque <= 0) ||
+      !w.contact ||
+      Math.abs(w.vx) < 1.5
+    ) {
       w.absPressure = 1;
       return;
     }

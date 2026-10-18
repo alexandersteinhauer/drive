@@ -33,6 +33,7 @@ function drive(cfg: CarConfig, seconds: number, targetKmh: number) {
   let maxSpeed = 0;
   let airborne = 0;
   let maxTilt = 0;
+  let escTime = 0;
   const t0 = performance.now();
   for (let t = 0; t < seconds; t += DT) {
     // Index nearest to the car, searched locally.
@@ -79,6 +80,7 @@ function drive(cfg: CarConfig, seconds: number, targetKmh: number) {
     });
     maxSpeed = Math.max(maxSpeed, car.speed * 3.6);
     if (car.wheels.every((w) => !w.contact)) airborne += DT;
+    if (car.escActive) escTime += DT;
     maxTilt = Math.max(
       maxTilt,
       Math.acos(new Vector3(0, 1, 0).applyQuaternion(car.orientation).y),
@@ -94,6 +96,7 @@ function drive(cfg: CarConfig, seconds: number, targetKmh: number) {
     airborne,
     maxTilt,
     msPerStep: wall / (seconds / DT),
+    escShare: escTime / seconds,
   };
 }
 
@@ -106,10 +109,12 @@ for (const [name, cfg] of [
     console.log(
       `${name}: ${(r.distance / 1000).toFixed(2)} km, max lane offset ${r.maxOff.toFixed(2)} m, ` +
         `max ${r.maxSpeed.toFixed(0)} km/h, airborne ${r.airborne.toFixed(2)} s, max tilt ${((r.maxTilt * 180) / Math.PI).toFixed(1)} deg, ` +
-        `${(r.msPerStep * 1000).toFixed(1)} us/step`,
+        `${(r.msPerStep * 1000).toFixed(1)} us/step, esc active ${(r.escShare * 100).toFixed(1)}%`,
     );
     expect(r.distance).toBeGreaterThan(1800);
     expect(r.maxOff).toBeLessThan(1.5);
     expect(r.airborne).toBeLessThan(0.05);
     expect(r.msPerStep).toBeLessThan(0.1);
+    // Normal driving must not trigger stability control.
+    expect(r.escShare).toBeLessThan(0.01);
   });

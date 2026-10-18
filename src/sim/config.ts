@@ -70,6 +70,26 @@ export interface ElectricConfig {
   regenPower: number;
 }
 
+/**
+ * Electronic stability control. Compares the measured yaw rate with the one the driver asks
+ * for (steering and speed through a linear bicycle model, capped by available grip) and
+ * corrects the difference by braking single wheels and cutting drive torque.
+ */
+export interface EscConfig {
+  enabled: boolean;
+  /** Understeer gradient of the reference model, rad per m/s^2 of lateral acceleration. */
+  understeerGradient: number;
+  /** Yaw rate error ignored before intervening: fixed part (rad/s) plus a fraction of the target. */
+  deadband: number;
+  deadbandRatio: number;
+  /** Body slip angle (rad) allowed before it counts as oversteer, and its weight in rad/s per rad. */
+  slipAngleLimit: number;
+  slipAngleGain: number;
+  /** Brake torque per rad/s of yaw rate error beyond the deadband, and its cap per wheel. */
+  gain: number;
+  maxTorque: number;
+}
+
 /** Clutch-type limited slip differential. */
 export interface DiffConfig {
   preload: number;
@@ -99,6 +119,7 @@ export interface CarConfig {
   abs: boolean;
   /** Traction control: cuts throttle when the driven wheels spin past peak slip. */
   tcs: boolean;
+  esc: EscConfig;
   handbrakeTorque: number;
   /** Collision box relative to the centre of mass. */
   body: {
@@ -200,6 +221,16 @@ export const sportsCoupe: CarConfig = {
   steering: { lock: (34 * Math.PI) / 180, ackermann: 0.8, limitAssist: true },
   abs: true,
   tcs: true,
+  esc: {
+    enabled: true,
+    understeerGradient: 0.0015,
+    deadband: 0.04,
+    deadbandRatio: 0.15,
+    slipAngleLimit: (6 * Math.PI) / 180,
+    slipAngleGain: 1.5,
+    gain: 6000,
+    maxTorque: 2200,
+  },
   handbrakeTorque: 2500,
   body: { center: [0, 0.28, 0.05], halfExtents: [0.9, 0.62, 2.15] },
 };
