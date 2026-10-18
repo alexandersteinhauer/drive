@@ -25,6 +25,8 @@ export class Wheel {
   length: number;
   compression = 0;
   load = 0;
+  /** Grip multiplier of the surface under the tire. */
+  grip = 1;
   omega = 0;
   /** Accumulated rotation, for rendering. */
   spin = 0;
@@ -62,7 +64,7 @@ const vc = new Vector3();
 const tf = new Vector3();
 const tl = new Vector3();
 const down = new Vector3();
-const hit: RayHit = { distance: 0, normal: new Vector3() };
+const hit: RayHit = { distance: 0, normal: new Vector3(), grip: 1 };
 const qInv = new Quaternion();
 const wb = new Vector3();
 const lb = new Vector3();
@@ -274,6 +276,7 @@ export class Car {
     w.compression = a.restLength - (hit.distance - a.wheelRadius);
     w.contactPoint.copy(p).addScaledVector(down, hit.distance);
     w.normal.copy(hit.normal);
+    w.grip = hit.grip;
     const rate = (w.compression - prev) / dt;
     let load =
       a.springRate * w.compression +
@@ -308,6 +311,7 @@ export class Car {
       this.cfg.tire,
       this.curve,
       w.load,
+      w.grip,
       vc.dot(tf),
       vc.dot(tl),
       w.omega * w.axle.wheelRadius,

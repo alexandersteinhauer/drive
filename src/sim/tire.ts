@@ -95,6 +95,8 @@ export class TireState {
     cfg: TireConfig,
     curve: TireCurve,
     load: number,
+    /** Surface grip multiplier. */
+    grip: number,
     vx: number,
     vy: number,
     wheelSpeed: number,
@@ -127,7 +129,7 @@ export class TireState {
       1.3,
       Math.max(0.6, 1 - cfg.loadSensitivity * (load / cfg.nominalLoad - 1)),
     );
-    const scale = load * loadFactor * curve.ratio(rho);
+    const scale = load * grip * loadFactor * curve.ratio(rho);
     this.fx = cfg.muX * scale * nx;
     this.fy = cfg.muY * scale * ny;
   }

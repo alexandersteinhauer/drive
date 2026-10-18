@@ -3,6 +3,8 @@ import type { Vector3 } from "three";
 export interface RayHit {
   distance: number;
   normal: Vector3;
+  /** Tire grip multiplier of the surface (1 = dry asphalt). */
+  grip: number;
 }
 
 /** Anything the car can drive on. Heights are along +Y. */
@@ -32,6 +34,7 @@ export class FlatGround implements Ground {
     if (distance > maxDistance) return false;
     out.distance = distance;
     out.normal.set(0, 1, 0);
+    out.grip = 1;
     return true;
   }
 
