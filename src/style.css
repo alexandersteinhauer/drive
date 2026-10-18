@@ -1,0 +1,23 @@
+html,
+body {
+  margin: 0;
+  height: 100%;
+  overflow: hidden;
+  background: #bfd4e6;
+}
+
+canvas {
+  display: block;
+}
+
+#speed {
+  position: fixed;
+  right: 32px;
+  bottom: 24px;
+  font:
+    600 48px/1 ui-monospace,
+    monospace;
+  color: #fff;
+  text-shadow: 0 1px 4px rgb(0 0 0 / 50%);
+  pointer-events: none;
+}
