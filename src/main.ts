@@ -53,6 +53,7 @@ const fwd = new THREE.Vector3();
 const target = new THREE.Vector3();
 const desired = new THREE.Vector3();
 const orbit = new THREE.Vector3();
+const camOffset = new THREE.Vector3(0, 2.2, 6.5);
 const UP = new THREE.Vector3(0, 1, 0);
 /** -1 left view, 0 behind, +1 right view (smoothed). */
 let camSide = 0;
@@ -77,6 +78,7 @@ if (import.meta.env.DEV)
     terrain,
     roadView,
     renderer,
+    camera,
   });
 
 /** Puts the car at rest in the right-hand lane at road sample `i`, facing along the road. */
@@ -141,7 +143,11 @@ function frame(now: number): void {
     .copy(pos)
     .addScaledVector(orbit, 6.5)
     .setY(pos.y + 2.2 - 0.8 * Math.abs(camSide));
-  camera.position.lerp(desired, 1 - Math.exp(-10 * dt));
+  // Smooth the offset from the car, not the world position, so the camera doesn't fall
+  // further behind the faster the car goes.
+  desired.sub(pos);
+  camOffset.lerp(desired, 1 - Math.exp(-10 * dt));
+  camera.position.copy(pos).add(camOffset);
   // Keep the camera above the hills.
   const floorY = land.height(camera.position.x, camera.position.z) + 0.8;
   if (camera.position.y < floorY) camera.position.y = floorY;
