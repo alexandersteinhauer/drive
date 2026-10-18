@@ -86,6 +86,7 @@ if (import.meta.env.DEV)
     roadView,
     renderer,
     camera,
+    scene,
   });
 
 /** Puts the car at rest in the right-hand lane at road sample `i`, facing along the road. */

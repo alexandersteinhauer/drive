@@ -192,7 +192,8 @@ function wheelOf(x: number, y: number, z: number): Corner | null {
   const r = Math.hypot(y - w.center[1]!, z - w.center[2]!);
   const lat = c.endsWith("l") ? w.inner - x : x - w.inner; // > 0 outboard of the tyre's inner face
   const width = Math.abs(w.outer - w.inner);
-  return r < 0.97 * w.radius && lat > -0.03 && lat < width + 0.04 ? c : null;
+  // Up to just past the tread; nothing else in the lateral band reaches that far in.
+  return r < 1.04 * w.radius && lat > -0.03 && lat < width + 0.04 ? c : null;
 }
 
 /** Copies the given triangles of `prim` into a new non-indexed primitive with the same material. */
@@ -249,6 +250,17 @@ for (const { prim } of allPrims()) {
     buckets.set(key, [...(buckets.get(key) ?? []), t]);
   }
   for (const [key, tris] of buckets) add(key, extract(prim, tris));
+}
+
+// Every triangle of these materials belongs to a wheel; any left in the body means the
+// wheel classification above is wrong (it would neither spin nor steer).
+const WHEEL_ONLY = /Tires|Rims|BrakeRotors/;
+for (const prim of groups.get("body") ?? []) {
+  const name = prim.getMaterial()?.getName() ?? "";
+  if (WHEEL_ONLY.test(name))
+    throw new Error(
+      `${prim.getAttribute("POSITION")!.getCount() / 3} triangles of ${name} left in the body`,
+    );
 }
 
 // Rebuild the scene: one node per group, wheel parts centred on their wheel centre.
