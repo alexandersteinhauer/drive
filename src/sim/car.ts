@@ -392,10 +392,26 @@ export class Car {
     const omega = avgOmega * m.ratio * dir;
     this.engineOmega = Math.abs(omega);
     this.reflectedInertia = m.inertia * m.ratio * m.ratio;
+    const speed = Math.max(Math.abs(omega), 1);
     const limit = (torque: number, power: number) =>
-      Math.min(torque, power / Math.max(Math.abs(omega), 1));
+      Math.min(torque, power / speed);
+    // Motor envelope: constant torque, then power rising to its peak, then constant power.
+    const wt = m.torqueRpm / RPM;
+    const wp = m.powerRpm / RPM;
+    const power =
+      speed < wt
+        ? m.maxTorque * speed
+        : Math.min(
+            m.maxPower,
+            m.maxTorque * wt +
+              ((m.maxPower - m.maxTorque * wt) * (speed - wt)) / (wp - wt),
+          );
+    // Electronic speed limiter, fading drive out over the last ~2 km/h.
+    const limiter = clamp((m.speedLimit - Math.abs(this.speed)) / 0.6, 0, 1);
     const drive =
-      omega * RPM > m.maxRpm ? 0 : throttle * limit(m.maxTorque, m.maxPower);
+      omega * RPM > m.maxRpm
+        ? 0
+        : throttle * limiter * Math.min(m.maxTorque, power / speed);
     // Regen fades out near standstill so the car rolls to a stop instead of reversing, and is
     // scaled back while cornering or when the rear tires slip, since it only brakes the
     // driven wheels and would otherwise unsettle the car.

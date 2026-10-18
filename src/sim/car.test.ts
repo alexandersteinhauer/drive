@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { Vector3 } from "three";
 import { Car, type CarInput } from "./car";
-import { electricCoupe, sportsCoupe, type CarConfig } from "./config";
+import { bmwI4, sportsCoupe, type CarConfig } from "./config";
 import { FlatGround } from "./ground";
 
 const DT = 1 / 480;
@@ -175,7 +175,7 @@ describe("car", () => {
 
 /** Full braking from 100 km/h with a steering input; returns distance, lock fraction and how far the car turned. */
 function brakeTest(abs: boolean, steer: number) {
-  const cfg = structuredClone(electricCoupe);
+  const cfg = structuredClone(bmwI4);
   cfg.abs = abs;
   // Isolate ABS from stability control.
   cfg.esc.enabled = false;
@@ -259,7 +259,7 @@ function laneChange(cfg: CarConfig, esc: boolean): number {
 
 describe("stability control", () => {
   for (const [name, cfg] of [
-    ["electric", electricCoupe],
+    ["electric", bmwI4],
     ["petrol", sportsCoupe],
   ] as const)
     test(`keeps the ${name} car straight through a lane change that spins it without`, () => {
@@ -273,34 +273,33 @@ describe("stability control", () => {
     });
 });
 
-describe("electric car", () => {
+describe("bmw i4 edrive40", () => {
   test("settles at rest without creeping", () => {
-    const car = makeCar(electricCoupe);
+    const car = makeCar(bmwI4);
     run(car, 4, () => idle);
     const start = car.position.clone();
     run(car, 4, () => idle);
     expect(car.position.distanceTo(start)).toBeLessThan(0.01);
-    expect(Math.abs(car.position.y - electricCoupe.cgHeight)).toBeLessThan(
-      0.03,
-    );
+    expect(Math.abs(car.position.y - bmwI4.cgHeight)).toBeLessThan(0.03);
   });
 
-  test("accelerates without gears to a motor-limited top speed", () => {
-    const car = makeCar(electricCoupe);
+  test("matches the published acceleration and limited top speed", () => {
+    const car = makeCar(bmwI4);
+    run(car, 2, () => idle);
     const t100 = accelerateTo(car, 100);
     run(car, 60, () => ({ ...idle, throttle: 1 }));
     console.log(
-      `ev 0-100: ${t100.toFixed(2)} s, top: ${kmh(car).toFixed(0)} km/h, ${car.rpm.toFixed(0)} rpm`,
+      `i4 0-100: ${t100.toFixed(2)} s (BMW: 5.7), top: ${kmh(car).toFixed(1)} km/h (BMW: 190, limited), ${car.rpm.toFixed(0)} rpm`,
     );
     expect(car.gear).toBe(1);
-    expect(t100).toBeGreaterThan(4);
-    expect(t100).toBeLessThan(7);
-    expect(kmh(car)).toBeGreaterThan(200);
-    expect(kmh(car)).toBeLessThan(225);
+    expect(t100).toBeGreaterThan(5.5);
+    expect(t100).toBeLessThan(6.5);
+    expect(kmh(car)).toBeGreaterThan(187);
+    expect(kmh(car)).toBeLessThan(191);
   });
 
   test("lift-off regen slows the car and fades out near standstill", () => {
-    const car = makeCar(electricCoupe);
+    const car = makeCar(bmwI4);
     accelerateTo(car, 100);
     const v0 = car.speed;
     run(car, 1, () => idle);
@@ -313,7 +312,7 @@ describe("electric car", () => {
     );
     run(car, 3, () => idle);
     console.log(
-      `ev regen: ${decel.toFixed(2)} g at 100 km/h, final speed ${car.speed.toFixed(3)} m/s`,
+      `i4 regen: ${decel.toFixed(2)} g at 100 km/h, final speed ${car.speed.toFixed(3)} m/s`,
     );
     expect(decel).toBeGreaterThan(0.1);
     expect(decel).toBeLessThan(0.3);
@@ -322,7 +321,7 @@ describe("electric car", () => {
   });
 
   test("brakes and reverses", () => {
-    const car = makeCar(electricCoupe);
+    const car = makeCar(bmwI4);
     accelerateTo(car, 100);
     const start = car.position.clone();
     run(
@@ -334,7 +333,7 @@ describe("electric car", () => {
     const distance = car.position.distanceTo(start);
     run(car, 4, () => ({ ...idle, brake: 1 }));
     console.log(
-      `ev 100-0: ${distance.toFixed(1)} m, reverse ${kmh(car).toFixed(1)} km/h`,
+      `i4 100-0: ${distance.toFixed(1)} m, reverse ${kmh(car).toFixed(1)} km/h`,
     );
     expect(distance).toBeLessThan(45);
     expect(car.gear).toBe(-1);

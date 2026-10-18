@@ -2,7 +2,7 @@ import * as THREE from "three/webgpu";
 import { CarView } from "./carView";
 import { Input } from "./input";
 import { Car } from "./sim/car";
-import { electricCoupe, sportsCoupe } from "./sim/config";
+import { bmwI4, sportsCoupe } from "./sim/config";
 import { RoadView } from "./roadView";
 import { TerrainView } from "./terrainView";
 import { Landscape } from "./world/landscape";
@@ -60,7 +60,7 @@ let camSide = 0;
 
 // C cycles through these.
 const models = [
-  { config: electricCoupe, paint: 0x2f7fc4 },
+  { config: bmwI4, paint: 0x2f7fc4 },
   { config: sportsCoupe, paint: 0xd2552d },
 ];
 let model = 0;

@@ -59,9 +59,14 @@ export interface CombustionConfig {
 /** Single motor on a fixed reduction; torque-limited at low speed, power-limited above. */
 export interface ElectricConfig {
   type: "electric";
+  /** Constant torque up to torqueRpm, then rising power to maxPower at powerRpm, then constant power. */
   maxTorque: number;
+  torqueRpm: number;
   maxPower: number;
+  powerRpm: number;
   maxRpm: number;
+  /** Electronic top speed limit (m/s). */
+  speedLimit: number;
   inertia: number;
   ratio: number;
   efficiency: number;
@@ -236,36 +241,81 @@ export const sportsCoupe: CarConfig = {
 };
 
 /** The same chassis as an electric car: heavier, lower centre of mass, one fixed gear. */
-export const electricCoupe: CarConfig = {
+/**
+ * BMW i4 eDrive40 (G26, 2021-). Published by BMW (press kit technical data): 2125 kg (EU),
+ * 45.1/54.9 % front/rear, 4783 x 1852 x 1448 mm, 2856 mm wheelbase, 1601/1630 mm track,
+ * 125 mm ground clearance, 12.5 m turning circle, Cd 0.24 x 2.31 m^2, 250 kW / 430 Nm
+ * (430 Nm from 0-5000 rpm, peak power 8000-17000 rpm), single-speed 8.774:1, 225/55 R17,
+ * 0-100 km/h 5.7 s, 190 km/h limited.
+ *
+ * Estimated (not published): centre of mass height, inertias, spring/damper/anti-roll rates
+ * (from ~1.4/1.6 Hz ride frequencies), tyre grip, brake torques, regen strength.
+ */
+const I4_WHEELBASE = 2.856;
+const I4_REAR_SHARE = 0.549;
+const i4Axle = {
+  restLength: 0.32,
+  bumpStop: 0.24,
+  wheelRadius: 0.34,
+  wheelInertia: 1.2,
+};
+
+export const bmwI4: CarConfig = {
   ...sportsCoupe,
-  mass: 1650,
-  inertia: [2700, 2950, 640],
-  cgHeight: 0.45,
+  mass: 2125,
+  inertia: [4000, 4300, 850],
+  cgHeight: 0.49,
   front: {
-    ...sportsCoupe.front,
-    springRate: 44000,
-    bumpDamping: 3000,
-    reboundDamping: 4200,
-    antiRoll: 32000,
+    ...i4Axle,
+    z: -I4_WHEELBASE * I4_REAR_SHARE,
+    halfTrack: 1.601 / 2,
+    springRate: 37000,
+    bumpDamping: 2600,
+    reboundDamping: 3800,
+    antiRoll: 36000,
+    brakeTorque: 3200,
+    steered: true,
+    driven: false,
   },
   rear: {
-    ...sportsCoupe.rear,
-    springRate: 48000,
-    bumpDamping: 3000,
-    reboundDamping: 4200,
-    antiRoll: 15000,
+    ...i4Axle,
+    z: I4_WHEELBASE * (1 - I4_REAR_SHARE),
+    halfTrack: 1.63 / 2,
+    springRate: 59000,
+    bumpDamping: 3600,
+    reboundDamping: 5300,
+    antiRoll: 18000,
+    brakeTorque: 1600,
+    steered: false,
+    driven: true,
   },
-  tire: { ...sportsCoupe.tire, nominalLoad: 4000 },
+  tire: {
+    ...sportsCoupe.tire,
+    muX: 1.05,
+    muY: 1.0,
+    nominalLoad: 5000,
+    loadSensitivity: 0.12,
+    rollingResistance: 0.009,
+  },
   powertrain: {
     type: "electric",
-    maxTorque: 440,
+    maxTorque: 430,
+    torqueRpm: 5000,
     maxPower: 250000,
-    maxRpm: 16000,
-    inertia: 0.08,
-    ratio: 9.0,
-    efficiency: 0.95,
-    regenTorque: 150,
-    regenPower: 60000,
+    powerRpm: 8000,
+    maxRpm: 17000,
+    speedLimit: 190 / 3.6,
+    inertia: 0.05,
+    ratio: 8.774,
+    efficiency: 0.97,
+    regenTorque: 200,
+    regenPower: 70000,
   },
-  dragArea: 0.5,
+  dragArea: 0.24 * 2.31,
+  // Centre-of-mass to front axle 1.568 m; the 12.5 m turning circle gives ~31 deg at the centre.
+  steering: { ...sportsCoupe.steering, lock: (31 * Math.PI) / 180 },
+  // Matches the measured understeer gradient of this setup, so ESC stays quiet in normal driving.
+  esc: { ...sportsCoupe.esc, understeerGradient: 0.0007 },
+  // 125 mm clearance up to the 1448 mm roof; ~0.85 m front and ~1.08 m rear overhang.
+  body: { center: [0, 0.297, -0.027], halfExtents: [0.926, 0.662, 2.392] },
 };

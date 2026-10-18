@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import { Quaternion, Vector3 } from "three";
 import { Car } from "../sim/car";
-import { electricCoupe, sportsCoupe, type CarConfig } from "../sim/config";
+import { bmwI4, sportsCoupe, type CarConfig } from "../sim/config";
 import { Landscape } from "./landscape";
 
 const DT = 1 / 480;
@@ -102,7 +102,7 @@ function drive(cfg: CarConfig, seconds: number, targetKmh: number) {
 
 for (const [name, cfg] of [
   ["petrol", sportsCoupe],
-  ["electric", electricCoupe],
+  ["electric", bmwI4],
 ] as const)
   test(`${name} car follows the road over the hills`, () => {
     const r = drive(cfg, 90, 90);
