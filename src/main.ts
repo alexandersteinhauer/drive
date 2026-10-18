@@ -1,4 +1,5 @@
 import * as THREE from "three/webgpu";
+import { RoomEnvironment } from "three/addons/environments/RoomEnvironment.js";
 import { CarView } from "./carView";
 import { Input } from "./input";
 import { Car } from "./sim/car";
@@ -17,6 +18,12 @@ renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
 renderer.setSize(innerWidth, innerHeight);
 renderer.shadowMap.enabled = true;
 document.body.prepend(renderer.domElement);
+await renderer.init();
+// Reflections for the car's paint, chrome and glass.
+const carEnv = new THREE.PMREMGenerator(renderer).fromScene(
+  new RoomEnvironment(),
+  0.04,
+).texture;
 
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(SKY);
@@ -60,13 +67,13 @@ let camSide = 0;
 
 // C cycles through these.
 const models = [
-  { config: bmwI4, paint: 0x2f7fc4 },
-  { config: sportsCoupe, paint: 0xd2552d },
+  { config: bmwI4, paint: 0x2f7fc4, model: "models/bmw-i4.glb" },
+  { config: sportsCoupe, paint: 0xd2552d, model: undefined },
 ];
 let model = 0;
 let car = new Car(models[0]!.config, land);
 placeOnRoad(15);
-let view = new CarView(car, models[0]!.paint);
+let view = makeView(0);
 scene.add(view.root);
 const input = new Input(window);
 const speedEl = document.getElementById("speed")!;
@@ -95,6 +102,15 @@ function placeOnRoad(i: number): void {
   car.reset(at, -h);
 }
 
+function makeView(index: number): CarView {
+  const { paint, model: url } = models[index]!;
+  return new CarView(
+    car,
+    paint,
+    url ? { url: import.meta.env.BASE_URL + url, envMap: carEnv } : undefined,
+  );
+}
+
 function heading(): number {
   fwd.set(0, 0, -1).applyQuaternion(car.orientation);
   return Math.atan2(-fwd.x, -fwd.z);
@@ -102,12 +118,12 @@ function heading(): number {
 
 function switchCar(): void {
   model = (model + 1) % models.length;
-  const { config, paint } = models[model]!;
+  const { config } = models[model]!;
   const next = new Car(config, land);
   next.reset(car.position, heading());
   scene.remove(view.root);
   car = next;
-  view = new CarView(car, paint);
+  view = makeView(model);
   scene.add(view.root);
   if (import.meta.env.DEV) Object.assign(window, { car });
 }

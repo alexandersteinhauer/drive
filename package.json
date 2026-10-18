@@ -10,14 +10,19 @@
     "lint": "oxlint",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
-    "test": "bun test"
+    "test": "bun test",
+    "prepare-car": "bun scripts/prepare-car.ts"
   },
   "dependencies": {
     "three": "^0.186.1"
   },
   "devDependencies": {
+    "@gltf-transform/core": "^4.5.1",
+    "@gltf-transform/extensions": "^4.5.1",
+    "@gltf-transform/functions": "^4.5.1",
     "@types/bun": "^1.4.3",
     "@types/three": "^0.186.0",
+    "meshoptimizer": "^1.3.0",
     "oxlint": "^1.88.0",
     "prettier": "^3.9.10",
     "typescript": "7",
