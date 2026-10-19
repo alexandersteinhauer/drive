@@ -79,25 +79,54 @@ export class TerrainView {
     this.material = terrainMaterial(land.road.edge);
   }
 
-  /** Builds missing tiles nearest-first until `budgetMs` is spent; drops far ones. */
+  /** Tiles wanted around the last focus tile, nearest first, and how many are done. */
+  private wanted: {
+    key: string;
+    tx: number;
+    tz: number;
+    lod: number;
+    dist: number;
+  }[] = [];
+  private done = 0;
+  private scanKey = "";
+
+  /**
+   * Builds missing tiles nearest-first until `budgetMs` is spent; drops far ones. The wanted
+   * set is only recomputed when the focus enters another tile or the road grows (it allocated
+   * ~200 kB a frame when rescanned every frame).
+   */
   update(focus: THREE.Vector3, budgetMs: number): void {
     const start = performance.now();
     const fx = Math.floor(focus.x / TILE);
     const fz = Math.floor(focus.z / TILE);
+    const gate = Math.floor(this.land.road.finalProgress / TILE);
+    const scanKey = `${fx},${fz},${gate}`;
+    if (scanKey !== this.scanKey) {
+      this.scanKey = scanKey;
+      this.rescan(fx, fz);
+    }
+    while (this.done < this.wanted.length) {
+      const w = this.wanted[this.done]!;
+      const existing = this.tiles.get(w.key);
+      if (!existing || existing.lod !== w.lod) {
+        if (performance.now() - start > budgetMs) break;
+        if (existing) this.drop(w.key, existing);
+        this.build(w.key, w.tx, w.tz, w.lod, w.dist);
+      }
+      this.done++;
+    }
+    this.flushBlocks();
+  }
+
+  private rescan(fx: number, fz: number): void {
+    // Distances from the focus tile's centre, so the set only depends on the tile.
+    const cx = (fx + 0.5) * TILE;
+    const cz = (fz + 0.5) * TILE;
     const reach = Math.ceil(RADIUS / TILE);
-    const wanted: {
-      key: string;
-      tx: number;
-      tz: number;
-      lod: number;
-      dist: number;
-    }[] = [];
+    const wanted: typeof this.wanted = [];
     for (let tx = fx - reach; tx <= fx + reach; tx++)
       for (let tz = fz - reach; tz <= fz + reach; tz++) {
-        const dist = Math.hypot(
-          (tx + 0.5) * TILE - focus.x,
-          (tz + 0.5) * TILE - focus.z,
-        );
+        const dist = Math.hypot((tx + 0.5) * TILE - cx, (tz + 0.5) * TILE - cz);
         if (dist > RADIUS) continue;
         // Only build where the road can no longer change: its future lies further along -Z.
         if (-tz * TILE + 64 > this.land.road.finalProgress) continue;
@@ -107,16 +136,9 @@ export class TerrainView {
     const keep = new Set(wanted.map((w) => w.key));
     for (const [key, tile] of this.tiles)
       if (!keep.has(key)) this.drop(key, tile);
-
     wanted.sort((a, b) => a.dist - b.dist);
-    for (const w of wanted) {
-      const existing = this.tiles.get(w.key);
-      if (existing && existing.lod === w.lod) continue;
-      if (performance.now() - start > budgetMs) break;
-      if (existing) this.drop(w.key, existing);
-      this.build(w.key, w.tx, w.tz, w.lod, w.dist);
-    }
-    this.flushBlocks();
+    this.wanted = wanted;
+    this.done = 0;
   }
 
   private drop(key: string, tile: Tile): void {
