@@ -1,20 +1,42 @@
 import * as THREE from "three/webgpu";
 import {
+  attribute,
   cameraPosition,
+  float,
   mix,
   normalWorld,
   pmremTexture,
   positionWorld,
   reflect,
   smoothstep,
+  step,
+  uniform,
   vec3,
 } from "three/tsl";
+import type { Node, UniformNode } from "three/webgpu";
 import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
 import { MeshoptDecoder } from "three/addons/libs/meshopt_decoder.module.js";
 import type { Car } from "./sim/car";
 
 /** Reflected land below the horizon, relative to the sky light there. */
 const GROUND_REFLECTION = vec3(0.1, 0.11, 0.09);
+/** Lamp emission strengths (scene-linear; bloom starts around 1.6). */
+const DRL = 2.5;
+const REVERSE = 2.5;
+const TAIL = 2;
+const BRAKE = 25;
+const LAMP_WHITE = vec3(1, 0.97, 0.92);
+const LAMP_RED = vec3(1, 0.03, 0.01);
+
+/** Emission levels the lamp materials read, set every frame. */
+interface Lamps {
+  /** Tail lamps: always on, full when braking. */
+  tail: UniformNode<"float", number>;
+  /** Brake-only: the third brake light. */
+  brake: UniformNode<"float", number>;
+  reverse: UniformNode<"float", number>;
+}
+
 const CORNERS = ["fl", "fr", "rl", "rr"] as const;
 const normal = new THREE.Vector3();
 const forward = new THREE.Vector3();
@@ -88,6 +110,11 @@ export class CarView {
   private readonly contact: THREE.Mesh;
   private readonly wheels: { steer: THREE.Group; spin: THREE.Group }[] = [];
   private readonly envMaterials: THREE.MeshStandardMaterial[] = [];
+  private readonly lamps: Lamps = {
+    tail: uniform(TAIL),
+    brake: uniform(0),
+    reverse: uniform(0),
+  };
   /** Boxes shown until (or instead of) a model. */
   private readonly placeholder = new THREE.Group();
 
@@ -175,11 +202,18 @@ export class CarView {
       radius: number;
       wheels: Record<(typeof CORNERS)[number], { center: number[] }>;
     };
+    scene.updateMatrixWorld(true);
     scene.traverse((o) => {
       if (!(o instanceof THREE.Mesh)) return;
       o.castShadow = true;
       o.receiveShadow = true;
-      o.material = upgrade(o.material as THREE.Material, envMap);
+      const name = (o.material as THREE.Material).name;
+      // Lamp parts that share a material, told apart by where they are on the car.
+      if (/DRLs$/.test(name)) mark(o, "front", (p) => (p.z < 0 ? 1 : 0));
+      if (/_Windows$/.test(name)) mark(o, "carPos", (p) => p.toArray(), 3);
+      if (/DarkRed$/.test(name))
+        mark(o, "zone", (p) => (p.y > 1.15 ? 2 : p.y > 0.65 ? 1 : 0));
+      o.material = upgrade(o.material as THREE.Material, this.lamps, envMap);
       const m = o.material as THREE.MeshStandardMaterial;
       if ("envMapIntensity" in m && m.envMap) this.envMaterials.push(m);
     });
@@ -220,6 +254,10 @@ export class CarView {
   /** `alpha` blends between the previous and current physics state. */
   update(alpha: number): void {
     const c = this.car;
+    const braking = c.brake > 0.05 ? 1 : 0;
+    this.lamps.tail.value = TAIL + (BRAKE - TAIL) * braking;
+    this.lamps.brake.value = 0.5 * BRAKE * braking;
+    this.lamps.reverse.value = c.gear < 0 ? REVERSE : 0;
     this.root.position.lerpVectors(c.prevPosition, c.position, alpha);
     this.root.quaternion.slerpQuaternions(
       c.prevOrientation,
@@ -253,12 +291,79 @@ export class CarView {
  * Car paint gets a clear coat (a glossy layer over the base colour) and glass a mirror-smooth
  * surface (the windows tinted); the source materials are plain and read as matte plastic.
  */
+/** Adds a per-vertex float attribute computed from the vertex's position on the car. */
+function mark(
+  mesh: THREE.Mesh,
+  name: string,
+  value: (p: THREE.Vector3) => number | number[],
+  size = 1,
+): void {
+  const pos = mesh.geometry.getAttribute("position");
+  const out = new Float32Array(pos.count * size);
+  const v = new THREE.Vector3();
+  for (let i = 0; i < pos.count; i++)
+    out.set(
+      [
+        value(v.fromBufferAttribute(pos, i).applyMatrix4(mesh.matrixWorld)),
+      ].flat(),
+      i * size,
+    );
+  mesh.geometry.setAttribute(name, new THREE.BufferAttribute(out, size));
+}
+
+/** Emissive version of a lamp material, glowing `color` times `level`. */
+function lamp(
+  material: THREE.MeshStandardMaterial,
+  emissive: Node<"vec3">,
+): THREE.Material {
+  const m = new THREE.MeshStandardNodeMaterial({
+    name: material.name,
+    color: material.color,
+    roughness: 0.3,
+    metalness: 0,
+    side: material.side,
+  });
+  m.emissiveNode = emissive;
+  material.dispose();
+  return m;
+}
+
 function upgrade(
   material: THREE.Material,
+  lamps: Lamps,
   envMap?: THREE.Texture,
 ): THREE.Material {
   if (!(material instanceof THREE.MeshStandardMaterial)) return material;
   if (envMap) material.envMap = envMap;
+  // Daytime running lights at the front; the same material at the rear is the reversing lights.
+  if (/DRLs$/.test(material.name))
+    return lamp(
+      material,
+      LAMP_WHITE.mul(
+        mix(lamps.reverse, float(DRL), attribute<"float">("front", "float")),
+      ),
+    );
+  if (/RedMain$/.test(material.name))
+    return lamp(material, LAMP_RED.mul(lamps.tail));
+  if (/DarkRed$/.test(material.name)) {
+    // Zone 2 is the third brake light, 1 the tail lamp clusters around the light guides
+    // (a faint glow), 0 the unlit bumper lamps.
+    const zone = attribute<"float">("zone", "float");
+    return lamp(
+      material,
+      LAMP_RED.mul(
+        mix(lamps.tail.mul(0.08), lamps.brake, zone.sub(1).clamp()).mul(
+          zone.clamp(),
+        ),
+      ),
+    );
+  }
+  if (/BrakeLightsGlass$/.test(material.name)) {
+    // Clear red lens rather than the source's dark smoked one, which hid the lamps.
+    material.color.setRGB(0.25, 0.01, 0.01);
+    material.opacity = 0.25;
+    material.roughness = 0.05;
+  }
   if (/White|Paint/i.test(material.name)) {
     const paint = new THREE.MeshPhysicalMaterial({
       name: material.name,
@@ -298,6 +403,15 @@ function upgrade(
     glass.envNode = pmremTexture(envMap).mul(
       mix(GROUND_REFLECTION, vec3(1), smoothstep(-0.04, 0.06, reflected.y)),
     );
+    // The third brake light sits behind the rear window, where the opaque glass would hide
+    // it; the glass glows over it instead (the light strip spans |x| < 0.18 m, y 1.314-1.331 m).
+    const p = attribute<"vec3">("carPos", "vec3");
+    // A thin band just above the strip's own height, since the glass slopes back over it.
+    const strip = smoothstep(0.205, 0.195, p.x.abs())
+      .mul(smoothstep(1.325, 1.327, p.y))
+      .mul(smoothstep(1.335, 1.333, p.y))
+      .mul(step(1.3, p.z));
+    glass.emissiveNode = LAMP_RED.mul(lamps.brake).mul(strip);
     // Reflections stronger than physical: without screen-space reflections the sky
     // reflection alone reads as flat black.
     glass.userData.envScale = 3;

@@ -122,6 +122,8 @@ export class Car {
   /** True while stability control is intervening. */
   escActive = false;
   private throttle = 0;
+  /** Service brake pedal after reverse handling, 0..1 (for the brake lights). */
+  brake = 0;
 
   constructor(
     readonly cfg: CarConfig,
@@ -200,6 +202,7 @@ export class Car {
 
     const { throttle, brake } = this.selectDirection(dt, input);
     this.throttle = throttle;
+    this.brake = brake;
     this.updateSteering(input.steer);
 
     this.force.set(0, -cfg.mass * GRAVITY, 0);
