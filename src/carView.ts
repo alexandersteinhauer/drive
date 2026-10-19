@@ -2,7 +2,6 @@ import * as THREE from "three/webgpu";
 import {
   attribute,
   cameraPosition,
-  float,
   mix,
   normalWorld,
   pmremTexture,
@@ -23,6 +22,8 @@ const GROUND_REFLECTION = vec3(0.1, 0.11, 0.09);
 /** Lamp emission strengths (scene-linear; bloom starts around 1.6). */
 const DRL = 2.5;
 const REVERSE = 2.5;
+/** Headlight intensity (candela-like), per lamp. */
+const HEADLIGHT = 600;
 const TAIL = 2;
 const BRAKE = 25;
 const LAMP_WHITE = vec3(1, 0.97, 0.92);
@@ -30,6 +31,8 @@ const LAMP_RED = vec3(1, 0.03, 0.01);
 
 /** Emission levels the lamp materials read, set every frame. */
 interface Lamps {
+  /** Front lamps: daytime running lights, brighter as headlights at night. */
+  front: UniformNode<"float", number>;
   /** Tail lamps: always on, full when braking. */
   tail: UniformNode<"float", number>;
   /** Brake-only: the third brake light. */
@@ -111,12 +114,15 @@ export class CarView {
   private readonly wheels: { steer: THREE.Group; spin: THREE.Group }[] = [];
   private readonly envMaterials: THREE.MeshStandardMaterial[] = [];
   private readonly lamps: Lamps = {
+    front: uniform(DRL),
     tail: uniform(TAIL),
     brake: uniform(0),
     reverse: uniform(0),
   };
   /** Boxes shown until (or instead of) a model. */
   private readonly placeholder = new THREE.Group();
+  /** Low beams, lit at dusk and night. No shadows, to stay cheap. */
+  private readonly headlights: THREE.SpotLight[] = [];
 
   constructor(
     private readonly car: Car,
@@ -127,6 +133,16 @@ export class CarView {
     this.root.add(this.placeholder);
     this.contact = contactShadow(car);
     this.group.add(this.root, this.contact);
+    // Lamp positions in the model (axle-midpoint origin), moved to centre-of-mass coordinates.
+    const mid = (car.cfg.front.z + car.cfg.rear.z) / 2;
+    for (const x of [-0.7, 0.7]) {
+      const light = new THREE.SpotLight(0xfff4e6, 0, 140, Math.PI / 7, 0.6, 2);
+      light.position.set(x, 0.72 - car.cfg.cgHeight, -2.05 + mid);
+      // Aimed slightly down, to meet the road about 40 m ahead.
+      light.target.position.set(x * 2, -car.cfg.cgHeight, -40 + mid);
+      this.root.add(light, light.target);
+      this.headlights.push(light);
+    }
     // Proportions follow the collision box, so each car's placeholder matches its size.
     const [, cy, cz] = car.cfg.body.center;
     const [hx, hy, hz] = car.cfg.body.halfExtents;
@@ -245,6 +261,13 @@ export class CarView {
     });
   }
 
+  /** Headlights and lamp glow for how dark it is (0 day .. 1 night). */
+  setHeadlights(darkness: number): void {
+    const on = THREE.MathUtils.smoothstep(darkness, 0.05, 0.35);
+    for (const light of this.headlights) light.intensity = HEADLIGHT * on;
+    this.lamps.front.value = DRL * (1 + 1.5 * on);
+  }
+
   /** Strength of the sky light and reflections on the car's materials. */
   setEnvironmentIntensity(value: number): void {
     for (const m of this.envMaterials)
@@ -340,7 +363,7 @@ function upgrade(
     return lamp(
       material,
       LAMP_WHITE.mul(
-        mix(lamps.reverse, float(DRL), attribute<"float">("front", "float")),
+        mix(lamps.reverse, lamps.front, attribute<"float">("front", "float")),
       ),
     );
   if (/RedMain$/.test(material.name))

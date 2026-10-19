@@ -33,7 +33,10 @@ renderer.setSize(innerWidth, innerHeight);
 renderer.shadowMap.enabled = true;
 // Khronos PBR Neutral keeps colours true (AgX/ACES desaturate this scene into a milky look).
 renderer.toneMapping = THREE.NeutralToneMapping;
-renderer.toneMappingExposure = 0.65;
+const EXPOSURE = 0.65;
+/** Hours of game time per second while [ or ] is held. */
+const TIME_RATE = 2;
+renderer.toneMappingExposure = EXPOSURE;
 document.body.prepend(renderer.domElement);
 await renderer.init();
 
@@ -45,8 +48,7 @@ const camera = new THREE.PerspectiveCamera(
   2500,
 );
 const atmosphere = new Atmosphere(renderer, scene, {
-  elevation: 24,
-  azimuth: 60,
+  time: Number(localStorage.getItem("time") ?? 17) || 17,
   // Roughly a 2-2.5x lit/shadow contrast after tone mapping, as on a clear afternoon.
   sunLight: 7,
   skyLight: 0.22,
@@ -108,6 +110,7 @@ if (import.meta.env.DEV)
     setPost,
     pause: (on: boolean) => (paused = on),
     atmosphere,
+    setTime: (hours: number) => atmosphere.setTime(hours),
   });
 
 /** Puts the car at rest in the right-hand lane at road sample `i`, facing along the road. */
@@ -165,6 +168,15 @@ function frame(now: number): void {
   if (input.take("KeyR"))
     placeOnRoad(land.road.nearestIndex(car.position.x, car.position.z));
   if (input.take("KeyC")) switchCar();
+  // Hold [ / ] to turn time back / forward, two hours per second.
+  const timeStep =
+    (input.held("BracketRight") ? 1 : 0) - (input.held("BracketLeft") ? 1 : 0);
+  if (timeStep) {
+    atmosphere.setTime(atmosphere.time + timeStep * TIME_RATE * dt);
+    localStorage.setItem("time", atmosphere.time.toFixed(2));
+  }
+  renderer.toneMappingExposure = EXPOSURE * atmosphere.exposure;
+  view.setHeadlights(atmosphere.darkness);
   accumulator += dt;
   if (paused) accumulator = 0;
   while (accumulator >= DT) {
