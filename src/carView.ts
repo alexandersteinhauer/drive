@@ -1,8 +1,20 @@
 import * as THREE from "three/webgpu";
+import {
+  cameraPosition,
+  mix,
+  normalWorld,
+  pmremTexture,
+  positionWorld,
+  reflect,
+  smoothstep,
+  vec3,
+} from "three/tsl";
 import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
 import { MeshoptDecoder } from "three/addons/libs/meshopt_decoder.module.js";
 import type { Car } from "./sim/car";
 
+/** Reflected land below the horizon, relative to the sky light there. */
+const GROUND_REFLECTION = vec3(0.1, 0.11, 0.09);
 const CORNERS = ["fl", "fr", "rl", "rr"] as const;
 const normal = new THREE.Vector3();
 const forward = new THREE.Vector3();
@@ -168,8 +180,8 @@ export class CarView {
       o.castShadow = true;
       o.receiveShadow = true;
       o.material = upgrade(o.material as THREE.Material, envMap);
-      if (o.material instanceof THREE.MeshStandardMaterial && o.material.envMap)
-        this.envMaterials.push(o.material);
+      const m = o.material as THREE.MeshStandardMaterial;
+      if ("envMapIntensity" in m && m.envMap) this.envMaterials.push(m);
     });
     // Nodes carry their own (dequantization) transforms, so each is wrapped rather than moved.
     const cfg = this.car.cfg;
@@ -201,7 +213,8 @@ export class CarView {
 
   /** Strength of the sky light and reflections on the car's materials. */
   setEnvironmentIntensity(value: number): void {
-    for (const m of this.envMaterials) m.envMapIntensity = value;
+    for (const m of this.envMaterials)
+      m.envMapIntensity = value * ((m.userData.envScale as number) ?? 1);
   }
 
   /** `alpha` blends between the previous and current physics state. */
@@ -238,7 +251,7 @@ export class CarView {
 
 /**
  * Car paint gets a clear coat (a glossy layer over the base colour) and glass a mirror-smooth
- * surface; the source materials are plain and read as matte plastic.
+ * surface (the windows tinted); the source materials are plain and read as matte plastic.
  */
 function upgrade(
   material: THREE.Material,
@@ -261,7 +274,37 @@ function upgrade(
     material.dispose();
     return paint;
   }
-  if (/Glass|Windows/i.test(material.name)) {
+  if (envMap && /_Windows$/i.test(material.name)) {
+    // Dark tinted privacy glass, opaque since there is no interior to see. A second glossy
+    // layer stands in for the pane's back surface.
+    const glass = new THREE.MeshPhysicalNodeMaterial({
+      name: material.name,
+      color: new THREE.Color(0.006, 0.008, 0.01),
+      roughness: 0,
+      metalness: 0,
+      ior: 1.52,
+      clearcoat: 1,
+      clearcoatRoughness: 0,
+      side: material.side,
+      envMap,
+      envMapIntensity: material.envMapIntensity,
+    });
+    // The sky light has no ground in it, so below the horizon the reflection would show sky
+    // and read milky; darken it to the land's tone instead.
+    const reflected = reflect(
+      positionWorld.sub(cameraPosition).normalize(),
+      normalWorld,
+    );
+    glass.envNode = pmremTexture(envMap).mul(
+      mix(GROUND_REFLECTION, vec3(1), smoothstep(-0.04, 0.06, reflected.y)),
+    );
+    // Reflections stronger than physical: without screen-space reflections the sky
+    // reflection alone reads as flat black.
+    glass.userData.envScale = 3;
+    material.dispose();
+    return glass;
+  }
+  if (/Glass|_Windows$/i.test(material.name)) {
     material.roughness = 0.02;
     material.metalness = 0;
   }
