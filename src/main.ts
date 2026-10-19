@@ -1,5 +1,6 @@
 import * as THREE from "three/webgpu";
-import { RoomEnvironment } from "three/addons/environments/RoomEnvironment.js";
+import { Atmosphere } from "./atmosphere";
+import { createPipeline } from "./post";
 import { CarView } from "./carView";
 import { Input } from "./input";
 import { Car } from "./sim/car";
@@ -9,45 +10,41 @@ import { TerrainView } from "./terrainView";
 import { Landscape } from "./world/landscape";
 
 const DT = 1 / 480;
-const SKY = 0xb4cde6;
 /** How far ahead (along -Z) the road is generated beyond the car; must exceed the view radius. */
 const ROAD_AHEAD = 1800;
 
-const renderer = new THREE.WebGPURenderer({ antialias: true });
+// Anti-aliasing happens in post-processing (SMAA), so the canvas itself needs no MSAA.
+const renderer = new THREE.WebGPURenderer({ antialias: false });
 renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
 renderer.setSize(innerWidth, innerHeight);
 renderer.shadowMap.enabled = true;
+// Khronos PBR Neutral keeps colours true (AgX/ACES desaturate this scene into a milky look).
+renderer.toneMapping = THREE.NeutralToneMapping;
+renderer.toneMappingExposure = 0.65;
 document.body.prepend(renderer.domElement);
 await renderer.init();
-// Reflections for the car's paint, chrome and glass.
-const carEnv = new THREE.PMREMGenerator(renderer).fromScene(
-  new RoomEnvironment(),
-  0.04,
-).texture;
 
 const scene = new THREE.Scene();
-scene.background = new THREE.Color(SKY);
-scene.fog = new THREE.Fog(SKY, 300, 1300);
 const camera = new THREE.PerspectiveCamera(
   60,
   innerWidth / innerHeight,
   0.1,
   2500,
 );
-
-scene.add(new THREE.HemisphereLight(0xdfeaff, 0x4d5a3a, 1.2));
-const sun = new THREE.DirectionalLight(0xffffff, 2.2);
-sun.castShadow = true;
-sun.shadow.mapSize.set(2048, 2048);
-Object.assign(sun.shadow.camera, {
-  left: -25,
-  right: 25,
-  top: 25,
-  bottom: -25,
-  near: 1,
-  far: 150,
+const atmosphere = new Atmosphere(renderer, scene, {
+  elevation: 24,
+  azimuth: 60,
+  // Roughly a 2-2.5x lit/shadow contrast after tone mapping, as on a clear afternoon.
+  sunLight: 7,
+  skyLight: 0.15,
+  hazeHalfDistance: 700,
+  farDistance: 1350,
 });
-scene.add(sun, sun.target);
+let pipeline = createPipeline(renderer, scene, camera);
+/** Dev hook: rebuild the post-processing chain without some stages. */
+function setPost(skip: Parameters<typeof createPipeline>[3]): void {
+  pipeline = createPipeline(renderer, scene, camera, skip);
+}
 
 const land = new Landscape();
 land.road.ensure(ROAD_AHEAD);
@@ -74,7 +71,7 @@ let model = 0;
 let car = new Car(models[0]!.config, land);
 placeOnRoad(15);
 let view = makeView(0);
-scene.add(view.root);
+scene.add(view.group);
 const input = new Input(window);
 const speedEl = document.getElementById("speed")!;
 if (import.meta.env.DEV)
@@ -87,6 +84,12 @@ if (import.meta.env.DEV)
     renderer,
     camera,
     scene,
+    get pipeline() {
+      return pipeline;
+    },
+    setPost,
+    pause: (on: boolean) => (paused = on),
+    atmosphere,
   });
 
 /** Puts the car at rest in the right-hand lane at road sample `i`, facing along the road. */
@@ -108,7 +111,9 @@ function makeView(index: number): CarView {
   return new CarView(
     car,
     paint,
-    url ? { url: import.meta.env.BASE_URL + url, envMap: carEnv } : undefined,
+    url
+      ? { url: import.meta.env.BASE_URL + url, envMap: atmosphere.environment }
+      : undefined,
   );
 }
 
@@ -122,13 +127,15 @@ function switchCar(): void {
   const { config } = models[model]!;
   const next = new Car(config, land);
   next.reset(car.position, heading());
-  scene.remove(view.root);
+  scene.remove(view.group);
   car = next;
   view = makeView(model);
-  scene.add(view.root);
+  scene.add(view.group);
   if (import.meta.env.DEV) Object.assign(window, { car });
 }
 
+/** Dev hook: freeze physics (for reproducible captures). */
+let paused = false;
 let last = performance.now();
 let accumulator = 0;
 let shownSpeed = -1;
@@ -141,6 +148,7 @@ function frame(now: number): void {
     placeOnRoad(land.road.nearestIndex(car.position.x, car.position.z));
   if (input.take("KeyC")) switchCar();
   accumulator += dt;
+  if (paused) accumulator = 0;
   while (accumulator >= DT) {
     car.step(DT, controls);
     accumulator -= DT;
@@ -178,13 +186,12 @@ function frame(now: number): void {
   land.road.ensure(-pos.z + ROAD_AHEAD);
   terrain.update(pos, 4);
   roadView.update(pos);
-  sun.position.set(pos.x + 40, pos.y + 70, pos.z + 25);
-  sun.target.position.copy(pos);
+  atmosphere.update(camera);
 
   const kmh = Math.round(Math.abs(car.speed) * 3.6);
   if (kmh !== shownSpeed) speedEl.textContent = String((shownSpeed = kmh));
 
-  renderer.render(scene, camera);
+  pipeline.render();
 }
 
 addEventListener("resize", () => {

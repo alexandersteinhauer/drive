@@ -202,6 +202,7 @@ export class TerrainView {
     geo.setIndex(index);
     const mesh = new THREE.Mesh(geo, this.material);
     mesh.receiveShadow = true;
+    mesh.castShadow = true;
     this.group.add(mesh);
     const tile: Tile = { key, lod, mesh };
     if (dist <= TREES_WITHIN) tile.trees = this.plantTrees(tx, tz);
