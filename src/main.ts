@@ -12,7 +12,7 @@ if (import.meta.env.DEV) {
     };
   }
 }
-import { Atmosphere } from "./atmosphere";
+import { Atmosphere, skyGain, skySaturation } from "./atmosphere";
 import { createPipeline } from "./post";
 import { CarView } from "./carView";
 import { Input } from "./input";
@@ -110,6 +110,8 @@ if (import.meta.env.DEV)
     setPost,
     pause: (on: boolean) => (paused = on),
     atmosphere,
+    skySaturation,
+    skyGain,
     setTime: (hours: number) => atmosphere.setTime(hours),
   });
 

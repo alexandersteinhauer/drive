@@ -233,6 +233,9 @@ export class Atmosphere {
     this.fill.intensity =
       o.fillLight *
       Math.max(0.04, THREE.MathUtils.smoothstep(elevation, -8, 12));
+    const grade = THREE.MathUtils.smoothstep(elevation, 2, 20);
+    skyGain.value = THREE.MathUtils.lerp(1, SKY_GAIN, grade);
+    skySaturation.value = THREE.MathUtils.lerp(1, SKY_SATURATION, grade);
     this.night.value = 1 - THREE.MathUtils.smoothstep(elevation, -12, 0);
     this.twilight.value =
       THREE.MathUtils.smoothstep(elevation, -15, -5) *
@@ -295,6 +298,17 @@ const MOONLIGHT = 0.2;
 /** Ambient light on level ground in daylight, in sun-intensity units. */
 const AMBIENT = 1;
 
+/**
+ * Sky grade. As modelled, the sky is so bright that tone mapping clips its blue and pales
+ * it towards white; dimmed and a little more saturated it reads as a clear, deep blue. The
+ * sky light that lights the land is dimmed with it, which keeps the land's shadows rich.
+ * Towards sunset the sky is no longer that bright, so the grade fades out.
+ */
+export const skySaturation = uniform(1.3);
+export const skyGain = uniform(0.35);
+const SKY_SATURATION = 1.3;
+const SKY_GAIN = 0.35;
+
 function configureSky(
   sky: SkyMesh,
   night: UniformNode<"float", number>,
@@ -319,9 +333,11 @@ function configureSky(
   )
     .mul(exp(up.mul(-5)))
     .mul(twilight);
+  const luma = day.rgb.dot(vec3(0.2126, 0.7152, 0.0722));
+  const graded = mix(vec3(luma), day.rgb, skySaturation).max(0).mul(skyGain);
   material.colorNode = vec4(
     mix(
-      day.rgb,
+      graded,
       day.rgb
         .mul(vec3(0.3, 0.4, 0.8))
         .add(dark)
