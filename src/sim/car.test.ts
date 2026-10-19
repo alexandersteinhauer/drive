@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { Vector3 } from "three";
 import { Car, type CarInput } from "./car";
 import { bmwI4, sportsCoupe, type CarConfig } from "./config";
-import { FlatGround } from "./ground";
+import { FlatGround, type RayHit } from "./ground";
 
 const DT = 1 / 480;
 const idle: CarInput = { throttle: 0, brake: 0, steer: 0, handbrake: 0 };
@@ -29,6 +29,23 @@ function run(
     if (until?.(t)) break;
   }
   return t;
+}
+
+/** Flat ground with a different surface grip, like grass. */
+class SlipperyGround extends FlatGround {
+  constructor(readonly grip: number) {
+    super();
+  }
+  override raycast(
+    origin: Vector3,
+    dir: Vector3,
+    maxDistance: number,
+    out: RayHit,
+  ): boolean {
+    const hit = super.raycast(origin, dir, maxDistance, out);
+    out.grip = this.grip;
+    return hit;
+  }
 }
 
 const kmh = (car: Car) => car.speed * 3.6;
@@ -298,6 +315,43 @@ describe("stability control", () => {
     console.log(`esc weave: ${speed.toFixed(0)} km/h after 10 s`);
     expect(speed).toBeGreaterThan(50);
   });
+});
+
+/** Seconds to 20 km/h from a standstill at full throttle, steering held at `steer`. */
+function launch(tcs: boolean, grip: number, steer: number): number {
+  const cfg = structuredClone(bmwI4);
+  cfg.tcs = tcs;
+  const car = new Car(cfg, new SlipperyGround(grip));
+  run(car, 2, () => ({ ...idle, handbrake: 1 }));
+  let s = 0;
+  return run(
+    car,
+    10,
+    () => {
+      s = Math.min(steer, s + 3.5 * DT);
+      return { ...idle, throttle: 1, steer: s };
+    },
+    () => kmh(car) >= 20,
+  );
+}
+
+describe("traction control", () => {
+  // Full lock on grass is left out: it is grip-limited below 20 km/h.
+  for (const [surface, grip, steer] of [
+    ["asphalt", 1, 0],
+    ["asphalt", 1, 0.5],
+    ["asphalt", 1, 1],
+    ["grass", 0.6, 0],
+    ["grass", 0.6, 0.5],
+  ] as const)
+    test(`does not slow a launch on ${surface} with steering ${steer}`, () => {
+      const on = launch(true, grip, steer);
+      const off = launch(false, grip, steer);
+      console.log(
+        `tcs launch ${surface} steer ${steer}: 0-20 km/h in ${on.toFixed(2)} s vs ${off.toFixed(2)} s without`,
+      );
+      expect(on).toBeLessThan(off * 1.05);
+    });
 });
 
 describe("bmw i4 edrive40", () => {

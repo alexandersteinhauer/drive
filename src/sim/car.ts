@@ -34,6 +34,8 @@ export class Wheel {
   driveTorque = 0;
   /** Extra brake torque requested by stability control. */
   escTorque = 0;
+  /** Brake torque requested by traction control on a wheel that spins more than the other. */
+  tcsTorque = 0;
   /** ABS brake pressure multiplier, 0..1. */
   absPressure = 1;
   /** Contact patch speed along the wheel heading (m/s). */
@@ -55,10 +57,18 @@ export class Wheel {
     this.length = this.axle.restLength;
     this.compression = this.load = this.omega = this.driveTorque = 0;
     this.absPressure = 1;
-    this.escTorque = 0;
+    this.escTorque = this.tcsTorque = 0;
     this.vx = 0;
   }
 }
+
+/** Traction control: slip allowance as a multiple of the tires' peak slip, and at least TCS_MIN_SLIP m/s. */
+const TCS_SLIP = 1.3;
+const TCS_MIN_SLIP = 1;
+/** A wheel spinning this much (m/s, plus the peak slip) faster than the other is braked, by this gain (N m per m/s), capped. */
+const TCS_SPIN_MARGIN = 0.5;
+const TCS_BRAKE_GAIN = 800;
+const TCS_BRAKE_MAX = 2000;
 
 // Scratch vectors, reused every step to avoid allocation.
 const up = new Vector3();
@@ -364,12 +374,8 @@ export class Car {
 
   private updateDrivetrain(dt: number, throttle: number): void {
     const driven = this.wheels.filter((w) => w.axle.driven);
-    if (this.cfg.tcs) {
-      const spin = Math.max(...driven.map((w) => (w.contact ? w.tire.kx : 0)));
-      const slipping = spin > 1.5 * this.cfg.tire.peakSlipX && this.speed > -1;
-      this.tcsFactor = clamp(this.tcsFactor + (slipping ? -8 : 4) * dt, 0, 1);
-      throttle *= this.tcsFactor;
-    }
+    if (this.cfg.tcs) throttle *= this.updateTraction(driven, dt);
+    else for (const w of driven) w.tcsTorque = 0;
     if (this.escCut < 1) {
       throttle *= this.escCut;
     }
@@ -382,6 +388,42 @@ export class Car {
   }
 
   /** Returns the total torque at the driven wheels. The motor is rigidly geared to them. */
+  /**
+   * Traction control, in two parts like production systems. A driven wheel spinning faster
+   * than the other (an unloaded wheel on an open differential) is braked, which sends drive
+   * across the differential to the wheel with grip. Drive torque is only reduced when both
+   * wheels slip, regulating the lesser slip around the tires' peak; at low speed slip is
+   * judged in m/s, since the slip ratio is meaningless near standstill. Returns the drive
+   * torque factor.
+   */
+  private updateTraction(driven: Wheel[], dt: number): number {
+    const v = Math.abs(this.speed);
+    const peak = this.cfg.tire.peakSlipX;
+    const wheelSpeed = (w: Wheel) => w.omega * w.axle.wheelRadius;
+    driven.forEach((w) => {
+      const other = Math.min(...driven.filter((o) => o !== w).map(wheelSpeed));
+      const excess =
+        wheelSpeed(w) - other - TCS_SPIN_MARGIN - peak * Math.max(v, other);
+      w.tcsTorque =
+        driven.length > 1
+          ? clamp(TCS_BRAKE_GAIN * excess, 0, TCS_BRAKE_MAX)
+          : 0;
+    });
+    // Slip speed of the wheel slipping least, against the allowance.
+    const slip = Math.min(
+      ...driven.map((w) => wheelSpeed(w) - (w.contact ? w.vx : this.speed)),
+    );
+    const allowed = Math.max(TCS_SLIP * peak * v, TCS_MIN_SLIP);
+    const error = (slip - allowed) / allowed;
+    this.tcsFactor = clamp(
+      this.tcsFactor -
+        dt * (error > 0 ? 5 * Math.min(error, 1.5) : 3 * Math.max(error, -1)),
+      0,
+      1,
+    );
+    return this.tcsFactor;
+  }
+
   private electricTorque(driven: Wheel[], throttle: number): number {
     const m = this.cfg.powertrain as Extract<
       CarConfig["powertrain"],
@@ -522,6 +564,7 @@ export class Car {
     this.updateAbs(w, dt, brake);
     let friction =
       (a.brakeTorque * brake + w.escTorque) * w.absPressure +
+      w.tcsTorque +
       this.cfg.tire.rollingResistance * w.load * a.wheelRadius;
     if (!a.steered) friction += this.cfg.handbrakeTorque * handbrake;
     const dw = (friction * dt) / inertia;
