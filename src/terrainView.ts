@@ -17,11 +17,29 @@ const SKIRT = 6;
 /** Terrain under the road is pushed down so it never pokes through the road mesh. */
 const UNDER_ROAD = 0.3;
 
+/**
+ * Trees are pooled per block of BLOCK x BLOCK tiles, one instanced mesh each for trunks and
+ * crowns. Per-tile meshes were small enough for three.js to put their matrices in a uniform
+ * array baked into the shader, so every new tile compiled new shaders (hitches); a block's
+ * capacity is above that limit, so all blocks share one shader, with far fewer draw calls.
+ */
+const BLOCK = 4;
+/** Trees per tile at most (one per grid cell), and so per block. */
+const TREE_GRID = 16;
+const BLOCK_TREES = BLOCK * BLOCK * TREE_GRID * TREE_GRID;
+
 interface Tile {
   key: string;
   lod: number;
   mesh: THREE.Mesh;
-  trees?: THREE.InstancedMesh[];
+  /** Packed tree matrices (16 floats each), if the tile has trees. */
+  trees?: Float32Array;
+}
+
+interface Block {
+  meshes: THREE.InstancedMesh[];
+  tiles: Map<string, Float32Array>;
+  dirty: boolean;
 }
 
 const sample: LandSample = {
@@ -34,6 +52,7 @@ const sample: LandSample = {
 export class TerrainView {
   readonly group = new THREE.Group();
   private readonly tiles = new Map<string, Tile>();
+  private readonly blocks = new Map<string, Block>();
   private readonly material: THREE.Material;
   private readonly trunkGeo = new THREE.CylinderGeometry(
     0.18,
@@ -97,14 +116,15 @@ export class TerrainView {
       if (existing) this.drop(w.key, existing);
       this.build(w.key, w.tx, w.tz, w.lod, w.dist);
     }
+    this.flushBlocks();
   }
 
   private drop(key: string, tile: Tile): void {
     this.group.remove(tile.mesh);
     tile.mesh.geometry.dispose();
-    for (const t of tile.trees ?? []) {
-      this.group.remove(t);
-      t.dispose();
+    if (tile.trees) {
+      const block = this.blocks.get(blockKey(key));
+      if (block?.tiles.delete(key)) block.dirty = true;
     }
     this.tiles.delete(key);
   }
@@ -202,14 +222,73 @@ export class TerrainView {
     mesh.castShadow = true;
     this.group.add(mesh);
     const tile: Tile = { key, lod, mesh };
-    if (dist <= TREES_WITHIN) tile.trees = this.plantTrees(tx, tz);
+    if (dist <= TREES_WITHIN) {
+      const trees = this.plantTrees(tx, tz);
+      if (trees.length) {
+        tile.trees = trees;
+        const block = this.block(blockKey(key));
+        block.tiles.set(key, trees);
+        block.dirty = true;
+      }
+    }
     this.tiles.set(key, tile);
   }
 
-  private plantTrees(tx: number, tz: number): THREE.InstancedMesh[] {
-    const spacing = 8;
-    const per = TILE / spacing;
-    const matrices: THREE.Matrix4[] = [];
+  private block(key: string): Block {
+    let block = this.blocks.get(key);
+    if (!block) {
+      const meshes = [
+        [this.trunkGeo, this.trunkMat],
+        [this.crownGeo, this.crownMat],
+      ].map(([geo, mat]) => {
+        const inst = new THREE.InstancedMesh(
+          geo as THREE.BufferGeometry,
+          mat as THREE.Material,
+          BLOCK_TREES,
+        );
+        inst.count = 0;
+        inst.castShadow = true;
+        this.group.add(inst);
+        return inst;
+      });
+      block = { meshes, tiles: new Map(), dirty: true };
+      this.blocks.set(key, block);
+    }
+    return block;
+  }
+
+  /** Copies the tree matrices of changed blocks into their meshes; removes empty blocks. */
+  private flushBlocks(): void {
+    for (const [key, block] of this.blocks) {
+      if (!block.dirty) continue;
+      block.dirty = false;
+      if (block.tiles.size === 0) {
+        for (const m of block.meshes) {
+          this.group.remove(m);
+          m.dispose();
+        }
+        this.blocks.delete(key);
+        continue;
+      }
+      for (const m of block.meshes) {
+        const array = m.instanceMatrix.array as Float32Array;
+        let offset = 0;
+        for (const trees of block.tiles.values()) {
+          array.set(trees, offset);
+          offset += trees.length;
+        }
+        m.count = offset / 16;
+        m.instanceMatrix.needsUpdate = true;
+        m.computeBoundingSphere();
+      }
+    }
+  }
+
+  /** Tree matrices for a tile, packed 16 floats each. */
+  private plantTrees(tx: number, tz: number): Float32Array {
+    const spacing = TILE / TREE_GRID;
+    const per = TREE_GRID;
+    const out: number[] = [];
     const m = new THREE.Matrix4();
     const q = new THREE.Quaternion();
     const s = new THREE.Vector3();
@@ -235,24 +314,16 @@ export class TerrainView {
         const size = 0.7 + hash2(gx, gz, 14) * 0.7;
         q.setFromAxisAngle(up, hash2(gx, gz, 15) * Math.PI * 2);
         m.compose(p.set(x, sample.height - 0.2, z), q, s.setScalar(size));
-        matrices.push(m.clone());
+        out.push(...m.elements);
       }
-    if (matrices.length === 0) return [];
-    return [
-      [this.trunkGeo, this.trunkMat],
-      [this.crownGeo, this.crownMat],
-    ].map(([geo, mat]) => {
-      const inst = new THREE.InstancedMesh(
-        geo as THREE.BufferGeometry,
-        mat as THREE.Material,
-        matrices.length,
-      );
-      matrices.forEach((mm, k) => inst.setMatrixAt(k, mm));
-      inst.castShadow = true;
-      this.group.add(inst);
-      return inst;
-    });
+    return new Float32Array(out);
   }
+}
+
+/** Key of the tree block holding tile "tx,tz". */
+function blockKey(tileKey: string): string {
+  const [tx, tz] = tileKey.split(",").map(Number) as [number, number];
+  return `${Math.floor(tx / BLOCK)},${Math.floor(tz / BLOCK)}`;
 }
 
 /** Large dry/green patches across the meadows (0 = lush, 1 = dry), plus a little noise. */
