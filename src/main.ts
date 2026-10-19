@@ -73,6 +73,10 @@ const desired = new THREE.Vector3();
 const orbit = new THREE.Vector3();
 const camOffset = new THREE.Vector3(0, 2.2, 6.5);
 const UP = new THREE.Vector3(0, 1, 0);
+/** Car sky-light/reflection strength in full sun. */
+const CAR_REFLECTIONS = 0.7;
+/** How much sun reaches the car (smoothed). */
+let carSun = 1;
 /** -1 left view, 0 behind, +1 right view (smoothed). */
 let camSide = 0;
 
@@ -201,6 +205,15 @@ function frame(now: number): void {
   terrain.update(pos, 4);
   roadView.update(pos);
   atmosphere.update(camera);
+  // The car's sky light/reflections: strong in sunlight (sparkly paint), but down to the
+  // terrain's level in a hill's shadow, where it otherwise glows against its surroundings.
+  const sunlit = atmosphere.sunVisibility(car.position, (x, z) =>
+    land.height(x, z),
+  );
+  carSun += (sunlit - carSun) * (1 - Math.exp(-4 * dt));
+  view.setEnvironmentIntensity(
+    THREE.MathUtils.lerp(scene.environmentIntensity, CAR_REFLECTIONS, carSun),
+  );
 
   const kmh = Math.round(Math.abs(car.speed) * 3.6);
   if (kmh !== shownSpeed) speedEl.textContent = String((shownSpeed = kmh));

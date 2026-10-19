@@ -75,6 +75,7 @@ export class CarView {
    */
   private readonly contact: THREE.Mesh;
   private readonly wheels: { steer: THREE.Group; spin: THREE.Group }[] = [];
+  private readonly envMaterials: THREE.MeshStandardMaterial[] = [];
   /** Boxes shown until (or instead of) a model. */
   private readonly placeholder = new THREE.Group();
 
@@ -167,6 +168,8 @@ export class CarView {
       o.castShadow = true;
       o.receiveShadow = true;
       o.material = upgrade(o.material as THREE.Material, envMap);
+      if (o.material instanceof THREE.MeshStandardMaterial && o.material.envMap)
+        this.envMaterials.push(o.material);
     });
     // Nodes carry their own (dequantization) transforms, so each is wrapped rather than moved.
     const cfg = this.car.cfg;
@@ -194,6 +197,11 @@ export class CarView {
         parent.add(holder);
       }
     });
+  }
+
+  /** Strength of the sky light and reflections on the car's materials. */
+  setEnvironmentIntensity(value: number): void {
+    for (const m of this.envMaterials) m.envMapIntensity = value;
   }
 
   /** `alpha` blends between the previous and current physics state. */

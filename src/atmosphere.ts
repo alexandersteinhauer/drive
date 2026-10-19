@@ -112,6 +112,27 @@ export class Atmosphere {
     );
   }
 
+  /**
+   * How much direct sun reaches a point (0..1): marches towards the sun over the terrain
+   * heights. Cheap (~75 height samples), so it can run every frame for the car.
+   */
+  sunVisibility(
+    point: THREE.Vector3,
+    heightAt: (x: number, z: number) => number,
+  ): number {
+    const d = this.sunDirection;
+    let visible = 1;
+    // Start a few metres out so the ground right at the car (banking, slope) doesn't count.
+    for (let t = 6; t < 300; t += 4) {
+      const clearance =
+        point.y + d.y * t - heightAt(point.x + d.x * t, point.z + d.z * t);
+      // Soft edge that widens with distance, like a penumbra.
+      visible = Math.min(visible, clearance / (0.5 + t * 0.01));
+      if (visible <= 0) return 0;
+    }
+    return Math.min(1, visible);
+  }
+
   /** Keeps the sky centred on the camera. */
   update(camera: THREE.Camera): void {
     this.sky.position.copy(camera.position);
