@@ -37,7 +37,7 @@ const atmosphere = new Atmosphere(renderer, scene, {
   // Roughly a 2-2.5x lit/shadow contrast after tone mapping, as on a clear afternoon.
   sunLight: 7,
   skyLight: 0.15,
-  hazeHalfDistance: 700,
+  hazeHalfDistance: 1600,
   farDistance: 1350,
 });
 let pipeline = createPipeline(renderer, scene, camera);
