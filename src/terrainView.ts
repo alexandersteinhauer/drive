@@ -1,6 +1,7 @@
 import * as THREE from "three/webgpu";
 import { Surface, type Landscape, type LandSample } from "./world/landscape";
 import { hash2 } from "./world/noise";
+import { terrainMaterial } from "./terrainMaterial";
 
 const TILE = 128;
 const RADIUS = 1400;
@@ -15,10 +16,6 @@ const SKIRT = 6;
 /** Terrain under the road is pushed down so it never pokes through the road mesh. */
 const UNDER_ROAD = 0.3;
 
-const GRASS = new THREE.Color(0x5f8a3a);
-const GRASS_DRY = new THREE.Color(0x8d9a4a);
-const DIRT = new THREE.Color(0x8a7556);
-
 interface Tile {
   key: string;
   lod: number;
@@ -31,16 +28,12 @@ const sample: LandSample = {
   surface: Surface.Grass,
   roadDistance: Infinity,
 };
-const color = new THREE.Color();
 
 /** Streams terrain tiles (with skirts to hide LOD cracks) and trees around a focus point. */
 export class TerrainView {
   readonly group = new THREE.Group();
   private readonly tiles = new Map<string, Tile>();
-  private readonly material = new THREE.MeshStandardMaterial({
-    vertexColors: true,
-    roughness: 1,
-  });
+  private readonly material: THREE.Material;
   private readonly trunkGeo = new THREE.CylinderGeometry(
     0.18,
     0.28,
@@ -62,7 +55,9 @@ export class TerrainView {
     flatShading: true,
   });
 
-  constructor(private readonly land: Landscape) {}
+  constructor(private readonly land: Landscape) {
+    this.material = terrainMaterial(land.road.edge);
+  }
 
   /** Builds missing tiles nearest-first until `budgetMs` is spent; drops far ones. */
   update(focus: THREE.Vector3, budgetMs: number): void {
@@ -140,7 +135,8 @@ export class TerrainView {
     const count = v * v + ring * 2;
     const pos = new Float32Array(count * 3);
     const nor = new Float32Array(count * 3);
-    const col = new Float32Array(count * 3);
+    const variation = new Float32Array(count);
+    const roadDist = new Float32Array(count);
     const edge = this.land.road.edge;
     const put = (k: number, i: number, j: number, drop: number) => {
       const h = heights[(j + 1) * g + i + 1]!;
@@ -150,9 +146,10 @@ export class TerrainView {
       const hu = heights[(j + 2) * g + i + 1]!;
       const road = nearRoad[(j + 1) * g + i + 1]!;
       pos[k * 3] = x0 + i * step;
-      // Fade the drop out just past the road edge, under the road mesh's outer shoulder.
+      // Sunk under the road surface, rising to exactly road height at the shoulder edge,
+      // where the road mesh ends and the terrain (with its own gravel verge) takes over.
       const under =
-        UNDER_ROAD * (1 - Math.min(1, Math.max(0, (road - edge + 1) / 1.4)));
+        UNDER_ROAD * (1 - Math.min(1, Math.max(0, (road - edge + 1.2) / 1.2)));
       pos[k * 3 + 1] = h - drop - under;
       pos[k * 3 + 2] = z0 + j * step;
       const nx = -(hr - hl);
@@ -162,10 +159,8 @@ export class TerrainView {
       nor[k * 3] = nx / len;
       nor[k * 3 + 1] = ny / len;
       nor[k * 3 + 2] = nz / len;
-      this.colorAt(x0 + i * step, z0 + j * step, ny / len);
-      col[k * 3] = color.r;
-      col[k * 3 + 1] = color.g;
-      col[k * 3 + 2] = color.b;
+      variation[k] = variationAt(x0 + i * step, z0 + j * step);
+      roadDist[k] = Math.min(road, 100);
     };
     for (let j = 0; j < v; j++)
       for (let i = 0; i < v; i++) put(j * v + i, i, j, 0);
@@ -198,7 +193,8 @@ export class TerrainView {
     const geo = new THREE.BufferGeometry();
     geo.setAttribute("position", new THREE.BufferAttribute(pos, 3));
     geo.setAttribute("normal", new THREE.BufferAttribute(nor, 3));
-    geo.setAttribute("color", new THREE.BufferAttribute(col, 3));
+    geo.setAttribute("variation", new THREE.BufferAttribute(variation, 1));
+    geo.setAttribute("road", new THREE.BufferAttribute(roadDist, 1));
     geo.setIndex(index);
     const mesh = new THREE.Mesh(geo, this.material);
     mesh.receiveShadow = true;
@@ -207,13 +203,6 @@ export class TerrainView {
     const tile: Tile = { key, lod, mesh };
     if (dist <= TREES_WITHIN) tile.trees = this.plantTrees(tx, tz);
     this.tiles.set(key, tile);
-  }
-
-  /** Grass with large dry patches, turning to dirt on steep slopes. The road mesh draws the shoulders. */
-  private colorAt(x: number, z: number, up: number): void {
-    const dry = 0.5 + 0.5 * Math.sin(x * 0.011 + Math.sin(z * 0.007) * 3);
-    color.copy(GRASS).lerp(GRASS_DRY, dry * 0.6 + hash2(x, z, 3) * 0.1);
-    if (up < 0.85) color.lerp(DIRT, Math.min(1, (0.85 - up) * 5));
   }
 
   private plantTrees(tx: number, tz: number): THREE.InstancedMesh[] {
@@ -263,4 +252,10 @@ export class TerrainView {
       return inst;
     });
   }
+}
+
+/** Large dry/green patches across the meadows (0 = lush, 1 = dry), plus a little noise. */
+function variationAt(x: number, z: number): number {
+  const dry = 0.5 + 0.5 * Math.sin(x * 0.011 + Math.sin(z * 0.007) * 3);
+  return Math.min(1, dry * 0.9 + hash2(x, z, 3) * 0.1);
 }

@@ -26,6 +26,7 @@ export interface AtmosphereOptions {
   /** Sun intensity at high elevation, and the strength of the sky's image-based light. */
   sunLight: number;
   skyLight: number;
+  fillLight: number;
 }
 
 /**
@@ -71,6 +72,9 @@ export class Atmosphere {
     csm.fade = true;
     this.sun.shadow.shadowNode = csm;
     scene.add(this.sun, this.sun.target);
+    // Soft neutral fill (sky above, warm earth bounce below): lifts shaded slopes out of a
+    // murky blue-teal without brightening reflections the way more sky light would.
+    scene.add(new THREE.HemisphereLight(0xece9e0, 0x8a7a5c, options.fillLight));
 
     // The sky without its sun disc, captured once into a cube map: it lights the scene
     // (reflections and ambient) and colours the haze.

@@ -1,4 +1,17 @@
 import * as THREE from "three/webgpu";
+
+// Dev: keep console errors/warnings around so they can be read back from tooling.
+if (import.meta.env.DEV) {
+  const log: string[] = [];
+  Object.assign(window, { __errors: log });
+  for (const level of ["error", "warn"] as const) {
+    const original = console[level].bind(console);
+    console[level] = (...args: unknown[]) => {
+      log.push(`${level}: ${args.map(String).join(" ").slice(0, 500)}`);
+      original(...args);
+    };
+  }
+}
 import { Atmosphere } from "./atmosphere";
 import { createPipeline } from "./post";
 import { CarView } from "./carView";
@@ -36,7 +49,8 @@ const atmosphere = new Atmosphere(renderer, scene, {
   azimuth: 60,
   // Roughly a 2-2.5x lit/shadow contrast after tone mapping, as on a clear afternoon.
   sunLight: 7,
-  skyLight: 0.15,
+  skyLight: 0.22,
+  fillLight: 0.9,
   hazeHalfDistance: 1600,
   farDistance: 1350,
 });

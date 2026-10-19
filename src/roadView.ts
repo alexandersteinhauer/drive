@@ -1,4 +1,5 @@
 import * as THREE from "three/webgpu";
+import { loadLayer } from "./terrainMaterial";
 import type { Landscape } from "./world/landscape";
 
 /** Samples per road chunk mesh (2 m each). */
@@ -6,7 +7,6 @@ const CHUNK = 64;
 const RADIUS = 1500;
 /** Size of one asphalt texture tile on the road, in metres. */
 const ASPHALT_TILE = 2.5;
-const GRAVEL = new THREE.Color(0x8f8875);
 const PAINT = new THREE.Color(0xe9e6da);
 const DASH = 3; // samples on, then off, for the centre line
 
@@ -14,13 +14,15 @@ const DASH = 3; // samples on, then off, for the centre line
 export class RoadView {
   readonly group = new THREE.Group();
   private readonly chunks = new Map<number, THREE.Mesh>();
-  /** Shoulders and markings: plain vertex colours. */
+  /** Markings: plain vertex colours. */
   private readonly material = new THREE.MeshStandardMaterial({
     vertexColors: true,
     roughness: 0.9,
   });
   /** The carriageway: ambientCG Asphalt015 (CC0). */
   private readonly asphalt = asphaltMaterial();
+  /** Shoulders: ambientCG Gravel040 (CC0). */
+  private readonly gravel = gravelMaterial();
 
   constructor(private readonly land: Landscape) {}
 
@@ -99,8 +101,9 @@ export class RoadView {
 
     strip(-halfWidth, halfWidth, first, end, PAINT, 0);
     const asphaltIndices = index.length;
-    strip(-edge - 0.4, -halfWidth, first, end, GRAVEL, 0);
-    strip(halfWidth, edge + 0.4, first, end, GRAVEL, 0);
+    strip(-edge, -halfWidth, first, end, PAINT, 0);
+    strip(halfWidth, edge, first, end, PAINT, 0);
+    const gravelIndices = index.length;
     strip(-halfWidth + 0.15, -halfWidth + 0.3, first, end, PAINT, 0.012);
     strip(halfWidth - 0.3, halfWidth - 0.15, first, end, PAINT, 0.012);
     for (let i = first; i < end; i++)
@@ -115,8 +118,13 @@ export class RoadView {
     geo.computeVertexNormals();
     // The carriageway uses the asphalt material, everything else the vertex-colour one.
     geo.addGroup(0, asphaltIndices, 0);
-    geo.addGroup(asphaltIndices, index.length - asphaltIndices, 1);
-    const mesh = new THREE.Mesh(geo, [this.asphalt, this.material]);
+    geo.addGroup(asphaltIndices, gravelIndices - asphaltIndices, 1);
+    geo.addGroup(gravelIndices, index.length - gravelIndices, 2);
+    const mesh = new THREE.Mesh(geo, [
+      this.asphalt,
+      this.gravel,
+      this.material,
+    ]);
     mesh.receiveShadow = true;
     this.group.add(mesh);
     this.chunks.set(c, mesh);
@@ -140,5 +148,16 @@ function asphaltMaterial(): THREE.MeshStandardMaterial {
     roughness: 1,
     // Slightly lighter and warmer: the scan reads cool and dark next to sunlit asphalt.
     color: new THREE.Color().setRGB(1.1, 1.06, 1.0),
+  });
+}
+
+function gravelMaterial(): THREE.MeshStandardMaterial {
+  const layer = loadLayer("gravel040");
+  return new THREE.MeshStandardMaterial({
+    map: layer.color,
+    normalMap: layer.normal,
+    roughness: 0.85,
+    // Lighter than the scan, so the shoulder reads as dusty gravel next to the asphalt.
+    color: new THREE.Color().setRGB(1.35, 1.3, 1.2),
   });
 }

@@ -1,6 +1,13 @@
 # Texture credits
 
-## asphalt015\_\*.webp
+All textures are from ambientCG (https://ambientcg.com), licensed CC0 1.0, converted to WebP.
 
-"Asphalt 015" from ambientCG (https://ambientcg.com/view?id=Asphalt015), CC0 1.0.
-Converted from the 2K JPG set to WebP (roughness downscaled to 1K).
+| Files               | Asset                                                  | Use                   |
+| ------------------- | ------------------------------------------------------ | --------------------- |
+| `asphalt015_*.webp` | [Asphalt015](https://ambientcg.com/view?id=Asphalt015) | road surface (2K)     |
+| `grass004_*.webp`   | [Grass004](https://ambientcg.com/view?id=Grass004)     | meadow (1K)           |
+| `ground103_*.webp`  | [Ground103](https://ambientcg.com/view?id=Ground103)   | dirt on slopes, verge |
+| `rock030_*.webp`    | [Rock030](https://ambientcg.com/view?id=Rock030)       | rock in cuttings      |
+| `gravel040_*.webp`  | [Gravel040](https://ambientcg.com/view?id=Gravel040)   | road shoulders, verge |
+
+Terrain layers ship colour and normal maps only; roughness is set per layer in the shader.
