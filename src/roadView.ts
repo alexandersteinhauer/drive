@@ -4,7 +4,8 @@ import type { Landscape } from "./world/landscape";
 /** Samples per road chunk mesh (2 m each). */
 const CHUNK = 64;
 const RADIUS = 1500;
-const ASPHALT = new THREE.Color(0x3b3c3f);
+/** Size of one asphalt texture tile on the road, in metres. */
+const ASPHALT_TILE = 2.5;
 const GRAVEL = new THREE.Color(0x8f8875);
 const PAINT = new THREE.Color(0xe9e6da);
 const DASH = 3; // samples on, then off, for the centre line
@@ -13,10 +14,13 @@ const DASH = 3; // samples on, then off, for the centre line
 export class RoadView {
   readonly group = new THREE.Group();
   private readonly chunks = new Map<number, THREE.Mesh>();
+  /** Shoulders and markings: plain vertex colours. */
   private readonly material = new THREE.MeshStandardMaterial({
     vertexColors: true,
     roughness: 0.9,
   });
+  /** The carriageway: ambientCG Asphalt015 (CC0). */
+  private readonly asphalt = asphaltMaterial();
 
   constructor(private readonly land: Landscape) {}
 
@@ -54,6 +58,7 @@ export class RoadView {
     const edge = road.edge;
     const pos: number[] = [];
     const col: number[] = [];
+    const uv: number[] = [];
     const index: number[] = [];
     const first = c * CHUNK;
     const end = Math.min(first + CHUNK, road.finalCount - 1);
@@ -82,6 +87,8 @@ export class RoadView {
               : this.land.height(x, z);
           pos.push(x, y + lift, z);
           col.push(color.r, color.g, color.b);
+          // World-scale UVs: across the road, and along it by distance travelled.
+          uv.push(lat / ASPHALT_TILE, (i * road.cfg.spacing) / ASPHALT_TILE);
         }
       }
       for (let k = 0; k < to - from; k++) {
@@ -90,7 +97,8 @@ export class RoadView {
       }
     };
 
-    strip(-halfWidth, halfWidth, first, end, ASPHALT, 0);
+    strip(-halfWidth, halfWidth, first, end, PAINT, 0);
+    const asphaltIndices = index.length;
     strip(-edge - 0.4, -halfWidth, first, end, GRAVEL, 0);
     strip(halfWidth, edge + 0.4, first, end, GRAVEL, 0);
     strip(-halfWidth + 0.15, -halfWidth + 0.3, first, end, PAINT, 0.012);
@@ -102,11 +110,35 @@ export class RoadView {
     const geo = new THREE.BufferGeometry();
     geo.setAttribute("position", new THREE.Float32BufferAttribute(pos, 3));
     geo.setAttribute("color", new THREE.Float32BufferAttribute(col, 3));
+    geo.setAttribute("uv", new THREE.Float32BufferAttribute(uv, 2));
     geo.setIndex(index);
     geo.computeVertexNormals();
-    const mesh = new THREE.Mesh(geo, this.material);
+    // The carriageway uses the asphalt material, everything else the vertex-colour one.
+    geo.addGroup(0, asphaltIndices, 0);
+    geo.addGroup(asphaltIndices, index.length - asphaltIndices, 1);
+    const mesh = new THREE.Mesh(geo, [this.asphalt, this.material]);
     mesh.receiveShadow = true;
     this.group.add(mesh);
     this.chunks.set(c, mesh);
   }
+}
+
+function asphaltMaterial(): THREE.MeshStandardMaterial {
+  const loader = new THREE.TextureLoader();
+  const load = (name: string, srgb: boolean) => {
+    const t = loader.load(`${import.meta.env.BASE_URL}textures/${name}`);
+    t.wrapS = t.wrapT = THREE.RepeatWrapping;
+    // Sharp at grazing angles, where most of the road is seen from a chase camera.
+    t.anisotropy = 8;
+    if (srgb) t.colorSpace = THREE.SRGBColorSpace;
+    return t;
+  };
+  return new THREE.MeshStandardMaterial({
+    map: load("asphalt015_color.webp", true),
+    normalMap: load("asphalt015_normal.webp", false),
+    roughnessMap: load("asphalt015_roughness.webp", false),
+    roughness: 1,
+    // Slightly lighter and warmer: the scan reads cool and dark next to sunlit asphalt.
+    color: new THREE.Color().setRGB(1.1, 1.06, 1.0),
+  });
 }
