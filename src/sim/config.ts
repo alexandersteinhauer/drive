@@ -87,7 +87,13 @@ export interface EscConfig {
   /** Yaw rate error ignored before intervening: fixed part (rad/s) plus a fraction of the target. */
   deadband: number;
   deadbandRatio: number;
-  /** Body slip angle (rad) allowed before it counts as oversteer, and its weight in rad/s per rad. */
+  /** Reference yaw rate lag (s), like the car's own yaw response, so quick steering is not an error. */
+  yawLag: number;
+  /**
+   * Rear axle slip angle (rad) allowed before it counts as oversteer, and its weight in rad/s per
+   * rad. Measured at the rear axle, as the body slip at the centre of mass is large in tight
+   * low-speed turns without any sliding.
+   */
   slipAngleLimit: number;
   slipAngleGain: number;
   /** Brake torque per rad/s of yaw rate error beyond the deadband, and its cap per wheel. */
@@ -231,6 +237,7 @@ export const sportsCoupe: CarConfig = {
     understeerGradient: 0.0015,
     deadband: 0.04,
     deadbandRatio: 0.15,
+    yawLag: 0.15,
     slipAngleLimit: (6 * Math.PI) / 180,
     slipAngleGain: 1.5,
     gain: 6000,
@@ -308,7 +315,8 @@ export const bmwI4: CarConfig = {
     inertia: 0.05,
     ratio: 8.774,
     efficiency: 0.97,
-    regenTorque: 200,
+    // ~0.13 g of lift-off regen, like the default (medium) recuperation rather than one-pedal B mode.
+    regenTorque: 100,
     regenPower: 70000,
   },
   dragArea: 0.24 * 2.31,

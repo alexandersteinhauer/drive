@@ -107,6 +107,7 @@ export class Car {
   private reflectedInertia = 0;
   private tcsFactor = 1;
   private escCut = 1;
+  private yawReference = 0;
   private regenScale = 1;
   /** True while stability control is intervening. */
   escActive = false;
@@ -541,7 +542,6 @@ export class Car {
     // Yaw rate positive to the right, matching steering.
     const yaw = -this.angularVelocity.dot(up);
     const v = this.speed;
-    const lateral = this.velocity.dot(right);
     const g = GRAVITY * this.cfg.tire.muY;
 
     // Regen: full below 0.15 g of cornering, none from 0.5 g; dropped while the rear slips.
@@ -556,6 +556,7 @@ export class Car {
     this.regenScale += (regenTarget - this.regenScale) * Math.min(1, dt * 15);
 
     if (!esc.enabled || v < 5) {
+      this.yawReference = yaw;
       this.escCut = 1;
       this.escActive = false;
       return;
@@ -564,14 +565,20 @@ export class Car {
     const delta = steered.reduce((s, w) => s + w.steer, 0) / steered.length;
     const L = this.wheelbase;
     const limit = (0.9 * g) / v;
-    const target = clamp(
-      (v * delta) / (L + esc.understeerGradient * v * v),
-      -limit,
-      limit,
-    );
+    this.yawReference +=
+      (clamp(
+        (v * delta) / (L + esc.understeerGradient * v * v),
+        -limit,
+        limit,
+      ) -
+        this.yawReference) *
+      Math.min(1, dt / esc.yawLag);
+    const target = this.yawReference;
     let error = yaw - target;
-    // Body slip beyond the limit is oversteer even when the yaw rate looks right (a drift).
-    const beta = Math.atan2(lateral, v);
+    // Rear axle slip beyond the limit is oversteer even when the yaw rate looks right (a drift).
+    r.set(0, 0, this.cfg.rear.z).applyQuaternion(this.orientation);
+    vc.crossVectors(this.angularVelocity, r).add(this.velocity);
+    const beta = Math.atan2(vc.dot(right), Math.max(vc.dot(fwd), 1));
     const excessBeta =
       beta - clamp(beta, -esc.slipAngleLimit, esc.slipAngleLimit);
     error -= esc.slipAngleGain * excessBeta;

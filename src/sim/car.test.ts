@@ -257,6 +257,26 @@ function laneChange(cfg: CarConfig, esc: boolean): number {
   return (maxSlip * 180) / Math.PI;
 }
 
+/**
+ * Full throttle from a standstill while weaving with keyboard steering, full lock each way every
+ * 0.6 s. Returns the final speed in km/h.
+ */
+function weave(cfg: CarConfig): number {
+  const car = makeCar(cfg);
+  run(car, 2, () => idle);
+  let steer = 0;
+  run(car, 10, (t) => {
+    const target = Math.floor(t / 0.6) % 2 ? -1 : 1;
+    const rate = Math.sign(target) !== Math.sign(steer) ? 6 : 3.5;
+    steer =
+      target > steer
+        ? Math.min(target, steer + rate * DT)
+        : Math.max(target, steer - rate * DT);
+    return { ...idle, throttle: 1, steer };
+  });
+  return kmh(car);
+}
+
 describe("stability control", () => {
   for (const [name, cfg] of [
     ["electric", bmwI4],
@@ -271,6 +291,13 @@ describe("stability control", () => {
       expect(off).toBeGreaterThan(30);
       expect(on).toBeLessThan(8);
     });
+
+  test("lets the car accelerate while weaving at full throttle", () => {
+    // Tight low-speed turns have large body slip at the centre of mass without any sliding.
+    const speed = weave(bmwI4);
+    console.log(`esc weave: ${speed.toFixed(0)} km/h after 10 s`);
+    expect(speed).toBeGreaterThan(50);
+  });
 });
 
 describe("bmw i4 edrive40", () => {
