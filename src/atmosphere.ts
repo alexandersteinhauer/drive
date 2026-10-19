@@ -112,10 +112,19 @@ export class Atmosphere {
     this.sun.shadow.bias = -0.0003;
     this.sun.shadow.normalBias = 0.05;
     // Cascaded shadows: sharp near the car, still present on hills hundreds of metres away.
+    // Split by hand so the first cascade covers only the car and its surroundings (~2 cm
+    // texels); the automatic split gave it ~75 m and a blurry car shadow. Three cascades,
+    // since each costs the terrain shader a texture.
     const csm = new CSMShadowNode(this.sun, {
       cascades: 3,
       maxFar: 450,
-      mode: "practical",
+      mode: "custom",
+      customSplitsCallback: (
+        _cascades: number,
+        _near: number,
+        far: number,
+        breaks: number[],
+      ) => breaks.push(...SHADOW_SPLITS.map((d) => Math.min(1, d / far))),
       lightMargin: 150,
     });
     csm.fade = true;
@@ -266,6 +275,9 @@ export class Atmosphere {
     if (this.captured !== this.hours) this.recapture();
   }
 }
+
+/** Far end of each shadow cascade, in metres from the camera. */
+const SHADOW_SPLITS = [16, 110, 450];
 
 /** Sun elevation (degrees) whose light the base exposure is tuned for. */
 const REFERENCE_ELEVATION = 23;
