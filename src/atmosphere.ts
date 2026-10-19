@@ -152,7 +152,7 @@ export class Atmosphere {
     const distance = positionWorld.distance(cameraPosition);
     const haze = float(1).sub(exp(distance.mul(this.hazeDensity.negate())));
     const edge = smoothstep(
-      options.farDistance * 0.75,
+      options.farDistance * 0.85,
       options.farDistance,
       distance,
     );

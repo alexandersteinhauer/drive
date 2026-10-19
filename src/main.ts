@@ -53,7 +53,7 @@ const atmosphere = new Atmosphere(renderer, scene, {
   sunLight: 7,
   skyLight: 0.22,
   fillLight: 0.9,
-  hazeHalfDistance: 2500,
+  hazeHalfDistance: 8000,
   farDistance: 2150,
 });
 let pipeline = createPipeline(renderer, scene, camera);
