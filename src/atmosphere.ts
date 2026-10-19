@@ -89,6 +89,10 @@ export class Atmosphere {
   /** 0 by day, 1 at night: the sky model turns brown below the horizon, so it is tinted. */
   private readonly night = uniform(0);
   private readonly twilight = uniform(0);
+  /** Haze extinction per metre. */
+  readonly hazeDensity = uniform(0);
+  /** How far above the horizon (direction y) the haze takes its colour from. */
+  readonly hazeLift = uniform(0.08);
   private hours = NaN;
 
   constructor(
@@ -98,6 +102,7 @@ export class Atmosphere {
   ) {
     this.renderer = renderer;
     this.options = options;
+    this.hazeDensity.value = Math.LN2 / options.hazeHalfDistance;
     configureSky(this.sky, this.night, this.twilight);
     this.sky.scale.setScalar(2000);
     scene.add(this.sky);
@@ -145,17 +150,24 @@ export class Atmosphere {
     scene.environmentIntensity = options.skyLight;
 
     const distance = positionWorld.distance(cameraPosition);
-    const haze = float(1).sub(
-      exp(distance.mul(-Math.LN2 / options.hazeHalfDistance)),
-    );
+    const haze = float(1).sub(exp(distance.mul(this.hazeDensity.negate())));
     const edge = smoothstep(
       options.farDistance * 0.75,
       options.farDistance,
       distance,
     );
     const viewDir = positionWorld.sub(cameraPosition).normalize();
+    // Haze takes the sky's colour a little above the horizon, where it is bluer: the band
+    // right at the horizon is near white under a high sun and makes distant land look milky.
+    // At the terrain's far edge it blends back to the true horizon colour, so the land's
+    // silhouette doesn't show against the sky.
+    const hazeDir = vec3(
+      viewDir.x,
+      viewDir.y.add(this.hazeLift.mul(edge.oneMinus())),
+      viewDir.z,
+    );
     scene.fogNode = fog(
-      cubeTexture(this.cube.texture, viewDir),
+      cubeTexture(this.cube.texture, hazeDir.normalize()),
       max(haze, edge),
     );
   }
@@ -225,11 +237,14 @@ export class Atmosphere {
     this.twilight.value =
       THREE.MathUtils.smoothstep(elevation, -15, -5) *
       (1 - THREE.MathUtils.smoothstep(elevation, -2, 1));
-    // The eye adapts: less exposure under a high sun, up to ~2.5x more at night (still
-    // clearly night).
-    this.exposure =
-      (1 - 0.25 * THREE.MathUtils.smoothstep(elevation, 25, 60)) *
-      (1 + 1.5 * this.darkness);
+    // The eye adapts to the light falling on the ground (sun on a level surface plus the
+    // ambient), relative to the late afternoon the look is tuned for. Partial adaptation,
+    // capped so that night still reads as night.
+    const ref = groundLight(o, REFERENCE_ELEVATION);
+    this.exposure = Math.min(
+      MAX_ADAPTATION,
+      (ref / groundLight(o, elevation, this.sun.intensity)) ** ADAPTATION,
+    );
   }
 
   /** Re-renders the sky light after the time changed. Costs a cube render plus filtering. */
@@ -249,8 +264,36 @@ export class Atmosphere {
   }
 }
 
+/** Sun elevation (degrees) whose light the base exposure is tuned for. */
+const REFERENCE_ELEVATION = 23;
+/** How fully exposure follows the light (1 = completely), and its cap at night. */
+const ADAPTATION = 1;
+const MAX_ADAPTATION = 2.5;
+
+/** Light falling on level ground: direct sun (or moon) plus the fill and sky ambient. */
+function groundLight(
+  o: AtmosphereOptions,
+  elevation: number,
+  direct?: number,
+): number {
+  const warm = THREE.MathUtils.clamp(elevation / 45, 0, 1);
+  const sun =
+    direct ??
+    o.sunLight *
+      (0.7 + 0.3 * warm) *
+      THREE.MathUtils.smoothstep(elevation, -1, 4);
+  const height = Math.sin(
+    THREE.MathUtils.degToRad(elevation > -1 ? Math.max(elevation, 0) : 40),
+  );
+  const ambient =
+    AMBIENT * Math.max(0.04, THREE.MathUtils.smoothstep(elevation, -8, 12));
+  return sun * height + ambient;
+}
+
 /** Moonlight intensity, relative to the sun's. */
 const MOONLIGHT = 0.2;
+/** Ambient light on level ground in daylight, in sun-intensity units. */
+const AMBIENT = 1;
 
 function configureSky(
   sky: SkyMesh,

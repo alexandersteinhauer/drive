@@ -4,12 +4,13 @@ import { hash2 } from "./world/noise";
 import { terrainMaterial } from "./terrainMaterial";
 
 const TILE = 128;
-const RADIUS = 1400;
+const RADIUS = 2200;
 /** Vertex spacing per level of detail, and the distance (tile centre to camera) each is used up to. */
 const LODS = [
   { segments: 64, within: 300 },
   { segments: 32, within: 700 },
-  { segments: 16, within: Infinity },
+  { segments: 16, within: 1400 },
+  { segments: 8, within: Infinity },
 ];
 const TREES_WITHIN = 900;
 const SKIRT = 6;

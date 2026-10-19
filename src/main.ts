@@ -24,7 +24,7 @@ import { Landscape } from "./world/landscape";
 
 const DT = 1 / 480;
 /** How far ahead (along -Z) the road is generated beyond the car; must exceed the view radius. */
-const ROAD_AHEAD = 1800;
+const ROAD_AHEAD = 2600;
 
 // Anti-aliasing happens in post-processing (SMAA), so the canvas itself needs no MSAA.
 const renderer = new THREE.WebGPURenderer({ antialias: false });
@@ -45,7 +45,7 @@ const camera = new THREE.PerspectiveCamera(
   60,
   innerWidth / innerHeight,
   0.1,
-  2500,
+  3200,
 );
 const atmosphere = new Atmosphere(renderer, scene, {
   time: Number(localStorage.getItem("time") ?? 17) || 17,
@@ -53,8 +53,8 @@ const atmosphere = new Atmosphere(renderer, scene, {
   sunLight: 7,
   skyLight: 0.22,
   fillLight: 0.9,
-  hazeHalfDistance: 1600,
-  farDistance: 1350,
+  hazeHalfDistance: 2500,
+  farDistance: 2150,
 });
 let pipeline = createPipeline(renderer, scene, camera);
 /** Dev hook: rebuild the post-processing chain without some stages. */

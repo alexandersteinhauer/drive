@@ -4,7 +4,7 @@ import type { Landscape } from "./world/landscape";
 
 /** Samples per road chunk mesh (2 m each). */
 const CHUNK = 64;
-const RADIUS = 1500;
+const RADIUS = 2300;
 /** Size of one asphalt texture tile on the road, in metres. */
 const ASPHALT_TILE = 2.5;
 const PAINT = new THREE.Color(0xe9e6da);
