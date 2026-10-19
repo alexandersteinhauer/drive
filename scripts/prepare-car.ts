@@ -11,7 +11,7 @@
  * Output: nodes "body", "wheel_<fl|fr|rl|rr>_spin" and "wheel_<..>_caliper"; origin on the
  * ground, midway between the axles; extras.wheels holds the measured wheel centres/radius.
  */
-import { NodeIO, type Primitive } from "@gltf-transform/core";
+import { NodeIO, Primitive, type Transform } from "@gltf-transform/core";
 import {
   EXTMeshoptCompression,
   KHRMeshQuantization,
@@ -24,7 +24,7 @@ import {
   join,
   prune,
   resample,
-  simplify,
+  compactPrimitive,
   textureCompress,
   transformPrimitive,
   weld,
@@ -297,20 +297,33 @@ for (const [key, prims] of groups) {
 }
 scene.setExtras({ wheels, radius, wheelbase: rearZ - frontZ });
 
+/**
+ * Simplification: stop at this error (relative to each mesh's size, counting both shape and
+ * normals) or this fraction of the triangles. The error is what limits it; glossy paint shows
+ * any bent normal as a dent. Normals are kept at 16 bits for the same reason.
+ */
+const SIMPLIFY_ERROR = 0.0002;
+const SIMPLIFY_RATIO = 0.25;
+const NORMAL_WEIGHT = 1;
+const NORMAL_BITS = 16;
 const before = triangles();
 await doc.transform(
   dedup(),
   join({ keepNamed: true }),
   // The source stores nearly (not bitwise) identical vertices per triangle; snapping them to a
   // quantization grid first lets weld merge them, which simplify needs.
-  quantize({ quantizePosition: 14, quantizeNormal: 8, quantizeTexcoord: 12 }),
+  quantize({
+    quantizePosition: 14,
+    quantizeNormal: NORMAL_BITS,
+    quantizeTexcoord: 12,
+  }),
   dequantize(),
   weld(),
-  simplify({ simplifier: MeshoptSimplifier, ratio: 0.25, error: 0.003 }),
+  shadedSimplify(SIMPLIFY_RATIO, SIMPLIFY_ERROR, NORMAL_WEIGHT),
   textureCompress({ targetFormat: "webp", resize: [1024, 1024] }),
   prune(),
   resample(),
-  quantize(),
+  quantize({ quantizeNormal: NORMAL_BITS }),
 );
 doc
   .createExtension(EXTMeshoptCompression)
@@ -321,6 +334,52 @@ console.log(
   `triangles ${before} -> ${triangles()}, nodes ${[...groups.keys()].join(", ")}`,
 );
 await io.write(outPath, doc);
+
+/**
+ * Simplifies every triangle mesh with meshoptimizer, keeping both the shape and the shading
+ * normals within the error. glTF-Transform's simplify() only looks at positions: it kept the
+ * shape within millimetres but bent the normals across the larger triangles (median 6 deg on
+ * the paint), and glossy paint showed that as dents.
+ */
+function shadedSimplify(
+  ratio: number,
+  error: number,
+  normalWeight: number,
+): Transform {
+  return (document) => {
+    for (const mesh of document.getRoot().listMeshes())
+      for (const prim of mesh.listPrimitives()) {
+        const indices = prim.getIndices();
+        const position = prim.getAttribute("POSITION");
+        const normal = prim.getAttribute("NORMAL");
+        if (
+          prim.getMode() !== Primitive.Mode.TRIANGLES ||
+          !indices ||
+          !position ||
+          !normal
+        )
+          continue;
+        const src = new Uint32Array(indices.getArray()!);
+        const target = Math.floor((ratio * src.length) / 3) * 3;
+        const [dst] = MeshoptSimplifier.simplifyWithAttributes(
+          src,
+          new Float32Array(position.getArray()!),
+          3,
+          new Float32Array(normal.getArray()!),
+          3,
+          [normalWeight, normalWeight, normalWeight],
+          null,
+          target,
+          error,
+        );
+        prim.setIndices(
+          document.createAccessor().setType("SCALAR").setArray(dst),
+        );
+        if (indices.listParents().length === 1) indices.dispose();
+        compactPrimitive(prim);
+      }
+  };
+}
 
 function triangles(): number {
   return allPrims().reduce(
