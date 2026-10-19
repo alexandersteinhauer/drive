@@ -13,6 +13,11 @@ const LODS = [
   { segments: 8, within: Infinity },
 ];
 const TREES_WITHIN = 900;
+/**
+ * Beyond this distance, whole blocks of BLOCK x BLOCK tiles are built as one mesh (same
+ * vertex spacing), cutting draw calls: each costs CPU time and garbage in the renderer.
+ */
+const COARSE_FROM = 700;
 const SKIRT = 6;
 /** Terrain under the road is pushed down so it never pokes through the road mesh. */
 const UNDER_ROAD = 0.3;
@@ -30,10 +35,24 @@ const BLOCK_TREES = BLOCK * BLOCK * TREE_GRID * TREE_GRID;
 
 interface Tile {
   key: string;
-  lod: number;
+  /** What it was built as; rebuilt when the wanted one differs. */
+  sig: string;
   mesh: THREE.Mesh;
-  /** Packed tree matrices (16 floats each), if the tile has trees. */
-  trees?: Float32Array;
+  /** Trees it planted, per 128 m tile key. */
+  trees: [string, Float32Array][];
+}
+
+/** A square of terrain to build: one tile, or a whole block far away. */
+interface Wanted {
+  key: string;
+  sig: string;
+  x0: number;
+  z0: number;
+  size: number;
+  segments: number;
+  /** Tiles (tx, tz) to plant trees on. */
+  treeTiles: [number, number][];
+  dist: number;
 }
 
 interface Block {
@@ -79,21 +98,19 @@ export class TerrainView {
     this.material = terrainMaterial(land.road.edge);
   }
 
-  /** Tiles wanted around the last focus tile, nearest first, and how many are done. */
-  private wanted: {
-    key: string;
-    tx: number;
-    tz: number;
-    lod: number;
-    dist: number;
-  }[] = [];
+  /** Squares wanted around the last focus tile, nearest first, and how many are done. */
+  private wanted: Wanted[] = [];
   private done = 0;
   private scanKey = "";
+  private keep = new Set<string>();
+  private job?: Generator<void, void>;
+  /** Terrain no longer wanted, kept until its replacement is built so no gaps show. */
+  private retiring = new Map<string, Tile>();
 
   /**
-   * Builds missing tiles nearest-first until `budgetMs` is spent; drops far ones. The wanted
-   * set is only recomputed when the focus enters another tile or the road grows (it allocated
-   * ~200 kB a frame when rescanned every frame).
+   * Builds missing terrain nearest-first until `budgetMs` is spent; drops far terrain. The
+   * wanted set is only recomputed when the focus enters another tile or the road grows (it
+   * allocated ~200 kB a frame when rescanned every frame).
    */
   update(focus: THREE.Vector3, budgetMs: number): void {
     const start = performance.now();
@@ -105,15 +122,21 @@ export class TerrainView {
       this.scanKey = scanKey;
       this.rescan(fx, fz);
     }
-    while (this.done < this.wanted.length) {
-      const w = this.wanted[this.done]!;
-      const existing = this.tiles.get(w.key);
-      if (!existing || existing.lod !== w.lod) {
-        if (performance.now() - start > budgetMs) break;
-        if (existing) this.drop(w.key, existing);
-        this.build(w.key, w.tx, w.tz, w.lod, w.dist);
+    // Builds run as resumable jobs, a few rows per step, so no frame overruns the budget.
+    for (;;) {
+      if (!this.job) {
+        if (this.done >= this.wanted.length) break;
+        const w = this.wanted[this.done++]!;
+        const existing = this.tiles.get(w.key);
+        if (existing && existing.sig === w.sig) continue;
+        this.job = this.build(w);
       }
-      this.done++;
+      if (performance.now() - start > budgetMs) break;
+      if (this.job.next().done) this.job = undefined;
+    }
+    if (!this.job && this.done === this.wanted.length && this.retiring.size) {
+      for (const [key, tile] of this.retiring) this.drop(key, tile);
+      this.retiring.clear();
     }
     this.flushBlocks();
   }
@@ -122,20 +145,83 @@ export class TerrainView {
     // Distances from the focus tile's centre, so the set only depends on the tile.
     const cx = (fx + 0.5) * TILE;
     const cz = (fz + 0.5) * TILE;
-    const reach = Math.ceil(RADIUS / TILE);
-    const wanted: typeof this.wanted = [];
-    for (let tx = fx - reach; tx <= fx + reach; tx++)
-      for (let tz = fz - reach; tz <= fz + reach; tz++) {
-        const dist = Math.hypot((tx + 0.5) * TILE - cx, (tz + 0.5) * TILE - cz);
-        if (dist > RADIUS) continue;
-        // Only build where the road can no longer change: its future lies further along -Z.
-        if (-tz * TILE + 64 > this.land.road.finalProgress) continue;
-        const lod = LODS.findIndex((l) => dist <= l.within);
-        wanted.push({ key: `${tx},${tz}`, tx, tz, lod, dist });
+    const final = this.land.road.finalProgress;
+    // Only build where the road can no longer change: its future lies further along -Z.
+    const settled = (tz: number) => -tz * TILE + 64 <= final;
+    const span = BLOCK * TILE;
+    const reach = Math.ceil(RADIUS / span) + 1;
+    const bx0 = Math.floor(fx / BLOCK);
+    const bz0 = Math.floor(fz / BLOCK);
+    const wanted: Wanted[] = [];
+    for (let bx = bx0 - reach; bx <= bx0 + reach; bx++)
+      for (let bz = bz0 - reach; bz <= bz0 + reach; bz++) {
+        const nearest = Math.hypot(
+          Math.max(bx * span - cx, 0, cx - (bx + 1) * span),
+          Math.max(bz * span - cz, 0, cz - (bz + 1) * span),
+        );
+        if (nearest > RADIUS) continue;
+        if (nearest > COARSE_FROM && settled(bz * BLOCK)) {
+          const per = nearest <= LODS[2]!.within ? 16 : 8;
+          const treeTiles: [number, number][] = [];
+          for (let i = 0; i < BLOCK; i++)
+            for (let j = 0; j < BLOCK; j++) {
+              const tx = bx * BLOCK + i;
+              const tz = bz * BLOCK + j;
+              const d = Math.hypot(
+                (tx + 0.5) * TILE - cx,
+                (tz + 0.5) * TILE - cz,
+              );
+              if (d <= TREES_WITHIN) treeTiles.push([tx, tz]);
+            }
+          wanted.push({
+            key: `b${bx},${bz}`,
+            sig: `${per}`,
+            x0: bx * span,
+            z0: bz * span,
+            size: span,
+            segments: per * BLOCK,
+            treeTiles,
+            dist: nearest,
+          });
+          continue;
+        }
+        for (let i = 0; i < BLOCK; i++)
+          for (let j = 0; j < BLOCK; j++) {
+            const tx = bx * BLOCK + i;
+            const tz = bz * BLOCK + j;
+            const dist = Math.hypot(
+              (tx + 0.5) * TILE - cx,
+              (tz + 0.5) * TILE - cz,
+            );
+            if (dist > RADIUS || !settled(tz)) continue;
+            const lod = LODS.findIndex((l) => dist <= l.within);
+            wanted.push({
+              key: `${tx},${tz}`,
+              sig: `${lod}`,
+              x0: tx * TILE,
+              z0: tz * TILE,
+              size: TILE,
+              segments: LODS[lod]!.segments,
+              treeTiles: dist <= TREES_WITHIN ? [[tx, tz]] : [],
+              dist,
+            });
+          }
       }
     const keep = new Set(wanted.map((w) => w.key));
+    this.keep = keep;
     for (const [key, tile] of this.tiles)
-      if (!keep.has(key)) this.drop(key, tile);
+      if (!keep.has(key)) {
+        this.tiles.delete(key);
+        this.retiring.set(key, tile);
+      }
+    // Wanted again before it was dropped: take it back.
+    for (const key of keep) {
+      const tile = this.retiring.get(key);
+      if (tile && !this.tiles.has(key)) {
+        this.retiring.delete(key);
+        this.tiles.set(key, tile);
+      }
+    }
     wanted.sort((a, b) => a.dist - b.dist);
     this.wanted = wanted;
     this.done = 0;
@@ -144,34 +230,33 @@ export class TerrainView {
   private drop(key: string, tile: Tile): void {
     this.group.remove(tile.mesh);
     tile.mesh.geometry.dispose();
-    if (tile.trees) {
-      const block = this.blocks.get(blockKey(key));
-      if (block?.tiles.delete(key)) block.dirty = true;
+    // Only its own trees: a replacement may have planted the same tile already.
+    for (const [t, trees] of tile.trees) {
+      const block = this.blocks.get(blockKey(t));
+      if (block && block.tiles.get(t) === trees) {
+        block.tiles.delete(t);
+        block.dirty = true;
+      }
     }
-    this.tiles.delete(key);
+    if (this.tiles.get(key) === tile) this.tiles.delete(key);
   }
 
-  private build(
-    key: string,
-    tx: number,
-    tz: number,
-    lod: number,
-    dist: number,
-  ): void {
-    const n = LODS[lod]!.segments;
-    const step = TILE / n;
-    const x0 = tx * TILE;
-    const z0 = tz * TILE;
+  /** Builds a tile or block, yielding between rows; the result replaces any old version. */
+  private *build(w: Wanted): Generator<void, void> {
+    const { key, x0, z0, segments: n } = w;
+    const step = w.size / n;
     // Heights on an (n + 3)^2 grid with a one-sample border, for normals that match across tiles.
     const g = n + 3;
     const heights = new Float32Array(g * g);
     const nearRoad = new Float32Array(g * g);
-    for (let j = 0; j < g; j++)
+    for (let j = 0; j < g; j++) {
       for (let i = 0; i < g; i++) {
         this.land.sample(x0 + (i - 1) * step, z0 + (j - 1) * step, sample);
         heights[j * g + i] = sample.height;
         nearRoad[j * g + i] = sample.roadDistance;
       }
+      if (j % 4 === 3) yield;
+    }
 
     const v = n + 1;
     const ring = 4 * n;
@@ -205,14 +290,22 @@ export class TerrainView {
       variation[k] = variationAt(x0 + i * step, z0 + j * step);
       roadDist[k] = Math.min(road, 100);
     };
-    for (let j = 0; j < v; j++)
+    for (let j = 0; j < v; j++) {
       for (let i = 0; i < v; i++) put(j * v + i, i, j, 0);
+      if (j % 8 === 7) yield;
+    }
 
-    const index: number[] = [];
+    const index = new Uint32Array((n * n + ring) * 6);
+    let ix = 0;
     for (let j = 0; j < n; j++)
       for (let i = 0; i < n; i++) {
         const a = j * v + i;
-        index.push(a, a + v, a + 1, a + 1, a + v, a + v + 1);
+        index[ix++] = a;
+        index[ix++] = a + v;
+        index[ix++] = a + 1;
+        index[ix++] = a + 1;
+        index[ix++] = a + v;
+        index[ix++] = a + v + 1;
       }
     // Skirts: the boundary loop duplicated and dropped, stitched to the edge.
     const loop: [number, number][] = [];
@@ -230,28 +323,43 @@ export class TerrainView {
       const b = base + ((k + 1) % ring);
       const c = base + ring + k;
       const d = base + ring + ((k + 1) % ring);
-      index.push(a, b, c, b, d, c);
+      index[ix++] = a;
+      index[ix++] = b;
+      index[ix++] = c;
+      index[ix++] = b;
+      index[ix++] = d;
+      index[ix++] = c;
     }
+    yield;
 
     const geo = new THREE.BufferGeometry();
     geo.setAttribute("position", new THREE.BufferAttribute(pos, 3));
     geo.setAttribute("normal", new THREE.BufferAttribute(nor, 3));
     geo.setAttribute("variation", new THREE.BufferAttribute(variation, 1));
     geo.setAttribute("road", new THREE.BufferAttribute(roadDist, 1));
-    geo.setIndex(index);
+    geo.setIndex(new THREE.BufferAttribute(index, 1));
+    const planted: [string, Float32Array][] = [];
+    for (const [tx, tz] of w.treeTiles) {
+      const trees = this.plantTrees(tx, tz);
+      if (trees.length) planted.push([`${tx},${tz}`, trees]);
+      yield;
+    }
+    // No longer wanted after all (the focus moved on while it was built).
+    if (!this.keep.has(key)) {
+      geo.dispose();
+      return;
+    }
+    const old = this.tiles.get(key);
+    if (old) this.drop(key, old);
     const mesh = new THREE.Mesh(geo, this.material);
     mesh.receiveShadow = true;
     mesh.castShadow = true;
     this.group.add(mesh);
-    const tile: Tile = { key, lod, mesh };
-    if (dist <= TREES_WITHIN) {
-      const trees = this.plantTrees(tx, tz);
-      if (trees.length) {
-        tile.trees = trees;
-        const block = this.block(blockKey(key));
-        block.tiles.set(key, trees);
-        block.dirty = true;
-      }
+    const tile: Tile = { key, sig: w.sig, mesh, trees: planted };
+    for (const [treeKey, trees] of planted) {
+      const block = this.block(blockKey(treeKey));
+      block.tiles.set(treeKey, trees);
+      block.dirty = true;
     }
     this.tiles.set(key, tile);
   }

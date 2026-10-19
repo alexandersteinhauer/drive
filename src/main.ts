@@ -216,7 +216,7 @@ function frame(now: number): void {
   );
 
   land.road.ensure(-pos.z + ROAD_AHEAD);
-  terrain.update(pos, 4);
+  terrain.update(pos, 2.5);
   roadView.update(pos);
   atmosphere.update(camera);
   // The car's sky light/reflections: strong in sunlight (sparkly paint), but down to the
