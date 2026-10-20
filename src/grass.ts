@@ -11,7 +11,6 @@ import {
   sin,
   smoothstep,
   sqrt,
-  time,
   transformNormalToView,
   uniform,
   varying,
@@ -429,23 +428,12 @@ function grassMaterial(width: number): THREE.MeshStandardNodeMaterial {
   const ny = sqrt(float(1).sub(ground.dot(ground)).max(0.1));
   // Roots follow the slope.
   const ly = p.y.mul(h).sub(ground.x.mul(lx).add(ground.y.mul(lz)).div(ny));
-  // Wind: slow waves rolling across the meadow, and a quicker flutter.
-  const phase = root.x.mul(0.09).add(root.z.mul(0.06));
-  const gust = sin(time.mul(1.1).add(phase))
-    .mul(0.55)
-    .add(sin(time.mul(2.7).add(phase.mul(2.3)).add(rank.mul(6))).mul(0.2))
-    .add(0.4);
-  const bend = t.mul(t).mul(h).mul(gust).mul(0.25);
   const m = new THREE.MeshStandardNodeMaterial({
     side: THREE.DoubleSide,
     roughness: 0.85,
     metalness: 0,
   });
-  m.positionNode = vec3(
-    root.x.add(lx).add(bend.mul(0.8)),
-    root.y.add(ly).sub(bend.mul(bend).mul(0.6)),
-    root.z.add(lz).add(bend.mul(0.6)),
-  );
+  m.positionNode = vec3(root.x.add(lx), root.y.add(ly), root.z.add(lz));
 
   // The ground's colour at the root, darker down in the tuft, lighter at the tips; some
   // blades dry. Close up the depth shows; far away it evens out into the ground's colour.
