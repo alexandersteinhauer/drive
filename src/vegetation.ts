@@ -5,11 +5,14 @@ import {
   dFdx,
   dFdy,
   float,
+  interleavedGradientNoise,
   log2,
   max,
   mix,
   normalViewGeometry,
   positionWorld,
+  screenCoordinate,
+  smoothstep,
   texture,
   uniform,
   uv,
@@ -36,6 +39,14 @@ import { hash2 } from "./world/noise";
  */
 
 const STRIDE = 6;
+/**
+ * Trees and bushes are full 3D up close and billboards beyond, cross-faded with a dither
+ * between these distances (m); billboards fade out again towards the planting limit.
+ */
+const NEAR_START = 35;
+const NEAR_END = 55;
+const HORIZON_START = 650;
+const HORIZON_END = 790;
 const TILE_HALF = 64;
 /** Pools hold at least this many instances: smaller ones would bake their matrices into the
  *  shader (a compile per size). */
@@ -54,7 +65,7 @@ interface Kind {
 
 const tree = (model: string, family: number): Kind => ({
   model,
-  ranges: [40, 160],
+  ranges: [NEAR_END],
   family,
   shadows: true,
 });
@@ -62,9 +73,7 @@ const KINDS: Kind[] = [
   ...["Oak_1", "Oak_2", "Oak_3"].map((m) => tree(m, 0)),
   ...["Ash_1", "Ash_2"].map((m) => tree(m, 1)),
   ...["Pine_1", "Pine_2", "Pine_3"].map((m) => tree(m, 2)),
-  { model: "Bush_1", ranges: [60, 260], shadows: true },
-  { model: "Bush_2", ranges: [60, 260], shadows: true },
-  { model: "Bush_3", ranges: [60, 260], shadows: true },
+  ...["Bush_1", "Bush_2", "Bush_3"].map((m) => tree(m, 3)),
   { model: "Rock_Medium_1", ranges: [80, 320], shadows: true },
   { model: "Rock_Medium_2", ranges: [80, 320], shadows: true },
   { model: "Rock_Medium_3", ranges: [80, 320], shadows: true },
@@ -96,7 +105,7 @@ const FLOWERS = [K.Clover_1!, K.Fern_1!];
 /** Billboard atlas: one cell (px) per tree kind, in a grid of columns x rows. */
 const BILLBOARD = 512;
 const ATLAS_COLS = 4;
-const ATLAS_ROWS = 2;
+const ATLAS_ROWS = 3;
 
 /** Direction towards the sun and its light (colour times intensity), for translucency. */
 const sunDirection = uniform(new THREE.Vector3(0, 1, 0));
@@ -152,12 +161,6 @@ export class Vegetation {
   /** Tiles per far block. */
   private readonly byBlock = new Map<string, Set<TileItems>>();
   private readonly near = new Map<string, Pool>();
-  private readonly proxies = new Map<string, Pool>();
-  /** Shadow-only versions of a geometry's materials (main pass discarded). */
-  private readonly shadowMaterials = new Map<
-    THREE.BufferGeometry,
-    THREE.Material[]
-  >();
   private readonly far = new Map<string, Pool>();
   private readonly dirtyBlocks = new Set<string>();
   private nearDirty = true;
@@ -203,25 +206,6 @@ export class Vegetation {
       k.ranges.map((_, lod) => geometry(`${k.model}_lod${lod}`)),
     );
     this.billboards();
-    const shadowOnly = new Map<THREE.Material, THREE.Material>();
-    KINDS.forEach((k, i) => {
-      if (k.family === undefined) return;
-      const g = this.geometries![i]![1]!;
-      this.shadowMaterials.set(
-        g,
-        (g.userData.materials as THREE.MeshStandardNodeMaterial[]).map((m) => {
-          let s = shadowOnly.get(m);
-          if (!s) {
-            const c = m.clone() as THREE.MeshStandardNodeMaterial;
-            // Leaves keep their alpha mask in the shadow pass; nothing reaches the screen.
-            c.maskShadowNode = m.maskShadowNode ?? float(1).greaterThan(0);
-            c.maskNode = float(0).greaterThan(1);
-            shadowOnly.set(m, (s = c));
-          }
-          return s;
-        }),
-      );
-    });
     this.nearDirty = true;
     for (const block of this.byBlock.keys()) this.dirtyBlocks.add(block);
   }
@@ -450,6 +434,11 @@ export class Vegetation {
     return new Float32Array(out);
   }
 
+  /** Camera position, for the near/far cross-fade. */
+  setViewer(position: THREE.Vector3): void {
+    viewer.value.copy(position);
+  }
+
   /** Sun (or moon) direction and light, for light shining through the leaves. */
   setSun(light: THREE.DirectionalLight): void {
     sunDirection.value.copy(light.position).normalize();
@@ -530,35 +519,16 @@ export class Vegetation {
       pool.mesh.count = 0;
       pools[Number(key)] = pool;
     }
-    // Nearest trees cast their shadow from the next level (a shadow-only proxy), so the
-    // shadow keeps its shape when they switch levels.
-    const proxies: (Pool | undefined)[] = [];
-    for (const [key, pool] of this.proxies) {
-      pool.count = 0;
-      pool.mesh.count = 0;
-      proxies[Number(key)] = pool;
-    }
     counts.forEach((n, key) => {
       if (!n) return;
       const k = Math.floor(key / levels);
-      const lod = key % levels;
-      const proxied = lod === 0 && KINDS[k]!.family !== undefined;
       pools[key] = this.pool(
         this.near,
         String(key),
-        this.geometries![k]![lod]!,
+        this.geometries![k]![key % levels]!,
         n,
-        KINDS[k]!.shadows && !proxied,
+        KINDS[k]!.shadows,
       );
-      if (proxied)
-        proxies[k] = this.pool(
-          this.proxies,
-          String(k),
-          this.geometries![k]![1]!,
-          n,
-          true,
-          this.shadowMaterials.get(this.geometries![k]![1]!)!,
-        );
     });
     visit((i, r, k, lod, s) => {
       write(
@@ -569,18 +539,15 @@ export class Vegetation {
         r[i + 3]!,
         s,
       );
-      if (lod === 0 && proxies[k])
-        write(proxies[k], r[i]!, r[i + 1]!, r[i + 2]!, r[i + 3]!, s);
     });
     counts.forEach((n, key) => {
       if (n) finish(pools[key]!, false);
     });
-    for (const p of proxies) if (p) finish(p, false);
   }
 
   /** Far stand-ins for the trees of one block that are beyond the near pools. */
   private fillFar(block: string, focus: THREE.Vector3): void {
-    const start = KINDS[0]!.ranges.at(-1)!;
+    const start = NEAR_START;
     const tiles = this.byBlock.get(block);
     const visit = (fn: (r: Float32Array, i: number) => void) => {
       for (const t of tiles ?? []) {
@@ -756,11 +723,11 @@ export class Vegetation {
       .div(vec2(ATLAS_COLS, ATLAS_ROWS));
     const tex = texture(target.texture, cellUv);
     // A touch brighter: the capture has no sky light bouncing inside the crown.
-    m.colorNode = tex.rgb.mul(1.25);
+    m.colorNode = tex.rgb.mul(1.08);
     const t = uv().mul(BILLBOARD);
     const lod = log2(max(max(dFdx(t).length(), dFdy(t).length()), 1));
-    m.maskNode = tex.a.mul(lod.mul(0.3).add(1)).greaterThan(0.45);
-    m.maskShadowNode = tex.a.greaterThan(0.5);
+    m.maskNode = tex.a.mul(lod.mul(0.3).add(1)).greaterThan(0.45).and(showFar);
+    m.maskShadowNode = tex.a.greaterThan(0.5).and(showFar);
     m.normalNode = normalViewGeometry;
     m.emissiveNode = translucency(tex.rgb);
     this.farMaterial = m;
@@ -919,6 +886,28 @@ function bake(mesh: THREE.Mesh): THREE.BufferGeometry {
   return geo;
 }
 
+/** Camera position, for the near/far cross-fade (also in shadow passes). */
+const viewer = uniform(new THREE.Vector3());
+
+/** Screen-space dither (0..1) and how far a fragment is into the billboard range (0..1). */
+function farness(): Node<"float"> {
+  return smoothstep(NEAR_START, NEAR_END, positionWorld.distance(viewer));
+}
+const dither = interleavedGradientNoise(screenCoordinate.xy);
+/** Keep for the 3D trees, and for the billboards (complementary pixels in the cross-fade). */
+const showNear = dither.greaterThanEqual(farness());
+const showFar = dither
+  .lessThan(farness())
+  .and(
+    dither.lessThan(
+      smoothstep(
+        HORIZON_START,
+        HORIZON_END,
+        positionWorld.distance(viewer),
+      ).oneMinus(),
+    ),
+  );
+
 /**
  * Light through the leaves: strongest looking towards the sun, plus a little all round, so
  * backlit and shaded crowns don't go black.
@@ -960,6 +949,15 @@ function makeMaterial(src: THREE.MeshStandardMaterial): THREE.Material {
     m.maskNode = tex.a.mul(lod.mul(0.35).add(1)).greaterThan(0.4);
     // Shadow maps sample the texture coarsely, where the boost would make crowns solid.
     m.maskShadowNode = tex.a.greaterThan(0.5);
+  }
+  // Generated trees and bushes hand over to billboards with distance.
+  if (/^(bark|leaves)_/.test(src.name)) {
+    m.maskNode = m.maskNode
+      ? (m.maskNode as Node<"bool">).and(showNear)
+      : showNear;
+    m.maskShadowNode = m.maskShadowNode
+      ? (m.maskShadowNode as Node<"bool">).and(showNear)
+      : showNear;
   }
   // Generated leaves carry crown normals (outwards from the crown); three would flip them on
   // back faces, which turns half the cards towards the trunk and darkens the crown.

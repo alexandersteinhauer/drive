@@ -228,6 +228,7 @@ function frame(now: number): void {
   roadView.update(pos);
   atmosphere.update(camera);
   vegetation.setSun(atmosphere.sun);
+  vegetation.setViewer(camera.position);
   // The car's sky light/reflections: strong in sunlight (sparkly paint), but down to the
   // terrain's level in a hill's shadow, where it otherwise glows against its surroundings.
   const sunlit = atmosphere.sunVisibility(car.position, (x, z) =>

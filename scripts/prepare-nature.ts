@@ -54,15 +54,12 @@ type Lod = {
   /** Coarse clustering instead of edge collapse (far levels: shape only). */
   sloppy?: boolean;
 };
-/** Generated trees: heavy (13-24k triangles), so even the nearest level is reduced. */
-const EZ_TREE: Lod[] = [
-  { ratio: 0.5, error: 0.004, cards: 0.55 },
-  { ratio: 0.08, error: 0.05, cards: 0.11, twigs: 0.06 },
-];
-const EZ_BUSH: Lod[] = [
-  { ratio: 0.3, error: 0.01, cards: 0.25 },
-  { ratio: 0.08, error: 0.08, cards: 0.05, twigs: 0.15 },
-];
+/**
+ * Generated trees: heavy (13-24k triangles), so reduced; one level only, as the game shows
+ * them as billboards beyond ~45 m.
+ */
+const EZ_TREE: Lod[] = [{ ratio: 0.5, error: 0.004, cards: 0.55 }];
+const EZ_BUSH: Lod[] = [{ ratio: 0.3, error: 0.01, cards: 0.25 }];
 
 /**
  * Trees and bushes generated with EZ-Tree (MIT, Daniel Greenheck): preset, seed, and the
