@@ -27,12 +27,12 @@ import { Surface, type Landscape, type LandSample } from "./world/landscape";
 import { hash2 } from "./world/noise";
 
 /**
- * Trees and bushes generated with EZ-Tree (MIT), grass, ferns and rocks from Quaternius'
+ * Trees and bushes generated with EZ-Tree (MIT), rocks from Quaternius'
  * Stylized Nature MegaKit (CC0); see public/models/CREDITS.md.
  *
  * Terrain tiles scatter items into packed records (x, y, z, yaw, scale, kind). Near the car
  * every kind is drawn from a shared instanced mesh per kind and level of detail, refilled as
- * the car moves; things that end (ground cover, bushes, rocks) grow in and out at the edge
+ * the car moves; things that end (rocks) grow in and out at the edge
  * of their range instead of popping. The nearest trees cast their shadow from the medium
  * level, so it keeps its shape when they switch. Distant trees are billboards from an atlas
  * rendered at load, pooled per 512 m block so off-screen blocks are culled.
@@ -43,10 +43,10 @@ const STRIDE = 6;
  * Trees and bushes are full 3D up close and billboards beyond, cross-faded with a dither
  * between these distances (m); billboards fade out again towards the planting limit.
  */
-const NEAR_START = 35;
-const NEAR_END = 55;
-const HORIZON_START = 650;
-const HORIZON_END = 790;
+const NEAR_START = 25;
+const NEAR_END = 40;
+const HORIZON_START = 1750;
+const HORIZON_END = 2000;
 const TILE_HALF = 64;
 /** Pools hold at least this many instances: smaller ones would bake their matrices into the
  *  shader (a compile per size). */
@@ -77,30 +77,13 @@ const KINDS: Kind[] = [
   { model: "Rock_Medium_1", ranges: [80, 320], shadows: true },
   { model: "Rock_Medium_2", ranges: [80, 320], shadows: true },
   { model: "Rock_Medium_3", ranges: [80, 320], shadows: true },
-  ...[
-    "Grass_Common_Short",
-    "Grass_Common_Tall",
-    "Grass_Wispy_Short",
-    "Grass_Wispy_Tall",
-    "Clover_1",
-    "Fern_1",
-  ].map((model) => ({ model, ranges: [110], shadows: false })),
 ];
-/** Farthest any kind reaches, and ground cover (kinds from FIRST_COVER on). */
+/** Farthest any kind reaches. */
 const MAX_RANGE = Math.max(...KINDS.map((k) => k.ranges.at(-1)!));
-const FIRST_COVER = KINDS.findIndex((k) => !k.shadows);
-const COVER_RANGE = KINDS[FIRST_COVER]!.ranges.at(-1)!;
 const K = Object.fromEntries(KINDS.map((k, i) => [k.model, i]));
 const BROADLEAF = [0, 1, 2, 3, 4];
 const PINE = [5, 6, 7];
 const BUSHES = [8, 9, 10];
-const GRASS = [
-  K.Grass_Common_Short!,
-  K.Grass_Common_Tall!,
-  K.Grass_Wispy_Short!,
-  K.Grass_Wispy_Tall!,
-];
-const FLOWERS = [K.Clover_1!, K.Fern_1!];
 /** Far stand-in model per family, and how its height compares to each kind's (by index). */
 /** Billboard atlas: one cell (px) per tree kind, in a grid of columns x rows. */
 const BILLBOARD = 512;
@@ -140,10 +123,8 @@ interface TileItems {
   cx: number;
   cz: number;
   block: string;
-  /** Packed records, ground cover first. */
+  /** Packed records. */
   records: Float32Array;
-  /** Offset where ground cover ends. */
-  coverEnd: number;
 }
 
 export class Vegetation {
@@ -220,13 +201,7 @@ export class Vegetation {
   ): void {
     const old = this.tiles.get(key);
     if (old) this.unlink(old);
-    const t: TileItems = {
-      cx,
-      cz,
-      block,
-      records,
-      coverEnd: coverFirst(records),
-    };
+    const t: TileItems = { cx, cz, block, records };
     this.tiles.set(key, t);
     let set = this.byBlock.get(block);
     if (!set) this.byBlock.set(block, (set = new Set()));
@@ -253,13 +228,14 @@ export class Vegetation {
 
   /**
    * Scatters a tile's vegetation: trees in clumpy forests, bushes at their edges and in the
-   * meadows, rocks (more on slopes) and, if `cover`, grass and flowers, dense along the road.
+   * meadows, and rocks (more on slopes). `far` tiles get only trees, fewer but larger: they
+   * are only ever seen as billboards.
    */
   *scatter(
     tx: number,
     tz: number,
     size: number,
-    cover: boolean,
+    far: boolean,
   ): Generator<void, Float32Array> {
     const out: number[] = [];
     const land = this.land;
@@ -274,23 +250,26 @@ export class Vegetation {
       s: number,
       kind: number,
     ) => out.push(x, y, z, yaw, s, kind);
-    // Trees and bushes on an 8 m grid.
-    const step = 8;
+    // Trees and bushes on a 5 m grid; far tiles keep every fourth cell's tree, larger, so
+    // the same trees stay when a tile changes between near and far.
+    const step = 5;
     for (let j = 0; j < size / step; j++) {
       for (let i = 0; i < size / step; i++) {
         const gx = Math.floor(x0 / step) + i;
         const gz = Math.floor(z0 / step) + j;
+        if (far && (gx & 1 || gz & 1)) continue;
         const x = (gx + hash2(gx, gz, 11)) * step;
         const z = (gz + hash2(gx, gz, 12)) * step;
         const d = forest(x, z);
         const roll = hash2(gx, gz, 13);
-        // Woods, plus the odd lone tree in the meadows.
-        const isTree = roll < d * 0.85 + 0.012;
-        const isBush = !isTree && roll < d * 0.95 + 0.025 + 0.06 * edgeOf(d);
+        // Dense woods, plus lone trees in the meadows.
+        const isTree = roll < d * 0.92 + 0.02;
+        const isBush =
+          !far && !isTree && roll < d * 0.96 + 0.03 + 0.08 * edgeOf(d);
         if (!isTree && !isBush) continue;
         land.sample(x, z, sample);
         // Woods stop a varying distance from the road, not in a straight wall.
-        const clear = isTree ? 7 + 14 * hash2(gx, gz, 18) ** 2 : 3;
+        const clear = isTree ? 5 + 10 * hash2(gx, gz, 18) ** 2 : 3;
         if (sample.roadDistance < edge + clear) continue;
         if (land.normal(x, z, normal).y < 0.8) continue;
         const yaw = hash2(gx, gz, 15) * Math.PI * 2;
@@ -301,29 +280,15 @@ export class Vegetation {
             0.2 + 0.7 * THREE.MathUtils.smoothstep(sample.height, 5, 35);
           const kinds = pine ? PINE : BROADLEAF;
           const kind = kinds[Math.floor(hash2(gx, gz, 17) * kinds.length)]!;
+          // Far, sunk a little: the coarse terrain there is up to a metre off.
           put(
             x,
-            sample.height - 0.15,
+            sample.height - (far ? 0.8 : 0.15),
             z,
             yaw,
-            0.7 + hash2(gx, gz, 14) ** 1.3 * 1.1,
+            (0.7 + hash2(gx, gz, 14) ** 1.3 * 1.1) * (far ? 1.6 : 1),
             kind,
           );
-          // Undergrowth at its foot: ferns and long grass.
-          if (cover)
-            for (let e = 0; e < 6; e++) {
-              if (hash2(gx, gz, 100 + e) > 0.75) continue;
-              const a = hash2(gx, gz, 110 + e) * 6.283;
-              const r = 0.8 + hash2(gx, gz, 120 + e) * 3;
-              put(
-                x + Math.cos(a) * r,
-                sample.height - 0.1,
-                z + Math.sin(a) * r,
-                a,
-                0.45 + hash2(gx, gz, 130 + e) * 0.35,
-                e % 2 === 0 ? K.Fern_1! : K.Grass_Wispy_Tall!,
-              );
-            }
         } else {
           const kind = BUSHES[Math.floor(hash2(gx, gz, 17) * BUSHES.length)]!;
           put(
@@ -338,6 +303,7 @@ export class Vegetation {
       }
       yield;
     }
+    if (far) return new Float32Array(out);
     // Rocks on a 24 m grid, more on slopes.
     for (let j = 0; j < size / 24; j++)
       for (let i = 0; i < size / 24; i++) {
@@ -372,65 +338,6 @@ export class Vegetation {
           );
         }
       }
-    if (cover) {
-      // Ground cover: a dense band along the road verge, and sparse clumps everywhere.
-      const g = 1.05;
-      for (let j = 0; j < size / g; j++) {
-        for (let i = 0; i < size / g; i++) {
-          const gx = Math.floor(x0 / g) + i;
-          const gz = Math.floor(z0 / g) + j;
-          const x = (gx + hash2(gx, gz, 31)) * g;
-          const z = (gz + hash2(gx, gz, 32)) * g;
-          const roll = hash2(gx, gz, 33);
-          if (roll > 0.75) continue;
-          land.sample(x, z, sample);
-          const r = sample.roadDistance - edge;
-          if (r < 0.25) continue;
-          // Dense near the road, thinning out to sparse meadow clumps by 16 m; in patches.
-          const clump =
-            0.55 +
-            0.45 *
-              Math.sin(x * 0.31 + Math.sin(z * 0.23) * 2) *
-              Math.sin(z * 0.27 + x * 0.05);
-          const keep =
-            (0.75 * (1 - THREE.MathUtils.smoothstep(r, 6, 16)) + 0.04) * clump;
-          if (roll > keep) continue;
-          // Flowers in patches; mostly the cheap short grass tufts, tall and wispy between.
-          const patch =
-            0.5 +
-            0.5 *
-              Math.sin(x * 0.07 + Math.sin(z * 0.05) * 2) *
-              Math.sin(z * 0.061);
-          const flower = hash2(gx, gz, 34) < 0.04 + 0.3 * patch ** 3;
-          const pick = hash2(gx, gz, 35);
-          const kind = flower
-            ? FLOWERS[Math.floor(pick * FLOWERS.length)]!
-            : GRASS[pick < 0.45 ? 0 : pick < 0.7 ? 1 : pick < 0.88 ? 2 : 3]!;
-          // Shorter right at the shoulder, like a mown verge.
-          const base = flower
-            ? 0.13 + hash2(gx, gz, 36) * 0.09
-            : 0.25 + hash2(gx, gz, 36) * 0.25;
-          const s = base * Math.min(1, 0.6 + r / 5);
-          put(x, sample.height - 0.08, z, hash2(gx, gz, 37) * 6.283, s, kind);
-          // Grass grows in clumps: a few more tufts close around this one.
-          if (flower) continue;
-          const extra = Math.floor(hash2(gx, gz, 38) * 3.5);
-          for (let e = 0; e < extra; e++) {
-            const a = hash2(gx, gz, 60 + e) * 6.283;
-            const d = 0.18 + hash2(gx, gz, 70 + e) * 0.3;
-            put(
-              x + Math.cos(a) * d,
-              sample.height - 0.08,
-              z + Math.sin(a) * d,
-              a * 2.3,
-              s * (0.7 + hash2(gx, gz, 90 + e) * 0.4),
-              GRASS[Math.floor(hash2(gx, gz, 80 + e) * 2)]!,
-            );
-          }
-        }
-        if (j % 8 === 7) yield;
-      }
-    }
     return new Float32Array(out);
   }
 
@@ -489,9 +396,7 @@ export class Vegetation {
         const near = Math.hypot(dx, dz);
         if (near > MAX_RANGE) continue;
         const r = t.records;
-        // Ground cover (stored first) only matters close by.
-        const from = near > COVER_RANGE ? t.coverEnd : 0;
-        for (let i = from; i < r.length; i += STRIDE) {
+        for (let i = 0; i < r.length; i += STRIDE) {
           const k = r[i + 5]!;
           const kind = KINDS[k]!;
           const ex = r[i]! - focus.x;
@@ -552,8 +457,7 @@ export class Vegetation {
     const visit = (fn: (r: Float32Array, i: number) => void) => {
       for (const t of tiles ?? []) {
         const r = t.records;
-        // Trees come after the ground cover.
-        for (let i = t.coverEnd; i < r.length; i += STRIDE) {
+        for (let i = 0; i < r.length; i += STRIDE) {
           if (KINDS[r[i + 5]!]!.family === undefined) continue;
           const ex = r[i]! - focus.x;
           const ez = r[i + 2]! - focus.z;
@@ -772,20 +676,6 @@ export class Vegetation {
   }
 }
 
-/** Reorders packed records in place so ground cover comes first; returns where it ends. */
-function coverFirst(r: Float32Array): number {
-  const n = r.length / STRIDE;
-  const isCover = (i: number) => (r[i * STRIDE + 5]! >= FIRST_COVER ? 1 : 0);
-  const order = [...Array(n).keys()].sort((a, b) => isCover(b) - isCover(a));
-  const copy = r.slice();
-  order.forEach((src, dst) =>
-    r.set(copy.subarray(src * STRIDE, src * STRIDE + STRIDE), dst * STRIDE),
-  );
-  let end = 0;
-  while (end < n && isCover(end)) end++;
-  return end * STRIDE;
-}
-
 /**
  * Forest density (0..1): groves and woods with open meadows between them, from a large
  * field broken up by a smaller one.
@@ -801,7 +691,7 @@ export function forest(x: number, z: number): number {
     0.5 *
       Math.sin(x * 0.021 + Math.sin(z * 0.017) * 1.7) *
       Math.sin(z * 0.019 + 0.7);
-  return THREE.MathUtils.smoothstep(large * 0.7 + small * 0.45, 0.42, 0.8);
+  return THREE.MathUtils.smoothstep(large * 0.7 + small * 0.45, 0.35, 0.65);
 }
 
 /** Highest at a forest's edge (density around 0.1-0.4), for bushes. */

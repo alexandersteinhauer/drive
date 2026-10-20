@@ -42,6 +42,40 @@ export function loadLayer(name: string): Layer {
   return { color: load("color", true), normal: load("normal", false) };
 }
 
+let grassLayer: Layer | null = null;
+/** The meadow grass layer, shared with the grass blades. */
+function meadowLayer(): Layer {
+  return (grassLayer ??= loadLayer("grass004"));
+}
+
+/**
+ * Meadow colour at world position `xz`: the grass texture at two scales, tinted by the
+ * "variation" (dry patches) and "forest" (shaded floor) values. `level` picks a fixed mip
+ * level, for lookups that are constant over a primitive (grass blades take their root's colour).
+ */
+export function meadowColor(
+  xz: Vec2,
+  variation: THREE.Node<"float">,
+  forest: THREE.Node<"float">,
+  level?: number,
+): THREE.Node<"vec3"> {
+  const grass = meadowLayer();
+  const uv1 = xz.div(3.2);
+  // A larger, rotated sample breaks up repetition.
+  const uv2 = vec2(
+    xz.x.mul(0.8).sub(xz.y.mul(0.6)),
+    xz.x.mul(0.6).add(xz.y.mul(0.8)),
+  ).div(11.3);
+  const at = (uv: Vec2) =>
+    level === undefined
+      ? texture(grass.color, uv).rgb
+      : texture(grass.color, uv).level(float(level)).rgb;
+  const dryTint = mix(vec3(1), vec3(1.25, 1.12, 0.72), variation.mul(0.6)).mul(
+    mix(vec3(1), vec3(0.55, 0.6, 0.45), forest.mul(0.85)),
+  );
+  return mix(at(uv1), at(uv2), 0.4).mul(dryTint);
+}
+
 /** Samples a tangent-space normal map, decoded to [-1, 1], with xy scaled by `strength`. */
 function decode(t: THREE.Texture, uv: Vec2, strength: number) {
   const s = texture(t, uv).rgb.mul(2).sub(1);
@@ -59,7 +93,7 @@ function decode(t: THREE.Texture, uv: Vec2, strength: number) {
 export function terrainMaterial(
   roadEdge: number,
 ): THREE.MeshStandardNodeMaterial {
-  const grass = loadLayer("grass004");
+  const grass = meadowLayer();
   const dirt = loadLayer("ground103");
   const rock = loadLayer("rock030");
   const gravel = loadLayer("gravel040");
@@ -67,12 +101,7 @@ export function terrainMaterial(
   const p = positionWorld;
   const n = normalWorld.normalize();
   const uvTop = vec2(p.x, p.z);
-  // Grass: base tiling plus a larger, rotated sample to break repetition.
   const grassUv = uvTop.div(3.2);
-  const grassUv2 = vec2(
-    p.x.mul(0.8).sub(p.z.mul(0.6)),
-    p.x.mul(0.6).add(p.z.mul(0.8)),
-  ).div(11.3);
   const dirtUv = uvTop.div(3.5);
   const gravelUv = uvTop.div(2.5);
 
@@ -117,16 +146,8 @@ export function terrainMaterial(
   const rz = vec2(p.x, p.y).div(rockScale);
 
   // Colour.
-  const grassColor = mix(
-    texture(grass.color, grassUv).rgb,
-    texture(grass.color, grassUv2).rgb,
-    0.4,
-  );
-  const dryTint = mix(vec3(1), vec3(1.25, 1.12, 0.72), variation.mul(0.6)).mul(
-    mix(vec3(1), vec3(0.55, 0.6, 0.45), forest.mul(0.85)),
-  );
   const top = mix(
-    grassColor.mul(dryTint),
+    meadowColor(uvTop, variation, forest),
     texture(dirt.color, dirtUv).rgb,
     dirtW,
   );

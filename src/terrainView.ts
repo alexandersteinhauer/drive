@@ -13,7 +13,8 @@ const LODS = [
   { segments: 16, within: 1400 },
   { segments: 8, within: Infinity },
 ];
-const TREES_WITHIN = 800;
+/** Trees are planted this far out (billboards beyond the near tiles). */
+const TREES_WITHIN = 2050;
 /**
  * Beyond this distance, whole blocks of BLOCK x BLOCK tiles are built as one mesh (same
  * vertex spacing), cutting draw calls: each costs CPU time and garbage in the renderer.
@@ -21,7 +22,7 @@ const TREES_WITHIN = 800;
 const COARSE_FROM = 700;
 const SKIRT = 6;
 /** Terrain under the road is pushed down so it never pokes through the road mesh. */
-const UNDER_ROAD = 0.3;
+export const UNDER_ROAD = 0.3;
 
 /** Terrain blocks (and vegetation pools) span BLOCK x BLOCK tiles. */
 const BLOCK = 4;
@@ -43,7 +44,7 @@ interface Wanted {
   z0: number;
   size: number;
   segments: number;
-  /** Tiles (tx, tz) to scatter vegetation on, and whether with ground cover. */
+  /** Tiles (tx, tz) to scatter vegetation on, and whether as far (trees only, sparser). */
   treeTiles: [number, number, boolean][];
   dist: number;
 }
@@ -139,7 +140,7 @@ export class TerrainView {
                 (tx + 0.5) * TILE - cx,
                 (tz + 0.5) * TILE - cz,
               );
-              if (d <= TREES_WITHIN) treeTiles.push([tx, tz, false]);
+              if (d <= TREES_WITHIN) treeTiles.push([tx, tz, true]);
             }
           wanted.push({
             key: `b${bx},${bz}`,
@@ -170,8 +171,7 @@ export class TerrainView {
               z0: tz * TILE,
               size: TILE,
               segments: LODS[lod]!.segments,
-              treeTiles:
-                dist <= TREES_WITHIN ? [[tx, tz, dist <= LODS[0]!.within]] : [],
+              treeTiles: dist <= TREES_WITHIN ? [[tx, tz, false]] : [],
               dist,
             });
           }
@@ -305,8 +305,8 @@ export class TerrainView {
     geo.setAttribute("forest", new THREE.BufferAttribute(forestDensity, 1));
     geo.setIndex(new THREE.BufferAttribute(index, 1));
     const planted: [string, Float32Array][] = [];
-    for (const [tx, tz, cover] of w.treeTiles) {
-      const items = yield* this.vegetation.scatter(tx, tz, TILE, cover);
+    for (const [tx, tz, far] of w.treeTiles) {
+      const items = yield* this.vegetation.scatter(tx, tz, TILE, far);
       if (items.length) planted.push([`${tx},${tz}`, items]);
     }
     // No longer wanted after all (the focus moved on while it was built).
@@ -342,7 +342,7 @@ function blockKey(tileKey: string): string {
 }
 
 /** Large dry/green patches across the meadows (0 = lush, 1 = dry), plus a little noise. */
-function variationAt(x: number, z: number): number {
+export function variationAt(x: number, z: number): number {
   const dry = 0.5 + 0.5 * Math.sin(x * 0.011 + Math.sin(z * 0.007) * 3);
   return Math.min(1, dry * 0.9 + hash2(x, z, 3) * 0.1);
 }

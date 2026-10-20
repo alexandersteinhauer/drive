@@ -21,6 +21,7 @@ import { bmwI4, sportsCoupe } from "./sim/config";
 import { RoadView } from "./roadView";
 import { TerrainView } from "./terrainView";
 import { Vegetation } from "./vegetation";
+import { Grass } from "./grass";
 import { Landscape } from "./world/landscape";
 
 const DT = 1 / 480;
@@ -72,7 +73,8 @@ const vegetation = new Vegetation(
 );
 const terrain = new TerrainView(land, vegetation);
 const roadView = new RoadView(land);
-scene.add(terrain.group, roadView.group, vegetation.group);
+const grass = new Grass(land);
+scene.add(terrain.group, roadView.group, vegetation.group, grass.group);
 
 const camDir = new THREE.Vector3(0, 0, -1);
 const fwd = new THREE.Vector3();
@@ -107,6 +109,7 @@ if (import.meta.env.DEV)
     placeOnRoad,
     terrain,
     vegetation,
+    grass,
     roadView,
     renderer,
     camera,
@@ -229,6 +232,8 @@ function frame(now: number): void {
   atmosphere.update(camera);
   vegetation.setSun(atmosphere.sun);
   vegetation.setViewer(camera.position);
+  grass.setSun(atmosphere.sun);
+  grass.update(camera.position);
   // The car's sky light/reflections: strong in sunlight (sparkly paint), but down to the
   // terrain's level in a hill's shadow, where it otherwise glows against its surroundings.
   const sunlit = atmosphere.sunVisibility(car.position, (x, z) =>
