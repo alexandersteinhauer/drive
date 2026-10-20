@@ -1,7 +1,12 @@
 import * as THREE from "three/webgpu";
 import {
+  atan,
   attribute,
   cameraPosition,
+  cameraWorldMatrix,
+  positionGeometry,
+  positionLocal,
+  transformNormalToView,
   dFdx,
   dFdy,
   float,
@@ -18,6 +23,7 @@ import {
   uv,
   vec2,
   vec3,
+  vec4,
 } from "three/tsl";
 import type { Node } from "three/webgpu";
 import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
@@ -34,8 +40,9 @@ import { hash2 } from "./world/noise";
  * every kind is drawn from a shared instanced mesh per kind and level of detail, refilled as
  * the car moves; things that end (rocks) grow in and out at the edge
  * of their range instead of popping. The nearest trees cast their shadow from the medium
- * level, so it keeps its shape when they switch. Distant trees are billboards from an atlas
- * rendered at load, pooled per 512 m block so off-screen blocks are culled.
+ * level, so it keeps its shape when they switch. Distant trees are camera-facing billboards
+ * from a multi-view atlas rendered at load, pooled per 512 m block so off-screen blocks are
+ * culled.
  */
 
 const STRIDE = 6;
@@ -43,8 +50,8 @@ const STRIDE = 6;
  * Trees and bushes are full 3D up close and billboards beyond, cross-faded with a dither
  * between these distances (m); billboards fade out again towards the planting limit.
  */
-const NEAR_START = 25;
-const NEAR_END = 40;
+const NEAR_START = 40;
+const NEAR_END = 60;
 const HORIZON_START = 1750;
 const HORIZON_END = 2000;
 const TILE_HALF = 64;
@@ -86,9 +93,14 @@ const PINE = [5, 6, 7];
 const BUSHES = [8, 9, 10];
 /** Far stand-in model per family, and how its height compares to each kind's (by index). */
 /** Billboard atlas: one cell (px) per tree kind, in a grid of columns x rows. */
-const BILLBOARD = 512;
-const ATLAS_COLS = 4;
-const ATLAS_ROWS = 3;
+/**
+ * Billboard atlas: each tree kind (a row) seen from VIEWS directions around it (columns),
+ * CELL px square each.
+ */
+const CELL = 384;
+/** Billboard brightness relative to the captured (unshaded) crown colour. */
+const BILLBOARD_SHADE = 0.5;
+const VIEWS = 8;
 
 /** Direction towards the sun and its light (colour times intensity), for translucency. */
 const sunDirection = uniform(new THREE.Vector3(0, 1, 0));
@@ -228,8 +240,8 @@ export class Vegetation {
 
   /**
    * Scatters a tile's vegetation: trees in clumpy forests, bushes at their edges and in the
-   * meadows, and rocks (more on slopes). `far` tiles get only trees, fewer but larger: they
-   * are only ever seen as billboards.
+   * meadows, and rocks (more on slopes). `far` tiles get only the trees: they are only
+   * ever seen as billboards.
    */
   *scatter(
     tx: number,
@@ -250,14 +262,13 @@ export class Vegetation {
       s: number,
       kind: number,
     ) => out.push(x, y, z, yaw, s, kind);
-    // Trees and bushes on a 5 m grid; far tiles keep every fourth cell's tree, larger, so
-    // the same trees stay when a tile changes between near and far.
+    // Trees and bushes on a 5 m grid; far tiles the same trees, so nothing changes when a
+    // tile turns from near to far.
     const step = 5;
     for (let j = 0; j < size / step; j++) {
       for (let i = 0; i < size / step; i++) {
         const gx = Math.floor(x0 / step) + i;
         const gz = Math.floor(z0 / step) + j;
-        if (far && (gx & 1 || gz & 1)) continue;
         const x = (gx + hash2(gx, gz, 11)) * step;
         const z = (gz + hash2(gx, gz, 12)) * step;
         const d = forest(x, z);
@@ -286,7 +297,7 @@ export class Vegetation {
             sample.height - (far ? 0.8 : 0.15),
             z,
             yaw,
-            (0.7 + hash2(gx, gz, 14) ** 1.3 * 1.1) * (far ? 1.6 : 1),
+            0.7 + hash2(gx, gz, 14) ** 1.3 * 1.1,
             kind,
           );
         } else {
@@ -480,14 +491,14 @@ export class Vegetation {
     const p = this.pool(this.far, block, this.farGeometry!, n, true, [
       this.farMaterial!,
     ]);
-    // Own copy of the quads per pool, for its per-instance atlas cells.
+    // Own copy of the quad per pool, for its per-instance atlas rows and yaws.
     let cells = p.mesh.geometry.getAttribute("cell") as
       THREE.InstancedBufferAttribute | undefined;
     if (!cells || cells.count < p.mesh.instanceMatrix.count) {
       p.mesh.geometry = this.farGeometry!.clone();
       cells = new THREE.InstancedBufferAttribute(
-        new Float32Array(p.mesh.instanceMatrix.count),
-        1,
+        new Float32Array(p.mesh.instanceMatrix.count * 3),
+        3,
       );
       p.mesh.geometry.setAttribute("cell", cells);
     }
@@ -496,14 +507,17 @@ export class Vegetation {
       const kind = r[i + 5]!;
       const box = this.farBoxes[kind]!;
       const s = r[i + 4]!;
-      cellArray[p.count] = this.cellOf[kind]!;
-      // Unit quads stretched to the kind's crown width and height, standing on its base.
+      cellArray[p.count * 3] = this.cellOf[kind]!;
+      cellArray[p.count * 3 + 1] = r[i + 3]!;
+      cellArray[p.count * 3 + 2] = box.width * s;
+      // A unit quad stretched to the kind's width and height, standing on its base; it
+      // turns to face the camera in the shader, so the matrix has no rotation.
       writeScaled(
         p,
         r[i]!,
         r[i + 1]! + box.bottom * s,
         r[i + 2]!,
-        r[i + 3]!,
+        0,
         box.width * s,
         (box.top - box.bottom) * s,
       );
@@ -513,20 +527,17 @@ export class Vegetation {
   }
 
   /**
-   * Distant stand-ins for trees: every tree kind's side view rendered once (unlit colour and
-   * alpha) into a cell of one atlas, shown on two crossed quads lit with crown normals like
-   * the near leaves. Each far instance picks its kind's cell, so a block takes one draw.
+   * Distant stand-ins for trees: every tree kind rendered once from VIEWS sides (unlit colour
+   * and alpha) into one atlas, shown on a quad that faces the camera, with the view matching
+   * the direction it's seen from (so the outline doesn't change at the hand-over to 3D), lit
+   * with crown normals like the near leaves. A block takes one draw.
    */
   private billboards(): void {
     const kinds = KINDS.flatMap((k, i) => (k.family === undefined ? [] : [i]));
-    const target = new THREE.RenderTarget(
-      BILLBOARD * ATLAS_COLS,
-      BILLBOARD * ATLAS_ROWS,
-      {
-        generateMipmaps: true,
-        minFilter: THREE.LinearMipmapLinearFilter,
-      },
-    );
+    const target = new THREE.RenderTarget(CELL * VIEWS, CELL * kinds.length, {
+      generateMipmaps: true,
+      minFilter: THREE.LinearMipmapLinearFilter,
+    });
     const r = this.renderer;
     const prevTarget = r.getRenderTarget();
     const prevColor = r.getClearColor(new THREE.Color());
@@ -541,7 +552,12 @@ export class Vegetation {
     kinds.forEach((kind, cell) => {
       const tree = this.geometries![kind]![0]!;
       const box = tree.boundingBox!;
-      const w = Math.max(box.max.x - box.min.x, box.max.z - box.min.z) * 1.02;
+      // Wide enough for the crown from any side: twice its farthest reach from the trunk.
+      const at = tree.getAttribute("position");
+      let reach = 0;
+      for (let i = 0; i < at.count; i++)
+        reach = Math.max(reach, Math.hypot(at.getX(i), at.getZ(i)));
+      const w = reach * 2 * 1.02;
       this.farBoxes[kind] = { width: w, bottom: box.min.y, top: box.max.y };
       const flat = (
         tree.userData.materials as THREE.MeshStandardNodeMaterial[]
@@ -561,15 +577,14 @@ export class Vegetation {
         0.1,
         400,
       );
-      camera.position.set(0, 0, 200);
-      camera.lookAt(0, 0, 0);
-      target.viewport.set(
-        (cell % ATLAS_COLS) * BILLBOARD,
-        Math.floor(cell / ATLAS_COLS) * BILLBOARD,
-        BILLBOARD,
-        BILLBOARD,
-      );
-      r.render(capture, camera);
+      // View k looks at the tree from angle 2 pi k / VIEWS (from +Z towards +X).
+      for (let k = 0; k < VIEWS; k++) {
+        const a = (k / VIEWS) * Math.PI * 2;
+        camera.position.set(Math.sin(a) * 200, 0, Math.cos(a) * 200);
+        camera.lookAt(0, 0, 0);
+        target.viewport.set(k * CELL, cell * CELL, CELL, CELL);
+        r.render(capture, camera);
+      }
       for (const m of flat) m.dispose();
     });
     target.viewport.set(0, 0, target.width, target.height);
@@ -579,39 +594,9 @@ export class Vegetation {
     this.cellOf = KINDS.map((_, i) => kinds.indexOf(i));
     this.atlas = target;
 
-    // Two crossed unit quads (x, z in -0.5..0.5, y in 0..1); crown normals out from the
-    // centre and a little up.
-    const pos: number[] = [];
-    const nor: number[] = [];
-    const uvs: number[] = [];
-    const index: number[] = [];
-    for (const axis of [0, 1]) {
-      const base = pos.length / 3;
-      for (const [u, v] of [
-        [0, 0],
-        [1, 0],
-        [1, 1],
-        [0, 1],
-      ] as const) {
-        const a = u - 0.5;
-        const p = axis === 0 ? [a, v, 0] : [0, v, a];
-        pos.push(...p);
-        const n = new THREE.Vector3(
-          p[0]! * 2,
-          (v - 0.5) * 2 + 0.3,
-          p[2]! * 2,
-        ).normalize();
-        nor.push(n.x, n.y, n.z);
-        uvs.push(u, v);
-      }
-      index.push(base, base + 1, base + 2, base, base + 2, base + 3);
-    }
-    const geo = new THREE.BufferGeometry();
-    geo.setAttribute("position", new THREE.Float32BufferAttribute(pos, 3));
-    geo.setAttribute("normal", new THREE.Float32BufferAttribute(nor, 3));
-    geo.setAttribute("uv", new THREE.Float32BufferAttribute(uvs, 2));
-    geo.setIndex(index);
-    geo.addGroup(0, index.length, 0);
+    // One unit quad (x in -0.5..0.5, y in 0..1), turned to the camera in the shader.
+    const geo = new THREE.PlaneGeometry(1, 1).translate(0, 0.5, 0);
+    geo.addGroup(0, geo.index!.count, 0);
     this.farGeometry = geo;
 
     const m = new THREE.MeshStandardNodeMaterial({
@@ -619,16 +604,52 @@ export class Vegetation {
       metalness: 0,
       side: THREE.DoubleSide,
     });
-    const cell = attribute<"float">("cell", "float");
+    // Per instance: atlas row (kind), yaw and width.
+    const cell = attribute<"vec3">("cell", "vec3");
+    // The quad faces the camera (turning about the vertical only): its right-hand side is
+    // perpendicular to the camera's backward axis. In shadow passes that camera is the light's,
+    // so the shadow is the crown's outline as the sun sees it.
+    const back = cameraWorldMatrix.mul(vec4(0, 0, 1, 0)).xyz;
+    const back2 = vec2(back.x, back.z).normalize();
+    const right = vec3(back2.y, 0, back2.x.negate());
+    // The instance matrix (position and size, no rotation) has already placed the quad
+    // facing +Z; swing its sides round to `right`.
+    const side = positionGeometry.x.mul(cell.z);
+    m.positionNode = positionLocal.add(
+      vec3(side.mul(right.x.sub(1)), 0, side.mul(right.z)),
+    );
+    // The captured view nearest the direction the tree is seen from, two neighbours mixed
+    // with a dither in between, so the outline matches the 3D tree's from any side.
+    const toCamera = cameraPosition.xz.sub(positionWorld.xz);
+    const views = atan(toCamera.x, toCamera.y)
+      .sub(cell.y)
+      .div(Math.PI * 2)
+      .fract()
+      .mul(VIEWS);
+    const first = views.floor();
+    const pick = interleavedGradientNoise(
+      screenCoordinate.xy.add(vec2(17.3, 41.9)),
+    )
+      .lessThan(views.fract())
+      .select(first.add(1).mod(VIEWS), first);
     // Render targets are stored top row first and sampled unflipped in WebGPU: the cell's top
     // (the treetop) is at its smallest v.
-    const cellUv = vec2(cell.mod(ATLAS_COLS), cell.div(ATLAS_COLS).floor())
-      .add(vec2(uv().x, uv().y.oneMinus()))
-      .div(vec2(ATLAS_COLS, ATLAS_ROWS));
-    const tex = texture(target.texture, cellUv);
-    // A touch brighter: the capture has no sky light bouncing inside the crown.
-    m.colorNode = tex.rgb.mul(1.08);
-    const t = uv().mul(BILLBOARD);
+    const inCell = vec2(uv().x, uv().y.oneMinus()).div(
+      vec2(VIEWS, kinds.length),
+    );
+    const cellUv = vec2(pick, cell.x)
+      .div(vec2(VIEWS, kinds.length))
+      .add(inCell);
+    // Gradients from the continuous coordinates: the dithered view jumps between
+    // neighbouring pixels would otherwise pick the smallest mip level.
+    const tex = texture(target.texture, cellUv).grad(
+      dFdx(inCell),
+      dFdy(inCell),
+    );
+    // Darker than the capture: a 3D crown shades itself (its inner and far-side leaves are
+    // in shadow), which a flat card can't; matched to the 3D trees at the hand-over.
+    m.colorNode = tex.rgb.mul(BILLBOARD_SHADE);
+    const t = uv().mul(CELL);
     const lod = log2(max(max(dFdx(t).length(), dFdy(t).length()), 1));
     m.maskNode = tex.a.mul(lod.mul(0.3).add(1)).greaterThan(0.45).and(showFar);
     // The far shadow cascades see billboards only a few texels wide, sampled from small mip
@@ -638,8 +659,15 @@ export class Vegetation {
       .mul(lod.mul(0.3).add(1))
       .greaterThan(0.5)
       .and(showFar);
-    m.normalNode = normalViewGeometry;
-    m.emissiveNode = translucency(tex.rgb);
+    // Crown normals: out from the centre, a little up, and towards the camera, like the
+    // near trees' leaves.
+    const crown = right
+      .mul(uv().x.sub(0.5).mul(2))
+      .add(vec3(0, uv().y.sub(0.5).mul(2).add(0.3), 0))
+      .add(vec3(back2.x, 0, back2.y).mul(0.9))
+      .normalize();
+    m.normalNode = transformNormalToView(crown);
+    m.emissiveNode = translucency(tex.rgb.mul(BILLBOARD_SHADE));
     this.farMaterial = m;
   }
 
