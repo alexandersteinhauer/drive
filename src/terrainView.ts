@@ -2,7 +2,7 @@ import * as THREE from "three/webgpu";
 import { Surface, type Landscape, type LandSample } from "./world/landscape";
 import { hash2 } from "./world/noise";
 import { terrainMaterial } from "./terrainMaterial";
-import type { Vegetation } from "./vegetation";
+import { forest, type Vegetation } from "./vegetation";
 
 const TILE = 128;
 const RADIUS = 2200;
@@ -228,6 +228,7 @@ export class TerrainView {
     const nor = new Float32Array(count * 3);
     const variation = new Float32Array(count);
     const roadDist = new Float32Array(count);
+    const forestDensity = new Float32Array(count);
     const edge = this.land.road.edge;
     const put = (k: number, i: number, j: number, drop: number) => {
       const h = heights[(j + 1) * g + i + 1]!;
@@ -251,6 +252,7 @@ export class TerrainView {
       nor[k * 3 + 1] = ny / len;
       nor[k * 3 + 2] = nz / len;
       variation[k] = variationAt(x0 + i * step, z0 + j * step);
+      forestDensity[k] = forest(x0 + i * step, z0 + j * step);
       roadDist[k] = Math.min(road, 100);
     };
     for (let j = 0; j < v; j++) {
@@ -300,6 +302,7 @@ export class TerrainView {
     geo.setAttribute("normal", new THREE.BufferAttribute(nor, 3));
     geo.setAttribute("variation", new THREE.BufferAttribute(variation, 1));
     geo.setAttribute("road", new THREE.BufferAttribute(roadDist, 1));
+    geo.setAttribute("forest", new THREE.BufferAttribute(forestDensity, 1));
     geo.setIndex(new THREE.BufferAttribute(index, 1));
     const planted: [string, Float32Array][] = [];
     for (const [tx, tz, cover] of w.treeTiles) {

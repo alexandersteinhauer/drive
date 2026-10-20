@@ -27,6 +27,7 @@ import { hash2 } from "./world/noise";
  */
 
 const STRIDE = 6;
+const TILE_HALF = 64;
 /** Pools hold at least this many instances: smaller ones would bake their matrices into the
  *  shader (a compile per size). */
 const MIN_CAPACITY = 1100;
@@ -67,6 +68,10 @@ const KINDS: Kind[] = [
     "Fern_1",
   ].map((model) => ({ model, ranges: [110], shadows: false })),
 ];
+/** Farthest any kind reaches, and ground cover (kinds from FIRST_COVER on). */
+const MAX_RANGE = Math.max(...KINDS.map((k) => k.ranges.at(-1)!));
+const FIRST_COVER = KINDS.findIndex((k) => !k.shadows);
+const COVER_RANGE = KINDS[FIRST_COVER]!.ranges.at(-1)!;
 const K = Object.fromEntries(KINDS.map((k, i) => [k.model, i]));
 const BROADLEAF = [0, 1, 2, 3, 4];
 const PINE = [5, 6, 7, 8, 9];
@@ -81,8 +86,6 @@ const FLOWERS = [K.Clover_1!, K.Flower_3_Group!, K.Flower_4_Group!, K.Fern_1!];
 const FAR = ["CommonTree_3_lod2", "Pine_2_lod2"];
 /** Far trees in blocks nearer than this (m, to the block's square) cast shadows. */
 const FAR_SHADOWS = 250;
-/** Distance (m) beyond which trees are left out entirely (the terrain stops planting them). */
-const TREE_END = 1000;
 
 /** Leaf tints (white textures in the kit). */
 const TINTS: Record<string, THREE.ColorRepresentation> = {
@@ -93,7 +96,7 @@ const TINTS: Record<string, THREE.ColorRepresentation> = {
   // Towards the terrain's yellow-olive meadow grass.
   grass: 0xc9c47e,
   // Greyer, less orange than the kit's stylized bark.
-  bark: 0x9a948e,
+  bark: 0xd2cac2,
 };
 
 const sample: LandSample = {
@@ -112,7 +115,10 @@ interface TileItems {
   cx: number;
   cz: number;
   block: string;
+  /** Packed records, ground cover first. */
   records: Float32Array;
+  /** Offset where ground cover ends. */
+  coverEnd: number;
 }
 
 export class Vegetation {
@@ -121,6 +127,9 @@ export class Vegetation {
   /** Geometry per kind and level, and the far stand-ins; null until loaded. */
   private geometries: THREE.BufferGeometry[][] | null = null;
   private farGeometries: THREE.BufferGeometry[] = [];
+  private farScale: number[] = [];
+  /** Tiles per far block. */
+  private readonly byBlock = new Map<string, Set<TileItems>>();
   private readonly near = new Map<string, Pool>();
   private readonly far = new Map<string, Pool>();
   private readonly dirtyBlocks = new Set<string>();
@@ -166,8 +175,15 @@ export class Vegetation {
       k.ranges.map((_, lod) => geometry(`${k.model}_lod${lod}`)),
     );
     this.farGeometries = FAR.map(geometry);
+    // Far stand-ins scaled to each kind's height.
+    this.farScale = KINDS.map((k, i) =>
+      k.family === undefined
+        ? 1
+        : this.geometries![i]![0]!.boundingBox!.max.y /
+          this.farHeight(k.family),
+    );
     this.nearDirty = true;
-    for (const t of this.tiles.values()) this.dirtyBlocks.add(t.block);
+    for (const block of this.byBlock.keys()) this.dirtyBlocks.add(block);
   }
 
   /** Registers a tile's items (from `scatter`). */
@@ -178,7 +194,19 @@ export class Vegetation {
     block: string,
     records: Float32Array,
   ): void {
-    this.tiles.set(key, { cx, cz, block, records });
+    const old = this.tiles.get(key);
+    if (old) this.unlink(old);
+    const t: TileItems = {
+      cx,
+      cz,
+      block,
+      records,
+      coverEnd: coverFirst(records),
+    };
+    this.tiles.set(key, t);
+    let set = this.byBlock.get(block);
+    if (!set) this.byBlock.set(block, (set = new Set()));
+    set.add(t);
     this.dirtyBlocks.add(block);
     this.nearDirty = true;
   }
@@ -188,8 +216,15 @@ export class Vegetation {
     const t = this.tiles.get(key);
     if (!t || t.records !== records) return;
     this.tiles.delete(key);
-    this.dirtyBlocks.add(t.block);
+    this.unlink(t);
     this.nearDirty = true;
+  }
+
+  private unlink(t: TileItems): void {
+    const set = this.byBlock.get(t.block);
+    set?.delete(t);
+    if (set && set.size === 0) this.byBlock.delete(t.block);
+    this.dirtyBlocks.add(t.block);
   }
 
   /**
@@ -239,17 +274,32 @@ export class Vegetation {
           // Pines on the higher ground, broadleaf below, mixed in between.
           const pine =
             hash2(gx, gz, 16) <
-            THREE.MathUtils.smoothstep(sample.height, 5, 35);
+            0.2 + 0.7 * THREE.MathUtils.smoothstep(sample.height, 5, 35);
           const kinds = pine ? PINE : BROADLEAF;
           const kind = kinds[Math.floor(hash2(gx, gz, 17) * kinds.length)]!;
           put(
             x,
-            sample.height - 0.1,
+            sample.height - 0.15,
             z,
             yaw,
-            1 + hash2(gx, gz, 14) * 0.9,
+            1.3 + hash2(gx, gz, 14) ** 1.5 * 1.1,
             kind,
           );
+          // Undergrowth at its foot: ferns and long grass.
+          if (cover)
+            for (let e = 0; e < 6; e++) {
+              if (hash2(gx, gz, 100 + e) > 0.75) continue;
+              const a = hash2(gx, gz, 110 + e) * 6.283;
+              const r = 0.8 + hash2(gx, gz, 120 + e) * 3;
+              put(
+                x + Math.cos(a) * r,
+                sample.height - 0.1,
+                z + Math.sin(a) * r,
+                a,
+                0.45 + hash2(gx, gz, 130 + e) * 0.35,
+                e % 2 === 0 ? K.Fern_1! : K.Grass_Wispy_Tall!,
+              );
+            }
         } else {
           const kind =
             hash2(gx, gz, 17) < 0.7 ? K.Bush_Common! : K.Bush_Common_Flowers!;
@@ -258,7 +308,7 @@ export class Vegetation {
             sample.height - 0.1,
             z,
             yaw,
-            0.7 + hash2(gx, gz, 14) * 0.8,
+            0.55 + hash2(gx, gz, 14) * 0.5,
             kind,
           );
         }
@@ -301,7 +351,7 @@ export class Vegetation {
       }
     if (cover) {
       // Ground cover: a dense band along the road verge, and sparse clumps everywhere.
-      const g = 1.1;
+      const g = 1.05;
       for (let j = 0; j < size / g; j++) {
         for (let i = 0; i < size / g; i++) {
           const gx = Math.floor(x0 / g) + i;
@@ -339,6 +389,21 @@ export class Vegetation {
             : 0.25 + hash2(gx, gz, 36) * 0.25;
           const s = base * Math.min(1, 0.6 + r / 5);
           put(x, sample.height - 0.08, z, hash2(gx, gz, 37) * 6.283, s, kind);
+          // Grass grows in clumps: a few more tufts close around this one.
+          if (flower) continue;
+          const extra = Math.floor(hash2(gx, gz, 38) * 3.5);
+          for (let e = 0; e < extra; e++) {
+            const a = hash2(gx, gz, 60 + e) * 6.283;
+            const d = 0.18 + hash2(gx, gz, 70 + e) * 0.3;
+            put(
+              x + Math.cos(a) * d,
+              sample.height - 0.08,
+              z + Math.sin(a) * d,
+              a * 2.3,
+              s * (0.7 + hash2(gx, gz, 90 + e) * 0.4),
+              GRASS[Math.floor(hash2(gx, gz, 80 + e) * 2)]!,
+            );
+          }
         }
         if (j % 8 === 7) yield;
       }
@@ -358,113 +423,151 @@ export class Vegetation {
       this.nearDirty = false;
       this.fillNear(focus);
       // Blocks near the focus hand trees to and from the near pools.
-      const reach = KINDS[0]!.ranges.at(-1)! + REFILL + 400;
-      for (const t of this.tiles.values())
-        if (Math.hypot(t.cx - focus.x, t.cz - focus.z) < reach)
-          this.dirtyBlocks.add(t.block);
+      // Blocks across the near/far boundary hand trees over; the others only update shadows.
+      const handover = KINDS[0]!.ranges.at(-1)! + 2 * REFILL;
+      for (const block of this.byBlock.keys())
+        if (blockDistance(block, focus) < handover) this.dirtyBlocks.add(block);
+      for (const [key, p] of this.far)
+        p.mesh.castShadow =
+          blockDistance(key.split(":")[0]!, focus) < FAR_SHADOWS;
     }
     for (const block of this.dirtyBlocks) this.fillFar(block, this.lastFill);
     this.dirtyBlocks.clear();
   }
 
+  /**
+   * Refills the near pools: two passes over the records in range (count, then write straight
+   * into the pools), skipping tiles too far for any of their kinds.
+   */
   private fillNear(focus: THREE.Vector3): void {
-    const maxRange = Math.max(...KINDS.map((k) => k.ranges.at(-1)!));
-    const counts = new Map<string, number>();
-    const writes: [string, number, number, number, number, number, number][] =
-      [];
-    for (const t of this.tiles.values()) {
-      if (Math.hypot(t.cx - focus.x, t.cz - focus.z) > maxRange + 100) continue;
-      const r = t.records;
-      for (let i = 0; i < r.length; i += STRIDE) {
-        const kind = KINDS[r[i + 5]!]!;
-        const d = Math.hypot(r[i]! - focus.x, r[i + 2]! - focus.z);
-        const lod = kind.ranges.findIndex((end) => d <= end);
-        if (lod < 0) continue;
-        let s = r[i + 4]!;
-        // Grow in and out over the last 20 m of a kind that ends there.
-        if (lod === kind.ranges.length - 1 && kind.family === undefined)
-          s *= THREE.MathUtils.smoothstep(kind.ranges[lod]! - d, 0, 20);
-        if (s < 0.02) continue;
-        const key = `${r[i + 5]}:${lod}`;
-        counts.set(key, (counts.get(key) ?? 0) + 1);
-        writes.push([
-          key,
-          r[i]!,
-          r[i + 1]!,
-          r[i + 2]!,
-          r[i + 3]!,
-          s,
-          r[i + 5]!,
-        ]);
+    const levels = 3;
+    const counts = new Int32Array(KINDS.length * levels);
+    const visit = (
+      fn: (
+        i: number,
+        r: Float32Array,
+        kind: number,
+        lod: number,
+        s: number,
+      ) => void,
+    ) => {
+      for (const t of this.tiles.values()) {
+        // Nearest point of the tile's square.
+        const dx = Math.max(Math.abs(t.cx - focus.x) - TILE_HALF, 0);
+        const dz = Math.max(Math.abs(t.cz - focus.z) - TILE_HALF, 0);
+        const near = Math.hypot(dx, dz);
+        if (near > MAX_RANGE) continue;
+        const r = t.records;
+        // Ground cover (stored first) only matters close by.
+        const from = near > COVER_RANGE ? t.coverEnd : 0;
+        for (let i = from; i < r.length; i += STRIDE) {
+          const k = r[i + 5]!;
+          const kind = KINDS[k]!;
+          const ex = r[i]! - focus.x;
+          const ez = r[i + 2]! - focus.z;
+          const d = Math.sqrt(ex * ex + ez * ez);
+          const ranges = kind.ranges;
+          let lod = 0;
+          while (lod < ranges.length && d > ranges[lod]!) lod++;
+          if (lod === ranges.length) continue;
+          let s = r[i + 4]!;
+          // Grow in and out over the last 20 m of a kind that ends there.
+          if (lod === ranges.length - 1 && kind.family === undefined) {
+            const t = Math.min(1, Math.max(0, (ranges[lod]! - d) / 20));
+            s *= t * t * (3 - 2 * t);
+            if (s < 0.02) continue;
+          }
+          fn(i, r, k, lod, s);
+        }
       }
-    }
+    };
+    visit((_i, _r, k, lod) => counts[k * levels + lod]!++);
+    const pools: (Pool | undefined)[] = [];
     for (const [key, pool] of this.near) {
       pool.count = 0;
-      if (!counts.has(key)) pool.mesh.count = 0;
+      pool.mesh.count = 0;
+      pools[Number(key)] = pool;
     }
-    for (const [key, n] of counts) {
-      const [kind, lod] = key.split(":").map(Number) as [number, number];
-      this.pool(
+    counts.forEach((n, key) => {
+      if (!n) return;
+      const k = Math.floor(key / levels);
+      pools[key] = this.pool(
         this.near,
-        key,
-        this.geometries![kind]![lod]!,
+        String(key),
+        this.geometries![k]![key % levels]!,
         n,
-        KINDS[kind]!.shadows,
+        KINDS[k]!.shadows,
       );
-    }
-    for (const [key, x, y, z, yaw, s] of writes)
-      write(this.near.get(key)!, x, y, z, yaw, s);
-    for (const [key] of counts) finish(this.near.get(key)!, false);
+    });
+    visit((i, r, k, lod, s) =>
+      write(
+        pools[k * levels + lod]!,
+        r[i]!,
+        r[i + 1]!,
+        r[i + 2]!,
+        r[i + 3]!,
+        s,
+      ),
+    );
+    counts.forEach((n, key) => {
+      if (n) finish(pools[key]!, false);
+    });
   }
 
   /** Far stand-ins for the trees of one block that are beyond the near pools. */
   private fillFar(block: string, focus: THREE.Vector3): void {
     const start = KINDS[0]!.ranges.at(-1)!;
-    const heights = this.geometries!.map((g) => g[0]!.boundingBox?.max.y ?? 1);
-    const pools = FAR.map((_, f) => this.far.get(`${block}:${f}`));
-    for (const p of pools) if (p) p.count = 0;
-    const entries: [number, number, number, number, number, number][] = [];
-    for (const t of this.tiles.values()) {
-      if (t.block !== block) continue;
-      const r = t.records;
-      for (let i = 0; i < r.length; i += STRIDE) {
-        const kind = KINDS[r[i + 5]!]!;
-        if (kind.family === undefined) continue;
-        const d = Math.hypot(r[i]! - focus.x, r[i + 2]! - focus.z);
-        if (d <= start || d > TREE_END) continue;
-        entries.push([
-          kind.family,
-          r[i]!,
-          r[i + 1]!,
-          r[i + 2]!,
-          r[i + 3]!,
-          r[i + 4]! * (heights[r[i + 5]!]! / this.farHeight(kind.family)),
-        ]);
+    const tiles = this.byBlock.get(block);
+    const counts = FAR.map(() => 0);
+    const visit = (
+      fn: (r: Float32Array, i: number, family: number) => void,
+    ) => {
+      for (const t of tiles ?? []) {
+        const r = t.records;
+        // Trees come after the ground cover.
+        for (let i = t.coverEnd; i < r.length; i += STRIDE) {
+          const family = KINDS[r[i + 5]!]!.family;
+          if (family === undefined) continue;
+          const ex = r[i]! - focus.x;
+          const ez = r[i + 2]! - focus.z;
+          if (ex * ex + ez * ez <= start * start) continue;
+          fn(r, i, family);
+        }
       }
-    }
-    FAR.forEach((_, f) => {
-      const n = entries.filter((e) => e[0] === f).length;
+    };
+    visit((_r, _i, f) => counts[f]!++);
+    const pools = FAR.map((_, f) => {
       const key = `${block}:${f}`;
-      if (n === 0) {
+      if (counts[f] === 0) {
         const p = this.far.get(key);
         if (p) {
           this.group.remove(p.mesh);
           p.mesh.dispose();
           this.far.delete(key);
         }
-        return;
+        return undefined;
       }
-      this.pool(this.far, key, this.farGeometries[f]!, n, true);
-      // Distant blocks cast no shadows: the last cascade ends at 450 m.
-      this.far.get(key)!.mesh.castShadow =
-        blockDistance(block, focus) < FAR_SHADOWS;
+      const p = this.pool(
+        this.far,
+        key,
+        this.farGeometries[f]!,
+        counts[f]!,
+        true,
+      );
+      p.mesh.castShadow = blockDistance(block, focus) < FAR_SHADOWS;
+      return p;
     });
-    for (const [f, x, y, z, yaw, s] of entries)
-      write(this.far.get(`${block}:${f}`)!, x, y, z, yaw, s);
-    FAR.forEach((_, f) => {
-      const p = this.far.get(`${block}:${f}`);
-      if (p) finish(p, true);
-    });
+    visit((r, i, f) =>
+      write(
+        pools[f]!,
+        r[i]!,
+        r[i + 1]!,
+        r[i + 2]!,
+        r[i + 3]!,
+        r[i + 4]! * this.farScale[r[i + 5]!]!,
+      ),
+    );
+    for (const p of pools) if (p) finish(p, true);
   }
 
   private farHeight(family: number): number {
@@ -511,11 +614,25 @@ export class Vegetation {
   }
 }
 
+/** Reorders packed records in place so ground cover comes first; returns where it ends. */
+function coverFirst(r: Float32Array): number {
+  const n = r.length / STRIDE;
+  const isCover = (i: number) => (r[i * STRIDE + 5]! >= FIRST_COVER ? 1 : 0);
+  const order = [...Array(n).keys()].sort((a, b) => isCover(b) - isCover(a));
+  const copy = r.slice();
+  order.forEach((src, dst) =>
+    r.set(copy.subarray(src * STRIDE, src * STRIDE + STRIDE), dst * STRIDE),
+  );
+  let end = 0;
+  while (end < n && isCover(end)) end++;
+  return end * STRIDE;
+}
+
 /**
  * Forest density (0..1): groves and woods with open meadows between them, from a large
  * field broken up by a smaller one.
  */
-function forest(x: number, z: number): number {
+export function forest(x: number, z: number): number {
   const large =
     0.5 +
     0.5 *

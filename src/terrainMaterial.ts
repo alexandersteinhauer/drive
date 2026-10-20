@@ -77,6 +77,9 @@ export function terrainMaterial(
   const gravelUv = uvTop.div(2.5);
 
   const variation = attribute("variation", "float");
+  // Forest density: shaded, leaf-littered floor under the woods, which also marks them out
+  // on distant hills beyond the trees' range.
+  const forest = attribute("forest", "float");
   const road = attribute("road", "float");
   const slope = float(1).sub(n.y);
 
@@ -87,12 +90,13 @@ export function terrainMaterial(
   const verge = float(1).sub(
     smoothstep(
       roadEdge + 0.2,
-      float(roadEdge + 3).add(noise.mul(2.5).max(0)),
+      float(roadEdge + 2).add(noise.mul(2).max(0)),
       road,
     ),
   );
   const dirtW = smoothstep(0.07, 0.17, slope.add(noise.mul(0.03)))
-    .max(verge.mul(0.85))
+    .max(verge.mul(0.55))
+    .max(forest.mul(0.35))
     .max(smoothstep(0.82, 1, variation).mul(0.5));
   const rockW = smoothstep(0.16, 0.27, slope.add(noise.mul(0.04)));
   // Loose gravel spilling off the shoulder onto the verge, with a ragged edge.
@@ -118,7 +122,9 @@ export function terrainMaterial(
     texture(grass.color, grassUv2).rgb,
     0.4,
   );
-  const dryTint = mix(vec3(1), vec3(1.25, 1.12, 0.72), variation.mul(0.6));
+  const dryTint = mix(vec3(1), vec3(1.25, 1.12, 0.72), variation.mul(0.6)).mul(
+    mix(vec3(1), vec3(0.55, 0.6, 0.45), forest.mul(0.85)),
+  );
   const top = mix(
     grassColor.mul(dryTint),
     texture(dirt.color, dirtUv).rgb,
