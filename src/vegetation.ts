@@ -631,7 +631,13 @@ export class Vegetation {
     const t = uv().mul(BILLBOARD);
     const lod = log2(max(max(dFdx(t).length(), dFdy(t).length()), 1));
     m.maskNode = tex.a.mul(lod.mul(0.3).add(1)).greaterThan(0.45).and(showFar);
-    m.maskShadowNode = tex.a.greaterThan(0.5).and(showFar);
+    // The far shadow cascades see billboards only a few texels wide, sampled from small mip
+    // levels where the plain alpha test would drop almost the whole crown (shadows stopped
+    // at the second cascade, ~110 m): boosted as in the main pass.
+    m.maskShadowNode = tex.a
+      .mul(lod.mul(0.3).add(1))
+      .greaterThan(0.5)
+      .and(showFar);
     m.normalNode = normalViewGeometry;
     m.emissiveNode = translucency(tex.rgb);
     this.farMaterial = m;

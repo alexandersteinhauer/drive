@@ -109,7 +109,12 @@ export class Atmosphere {
 
     this.sun.castShadow = true;
     this.sun.shadow.mapSize.set(2048, 2048);
-    this.sun.shadow.bias = -0.0003;
+    // Each cascade's shadow camera starts LIGHT_MARGIN beyond its slice towards the sun and
+    // must reach past it: with a low sun the far slice spans ~1 km along the light, and the
+    // default 500 m depth cut shadows off at the second cascade (~110 m), a seam on the road.
+    this.sun.shadow.camera.far = SHADOW_DEPTH;
+    // Depth bias is a fraction of that range: ~0.15 m, as before at 500 m.
+    this.sun.shadow.bias = -0.0003 * (500 / SHADOW_DEPTH);
     this.sun.shadow.normalBias = 0.05;
     // Cascaded shadows: sharp near the car, still present on hills hundreds of metres away.
     // Split by hand so the first cascade covers only the car and its surroundings (~2 cm
@@ -117,7 +122,7 @@ export class Atmosphere {
     // since each costs the terrain shader a texture.
     const csm = new CSMShadowNode(this.sun, {
       cascades: 3,
-      maxFar: 450,
+      maxFar: SHADOW_SPLITS.at(-1)!,
       mode: "custom",
       customSplitsCallback: (
         _cascades: number,
@@ -125,7 +130,7 @@ export class Atmosphere {
         far: number,
         breaks: number[],
       ) => breaks.push(...SHADOW_SPLITS.map((d) => Math.min(1, d / far))),
-      lightMargin: 150,
+      lightMargin: LIGHT_MARGIN,
     });
     csm.fade = true;
     this.sun.shadow.shadowNode = csm;
@@ -276,8 +281,11 @@ export class Atmosphere {
   }
 }
 
+/** Shadow camera depth (m), and how far beyond a cascade towards the sun casters count. */
+const SHADOW_DEPTH = 2500;
+const LIGHT_MARGIN = 300;
 /** Far end of each shadow cascade, in metres from the camera. */
-const SHADOW_SPLITS = [16, 110, 450];
+const SHADOW_SPLITS = [16, 110, 700];
 
 /** Sun elevation (degrees) whose light the base exposure is tuned for. */
 const REFERENCE_ELEVATION = 23;
