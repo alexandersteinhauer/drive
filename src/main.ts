@@ -169,11 +169,21 @@ function switchCar(): void {
 
 /** Dev hook: freeze physics (for reproducible captures). */
 let paused = false;
+/** Escape pauses the game: the last frame stays up, blurred, until Escape again. */
+const pausedEl = document.getElementById("paused")!;
+addEventListener("keydown", (e: KeyboardEvent) => {
+  if (e.code !== "Escape" || e.repeat) return;
+  pausedEl.hidden = !pausedEl.hidden;
+  // Keys pressed while paused shouldn't act on resume; time restarts from now.
+  input.reset();
+  last = performance.now();
+});
 let last = performance.now();
 let accumulator = 0;
 let shownSpeed = -1;
 
 function frame(now: number): void {
+  if (!pausedEl.hidden) return;
   const dt = Math.min(0.1, (now - last) / 1000);
   last = now;
   const controls = input.update(dt);
@@ -254,6 +264,8 @@ addEventListener("resize", () => {
   camera.aspect = innerWidth / innerHeight;
   camera.updateProjectionMatrix();
   renderer.setSize(innerWidth, innerHeight);
+  // Paused, no frames are drawn: redraw the resized canvas once.
+  if (!pausedEl.hidden) pipeline.render();
 });
 
 // Build the surroundings up front; after that, tiles stream in within a per-frame budget.

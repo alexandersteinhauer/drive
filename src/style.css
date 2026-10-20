@@ -10,6 +10,24 @@ canvas {
   display: block;
 }
 
+#paused {
+  position: fixed;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  backdrop-filter: blur(14px);
+  font:
+    600 64px/1 ui-monospace,
+    monospace;
+  color: #fff;
+  text-shadow: 0 1px 6px rgb(0 0 0 / 50%);
+  user-select: none;
+}
+
+#paused[hidden] {
+  display: none;
+}
+
 #speed {
   position: fixed;
   right: 32px;

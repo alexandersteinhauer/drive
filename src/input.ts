@@ -27,6 +27,12 @@ export class Input {
     target.addEventListener("blur", () => this.keys.clear());
   }
 
+  /** Forgets held keys and unconsumed presses. */
+  reset(): void {
+    this.keys.clear();
+    this.pressed.clear();
+  }
+
   /** True while `code` is held. */
   held(code: string): boolean {
     return this.keys.has(code);
