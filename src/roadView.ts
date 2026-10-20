@@ -9,6 +9,12 @@ const RADIUS = 2300;
 const ASPHALT_TILE = 2.5;
 const PAINT = new THREE.Color(0xe9e6da);
 const DASH = 3; // samples on, then off, for the centre line
+/** Marker posts: every this many samples on both sides, just beyond the shoulder. */
+const POST_EVERY = 25;
+const POST_OUT = 0.45;
+const POST_WHITE = new THREE.Color(0xe8e6df);
+const POST_BLACK = new THREE.Color(0x1a1a1a);
+const REFLECTOR = new THREE.Color(0xd9781c);
 
 /** Builds road surface and markings in chunks along the road, around a focus point. */
 export class RoadView {
@@ -109,6 +115,96 @@ export class RoadView {
     for (let i = first; i < end; i++)
       if (i % (DASH * 3) === 0)
         strip(-0.07, 0.07, i, Math.min(i + DASH, end), PAINT, 0.012);
+
+    /** An oriented box: centre, half sizes along the road, up and across, and a colour. */
+    const box = (
+      cx: number,
+      cy: number,
+      cz: number,
+      along: number,
+      up: number,
+      across: number,
+      h: number,
+      color: THREE.Color,
+    ) => {
+      const f = [Math.sin(h), 0, -Math.cos(h)];
+      const r = [Math.cos(h), 0, Math.sin(h)];
+      const u = [0, 1, 0];
+      const corner = (a: number, b: number, c: number) =>
+        [0, 1, 2].map(
+          (k) =>
+            [cx, cy, cz][k]! +
+            f[k]! * a * along +
+            u[k]! * b * up +
+            r[k]! * c * across,
+        );
+      // Six faces, four corners each (own vertices, so normals stay flat).
+      const faces: [number, number, number][][] = [
+        [
+          [1, -1, -1],
+          [1, 1, -1],
+          [1, 1, 1],
+          [1, -1, 1],
+        ],
+        [
+          [-1, -1, 1],
+          [-1, 1, 1],
+          [-1, 1, -1],
+          [-1, -1, -1],
+        ],
+        [
+          [-1, 1, -1],
+          [-1, 1, 1],
+          [1, 1, 1],
+          [1, 1, -1],
+        ],
+        [
+          [-1, -1, 1],
+          [1, -1, 1],
+          [1, 1, 1],
+          [-1, 1, 1],
+        ],
+        [
+          [1, -1, -1],
+          [-1, -1, -1],
+          [-1, 1, -1],
+          [1, 1, -1],
+        ],
+      ];
+      for (const face of faces) {
+        const start = pos.length / 3;
+        for (const [a, b, c] of face) {
+          pos.push(...corner(a, b, c));
+          col.push(color.r, color.g, color.b);
+          uv.push(0, 0);
+        }
+        index.push(start, start + 1, start + 2, start, start + 2, start + 3);
+      }
+    };
+    for (let i = first; i < end; i++) {
+      if (i % POST_EVERY !== 0) continue;
+      const h = road.headings[i]!;
+      for (const side of [-1, 1]) {
+        const lat = side * (edge + POST_OUT);
+        const x = road.xs[i]! + Math.cos(h) * lat;
+        const z = road.zs[i]! + Math.sin(h) * lat;
+        const ground = this.land.height(x, z);
+        // A 1 m post with a black band near the top holding the reflectors.
+        box(x, ground + 0.45, z, 0.06, 0.55, 0.05, h, POST_WHITE);
+        box(x, ground + 0.86, z, 0.062, 0.1, 0.052, h, POST_BLACK);
+        for (const end of [-1, 1])
+          box(
+            x + Math.sin(h) * end * 0.064,
+            ground + 0.86,
+            z - Math.cos(h) * end * 0.064,
+            0.004,
+            0.05,
+            0.02,
+            h,
+            REFLECTOR,
+          );
+      }
+    }
 
     const geo = new THREE.BufferGeometry();
     geo.setAttribute("position", new THREE.Float32BufferAttribute(pos, 3));
