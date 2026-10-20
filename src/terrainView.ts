@@ -2,6 +2,7 @@ import * as THREE from "three/webgpu";
 import { Surface, type Landscape, type LandSample } from "./world/landscape";
 import { hash2 } from "./world/noise";
 import { terrainMaterial } from "./terrainMaterial";
+import type { Vegetation } from "./vegetation";
 
 const TILE = 128;
 const RADIUS = 2200;
@@ -12,7 +13,7 @@ const LODS = [
   { segments: 16, within: 1400 },
   { segments: 8, within: Infinity },
 ];
-const TREES_WITHIN = 900;
+const TREES_WITHIN = 1000;
 /**
  * Beyond this distance, whole blocks of BLOCK x BLOCK tiles are built as one mesh (same
  * vertex spacing), cutting draw calls: each costs CPU time and garbage in the renderer.
@@ -22,23 +23,15 @@ const SKIRT = 6;
 /** Terrain under the road is pushed down so it never pokes through the road mesh. */
 const UNDER_ROAD = 0.3;
 
-/**
- * Trees are pooled per block of BLOCK x BLOCK tiles, one instanced mesh each for trunks and
- * crowns. Per-tile meshes were small enough for three.js to put their matrices in a uniform
- * array baked into the shader, so every new tile compiled new shaders (hitches); a block's
- * capacity is above that limit, so all blocks share one shader, with far fewer draw calls.
- */
+/** Terrain blocks (and vegetation pools) span BLOCK x BLOCK tiles. */
 const BLOCK = 4;
-/** Trees per tile at most (one per grid cell), and so per block. */
-const TREE_GRID = 16;
-const BLOCK_TREES = BLOCK * BLOCK * TREE_GRID * TREE_GRID;
 
 interface Tile {
   key: string;
   /** What it was built as; rebuilt when the wanted one differs. */
   sig: string;
   mesh: THREE.Mesh;
-  /** Trees it planted, per 128 m tile key. */
+  /** Vegetation it scattered, per 128 m tile key. */
   trees: [string, Float32Array][];
 }
 
@@ -50,15 +43,9 @@ interface Wanted {
   z0: number;
   size: number;
   segments: number;
-  /** Tiles (tx, tz) to plant trees on. */
-  treeTiles: [number, number][];
+  /** Tiles (tx, tz) to scatter vegetation on, and whether with ground cover. */
+  treeTiles: [number, number, boolean][];
   dist: number;
-}
-
-interface Block {
-  meshes: THREE.InstancedMesh[];
-  tiles: Map<string, Float32Array>;
-  dirty: boolean;
 }
 
 const sample: LandSample = {
@@ -71,30 +58,12 @@ const sample: LandSample = {
 export class TerrainView {
   readonly group = new THREE.Group();
   private readonly tiles = new Map<string, Tile>();
-  private readonly blocks = new Map<string, Block>();
   private readonly material: THREE.Material;
-  private readonly trunkGeo = new THREE.CylinderGeometry(
-    0.18,
-    0.28,
-    2.4,
-    6,
-  ).translate(0, 1.2, 0);
-  private readonly crownGeo = new THREE.ConeGeometry(1.7, 5.5, 7).translate(
-    0,
-    4.6,
-    0,
-  );
-  private readonly trunkMat = new THREE.MeshStandardMaterial({
-    color: 0x5a4632,
-    roughness: 1,
-  });
-  private readonly crownMat = new THREE.MeshStandardMaterial({
-    color: 0x2f5a2a,
-    roughness: 1,
-    flatShading: true,
-  });
 
-  constructor(private readonly land: Landscape) {
+  constructor(
+    private readonly land: Landscape,
+    private readonly vegetation: Vegetation,
+  ) {
     this.material = terrainMaterial(land.road.edge);
   }
 
@@ -138,7 +107,6 @@ export class TerrainView {
       for (const [key, tile] of this.retiring) this.drop(key, tile);
       this.retiring.clear();
     }
-    this.flushBlocks();
   }
 
   private rescan(fx: number, fz: number): void {
@@ -162,7 +130,7 @@ export class TerrainView {
         if (nearest > RADIUS) continue;
         if (nearest > COARSE_FROM && settled(bz * BLOCK)) {
           const per = nearest <= LODS[2]!.within ? 16 : 8;
-          const treeTiles: [number, number][] = [];
+          const treeTiles: [number, number, boolean][] = [];
           for (let i = 0; i < BLOCK; i++)
             for (let j = 0; j < BLOCK; j++) {
               const tx = bx * BLOCK + i;
@@ -171,7 +139,7 @@ export class TerrainView {
                 (tx + 0.5) * TILE - cx,
                 (tz + 0.5) * TILE - cz,
               );
-              if (d <= TREES_WITHIN) treeTiles.push([tx, tz]);
+              if (d <= TREES_WITHIN) treeTiles.push([tx, tz, false]);
             }
           wanted.push({
             key: `b${bx},${bz}`,
@@ -202,7 +170,8 @@ export class TerrainView {
               z0: tz * TILE,
               size: TILE,
               segments: LODS[lod]!.segments,
-              treeTiles: dist <= TREES_WITHIN ? [[tx, tz]] : [],
+              treeTiles:
+                dist <= TREES_WITHIN ? [[tx, tz, dist <= LODS[0]!.within]] : [],
               dist,
             });
           }
@@ -231,13 +200,7 @@ export class TerrainView {
     this.group.remove(tile.mesh);
     tile.mesh.geometry.dispose();
     // Only its own trees: a replacement may have planted the same tile already.
-    for (const [t, trees] of tile.trees) {
-      const block = this.blocks.get(blockKey(t));
-      if (block && block.tiles.get(t) === trees) {
-        block.tiles.delete(t);
-        block.dirty = true;
-      }
-    }
+    for (const [t, trees] of tile.trees) this.vegetation.remove(t, trees);
     if (this.tiles.get(key) === tile) this.tiles.delete(key);
   }
 
@@ -339,10 +302,9 @@ export class TerrainView {
     geo.setAttribute("road", new THREE.BufferAttribute(roadDist, 1));
     geo.setIndex(new THREE.BufferAttribute(index, 1));
     const planted: [string, Float32Array][] = [];
-    for (const [tx, tz] of w.treeTiles) {
-      const trees = this.plantTrees(tx, tz);
-      if (trees.length) planted.push([`${tx},${tz}`, trees]);
-      yield;
+    for (const [tx, tz, cover] of w.treeTiles) {
+      const items = yield* this.vegetation.scatter(tx, tz, TILE, cover);
+      if (items.length) planted.push([`${tx},${tz}`, items]);
     }
     // No longer wanted after all (the focus moved on while it was built).
     if (!this.keep.has(key)) {
@@ -356,97 +318,17 @@ export class TerrainView {
     mesh.castShadow = true;
     this.group.add(mesh);
     const tile: Tile = { key, sig: w.sig, mesh, trees: planted };
-    for (const [treeKey, trees] of planted) {
-      const block = this.block(blockKey(treeKey));
-      block.tiles.set(treeKey, trees);
-      block.dirty = true;
+    for (const [treeKey, items] of planted) {
+      const [tx, tz] = treeKey.split(",").map(Number) as [number, number];
+      this.vegetation.add(
+        treeKey,
+        (tx + 0.5) * TILE,
+        (tz + 0.5) * TILE,
+        blockKey(treeKey),
+        items,
+      );
     }
     this.tiles.set(key, tile);
-  }
-
-  private block(key: string): Block {
-    let block = this.blocks.get(key);
-    if (!block) {
-      const meshes = [
-        [this.trunkGeo, this.trunkMat],
-        [this.crownGeo, this.crownMat],
-      ].map(([geo, mat]) => {
-        const inst = new THREE.InstancedMesh(
-          geo as THREE.BufferGeometry,
-          mat as THREE.Material,
-          BLOCK_TREES,
-        );
-        inst.count = 0;
-        inst.castShadow = true;
-        this.group.add(inst);
-        return inst;
-      });
-      block = { meshes, tiles: new Map(), dirty: true };
-      this.blocks.set(key, block);
-    }
-    return block;
-  }
-
-  /** Copies the tree matrices of changed blocks into their meshes; removes empty blocks. */
-  private flushBlocks(): void {
-    for (const [key, block] of this.blocks) {
-      if (!block.dirty) continue;
-      block.dirty = false;
-      if (block.tiles.size === 0) {
-        for (const m of block.meshes) {
-          this.group.remove(m);
-          m.dispose();
-        }
-        this.blocks.delete(key);
-        continue;
-      }
-      for (const m of block.meshes) {
-        const array = m.instanceMatrix.array as Float32Array;
-        let offset = 0;
-        for (const trees of block.tiles.values()) {
-          array.set(trees, offset);
-          offset += trees.length;
-        }
-        m.count = offset / 16;
-        m.instanceMatrix.needsUpdate = true;
-        m.computeBoundingSphere();
-      }
-    }
-  }
-
-  /** Tree matrices for a tile, packed 16 floats each. */
-  private plantTrees(tx: number, tz: number): Float32Array {
-    const spacing = TILE / TREE_GRID;
-    const per = TREE_GRID;
-    const out: number[] = [];
-    const m = new THREE.Matrix4();
-    const q = new THREE.Quaternion();
-    const s = new THREE.Vector3();
-    const p = new THREE.Vector3();
-    const up = new THREE.Vector3(0, 1, 0);
-    const n = new THREE.Vector3();
-    for (let j = 0; j < per; j++)
-      for (let i = 0; i < per; i++) {
-        const gx = tx * per + i;
-        const gz = tz * per + j;
-        const x = (gx + hash2(gx, gz, 11)) * spacing;
-        const z = (gz + hash2(gx, gz, 12)) * spacing;
-        // Clumpy forests: density from a low-frequency field.
-        const density =
-          0.5 +
-          0.5 *
-            Math.sin(x * 0.006 + 1.3) *
-            Math.sin(z * 0.0047 + Math.sin(x * 0.002) * 2);
-        if (hash2(gx, gz, 13) > density * density * 0.9) continue;
-        this.land.sample(x, z, sample);
-        if (sample.roadDistance < this.land.road.edge + 7) continue;
-        if (this.land.normal(x, z, n).y < 0.8) continue;
-        const size = 0.7 + hash2(gx, gz, 14) * 0.7;
-        q.setFromAxisAngle(up, hash2(gx, gz, 15) * Math.PI * 2);
-        m.compose(p.set(x, sample.height - 0.2, z), q, s.setScalar(size));
-        out.push(...m.elements);
-      }
-    return new Float32Array(out);
   }
 }
 

@@ -11,7 +11,8 @@
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "test": "bun test",
-    "prepare-car": "bun scripts/prepare-car.ts"
+    "prepare-car": "bun scripts/prepare-car.ts",
+    "prepare-nature": "bun scripts/prepare-nature.ts"
   },
   "dependencies": {
     "three": "^0.186.1"

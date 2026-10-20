@@ -20,6 +20,7 @@ import { Car } from "./sim/car";
 import { bmwI4, sportsCoupe } from "./sim/config";
 import { RoadView } from "./roadView";
 import { TerrainView } from "./terrainView";
+import { Vegetation } from "./vegetation";
 import { Landscape } from "./world/landscape";
 
 const DT = 1 / 480;
@@ -64,9 +65,13 @@ function setPost(skip: Parameters<typeof createPipeline>[3]): void {
 
 const land = new Landscape();
 land.road.ensure(ROAD_AHEAD);
-const terrain = new TerrainView(land);
+const vegetation = new Vegetation(
+  land,
+  import.meta.env.BASE_URL + "models/nature.glb",
+);
+const terrain = new TerrainView(land, vegetation);
 const roadView = new RoadView(land);
-scene.add(terrain.group, roadView.group);
+scene.add(terrain.group, roadView.group, vegetation.group);
 
 const camDir = new THREE.Vector3(0, 0, -1);
 const fwd = new THREE.Vector3();
@@ -100,6 +105,7 @@ if (import.meta.env.DEV)
     land,
     placeOnRoad,
     terrain,
+    vegetation,
     roadView,
     renderer,
     camera,
@@ -217,6 +223,7 @@ function frame(now: number): void {
 
   land.road.ensure(-pos.z + ROAD_AHEAD);
   terrain.update(pos, 2.5);
+  vegetation.update(pos);
   roadView.update(pos);
   atmosphere.update(camera);
   // The car's sky light/reflections: strong in sunlight (sparkly paint), but down to the
