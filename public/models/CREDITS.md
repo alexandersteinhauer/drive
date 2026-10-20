@@ -14,10 +14,17 @@ BMW and i4 are trademarks of BMW AG. This project is not affiliated with or endo
 
 ## nature.glb
 
-Trees, bushes, rocks, grass and flowers from "Stylized Nature MegaKit" (Standard, free version)
-by Quaternius, released under CC0 1.0 (https://creativecommons.org/publicdomain/zero/1.0/).
+Trees and bushes generated with EZ-Tree by Daniel Greenheck, MIT licence
+(https://github.com/dgreenheck/ez-tree, `@dgreenheck/ez-tree` 1.1.0), from its oak, ash, pine
+and bush presets with fixed seeds. Bark textures shipped with EZ-Tree: oak from Poly Haven
+(https://polyhaven.com/a/bark_brown_02, CC0), pine from TextureCan (https://www.texturecan.com/details/588/,
+CC0); leaf textures from EZ-Tree (MIT).
+
+Grass, clover, ferns and rocks from "Stylized Nature MegaKit" (Standard, free version) by
+Quaternius, released under CC0 1.0 (https://creativecommons.org/publicdomain/zero/1.0/).
 Source: https://quaternius.com/packs/stylizednaturemegakit.html
 
-Changes: a selection of models merged into one file with three levels of detail per tree
-(simplified, leaf cards thinned out), textures resized and converted to WebP, meshes compressed.
-Generated with `scripts/prepare-nature.ts`.
+Changes: normalised to metres, leaf normals bent outwards from each crown, two levels of detail
+per tree (simplified, small branches dropped, leaf cards thinned out), textures resized and
+converted to WebP, meshes compressed. Generated with `scripts/prepare-nature.ts`. Distant trees
+are billboards rendered from these models at load time.

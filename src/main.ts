@@ -68,6 +68,7 @@ land.road.ensure(ROAD_AHEAD);
 const vegetation = new Vegetation(
   land,
   import.meta.env.BASE_URL + "models/nature.glb",
+  renderer,
 );
 const terrain = new TerrainView(land, vegetation);
 const roadView = new RoadView(land);
@@ -226,6 +227,7 @@ function frame(now: number): void {
   vegetation.update(pos);
   roadView.update(pos);
   atmosphere.update(camera);
+  vegetation.setSun(atmosphere.sun);
   // The car's sky light/reflections: strong in sunlight (sparkly paint), but down to the
   // terrain's level in a hill's shadow, where it otherwise glows against its surroundings.
   const sunlit = atmosphere.sunVisibility(car.position, (x, z) =>

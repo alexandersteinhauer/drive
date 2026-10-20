@@ -13,7 +13,7 @@ const LODS = [
   { segments: 16, within: 1400 },
   { segments: 8, within: Infinity },
 ];
-const TREES_WITHIN = 1000;
+const TREES_WITHIN = 800;
 /**
  * Beyond this distance, whole blocks of BLOCK x BLOCK tiles are built as one mesh (same
  * vertex spacing), cutting draw calls: each costs CPU time and garbage in the renderer.

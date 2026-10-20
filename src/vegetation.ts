@@ -1,15 +1,22 @@
 import * as THREE from "three/webgpu";
 import {
+  attribute,
+  cameraPosition,
   dFdx,
   dFdy,
   float,
   log2,
   max,
   mix,
+  normalViewGeometry,
+  positionWorld,
   texture,
+  uniform,
   uv,
+  vec2,
   vec3,
 } from "three/tsl";
+import type { Node } from "three/webgpu";
 import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
 import { MeshoptDecoder } from "three/addons/libs/meshopt_decoder.module.js";
 import { mergeGeometries } from "three/addons/utils/BufferGeometryUtils.js";
@@ -17,13 +24,15 @@ import { Surface, type Landscape, type LandSample } from "./world/landscape";
 import { hash2 } from "./world/noise";
 
 /**
- * Trees, bushes, rocks and ground cover from Quaternius' Stylized Nature MegaKit (CC0).
+ * Trees and bushes generated with EZ-Tree (MIT), grass, ferns and rocks from Quaternius'
+ * Stylized Nature MegaKit (CC0); see public/models/CREDITS.md.
  *
  * Terrain tiles scatter items into packed records (x, y, z, yaw, scale, kind). Near the car
  * every kind is drawn from a shared instanced mesh per kind and level of detail, refilled as
  * the car moves; things that end (ground cover, bushes, rocks) grow in and out at the edge
- * of their range instead of popping. Distant trees use one cheap model per family (broadleaf,
- * pine), pooled per 512 m block so off-screen blocks are culled.
+ * of their range instead of popping. The nearest trees cast their shadow from the medium
+ * level, so it keeps its shape when they switch. Distant trees are billboards from an atlas
+ * rendered at load, pooled per 512 m block so off-screen blocks are culled.
  */
 
 const STRIDE = 6;
@@ -45,15 +54,17 @@ interface Kind {
 
 const tree = (model: string, family: number): Kind => ({
   model,
-  ranges: [50, 160],
+  ranges: [40, 160],
   family,
   shadows: true,
 });
 const KINDS: Kind[] = [
-  ...[1, 2, 3, 4, 5].map((i) => tree(`CommonTree_${i}`, 0)),
-  ...[1, 2, 3, 4, 5].map((i) => tree(`Pine_${i}`, 1)),
-  { model: "Bush_Common", ranges: [60, 260], shadows: true },
-  { model: "Bush_Common_Flowers", ranges: [60, 260], shadows: true },
+  ...["Oak_1", "Oak_2", "Oak_3"].map((m) => tree(m, 0)),
+  ...["Ash_1", "Ash_2"].map((m) => tree(m, 1)),
+  ...["Pine_1", "Pine_2", "Pine_3"].map((m) => tree(m, 2)),
+  { model: "Bush_1", ranges: [60, 260], shadows: true },
+  { model: "Bush_2", ranges: [60, 260], shadows: true },
+  { model: "Bush_3", ranges: [60, 260], shadows: true },
   { model: "Rock_Medium_1", ranges: [80, 320], shadows: true },
   { model: "Rock_Medium_2", ranges: [80, 320], shadows: true },
   { model: "Rock_Medium_3", ranges: [80, 320], shadows: true },
@@ -63,8 +74,6 @@ const KINDS: Kind[] = [
     "Grass_Wispy_Short",
     "Grass_Wispy_Tall",
     "Clover_1",
-    "Flower_3_Group",
-    "Flower_4_Group",
     "Fern_1",
   ].map((model) => ({ model, ranges: [110], shadows: false })),
 ];
@@ -74,24 +83,31 @@ const FIRST_COVER = KINDS.findIndex((k) => !k.shadows);
 const COVER_RANGE = KINDS[FIRST_COVER]!.ranges.at(-1)!;
 const K = Object.fromEntries(KINDS.map((k, i) => [k.model, i]));
 const BROADLEAF = [0, 1, 2, 3, 4];
-const PINE = [5, 6, 7, 8, 9];
+const PINE = [5, 6, 7];
+const BUSHES = [8, 9, 10];
 const GRASS = [
   K.Grass_Common_Short!,
   K.Grass_Common_Tall!,
   K.Grass_Wispy_Short!,
   K.Grass_Wispy_Tall!,
 ];
-const FLOWERS = [K.Clover_1!, K.Flower_3_Group!, K.Flower_4_Group!, K.Fern_1!];
+const FLOWERS = [K.Clover_1!, K.Fern_1!];
 /** Far stand-in model per family, and how its height compares to each kind's (by index). */
-const FAR = ["CommonTree_3_lod2", "Pine_2_lod2"];
-/** Far trees in blocks nearer than this (m, to the block's square) cast shadows. */
-const FAR_SHADOWS = 250;
+/** Billboard atlas: one cell (px) per tree kind, in a grid of columns x rows. */
+const BILLBOARD = 512;
+const ATLAS_COLS = 4;
+const ATLAS_ROWS = 2;
+
+/** Direction towards the sun and its light (colour times intensity), for translucency. */
+const sunDirection = uniform(new THREE.Vector3(0, 1, 0));
+const sunLight = uniform(new THREE.Color(1, 1, 1));
 
 /** Leaf tints (white textures in the kit). */
 const TINTS: Record<string, THREE.ColorRepresentation> = {
-  leaves: 0x96b552,
-  needles: 0x5f8a44,
-  bush: 0x88ad50,
+  // EZ-Tree's leaf textures are coloured; only evened out a little.
+  leaves_oak: 0xf8f8ec,
+  leaves_ash: 0xf8f8ec,
+  leaves_pine: 0xf4f4e8,
   plants: 0xe8ecd0,
   // Towards the terrain's yellow-olive meadow grass.
   grass: 0xc9c47e,
@@ -126,11 +142,22 @@ export class Vegetation {
   private readonly tiles = new Map<string, TileItems>();
   /** Geometry per kind and level, and the far stand-ins; null until loaded. */
   private geometries: THREE.BufferGeometry[][] | null = null;
-  private farGeometries: THREE.BufferGeometry[] = [];
-  private farScale: number[] = [];
+  /** Distant tree billboards: shared quads, and each kind's atlas cell and size. */
+  private farGeometry: THREE.BufferGeometry | null = null;
+  private farMaterial: THREE.Material | null = null;
+  private farBoxes: { width: number; bottom: number; top: number }[] = [];
+  private cellOf: number[] = [];
+  /** The billboard atlas (dev: inspect with readRenderTargetPixelsAsync). */
+  atlas: THREE.RenderTarget | null = null;
   /** Tiles per far block. */
   private readonly byBlock = new Map<string, Set<TileItems>>();
   private readonly near = new Map<string, Pool>();
+  private readonly proxies = new Map<string, Pool>();
+  /** Shadow-only versions of a geometry's materials (main pass discarded). */
+  private readonly shadowMaterials = new Map<
+    THREE.BufferGeometry,
+    THREE.Material[]
+  >();
   private readonly far = new Map<string, Pool>();
   private readonly dirtyBlocks = new Set<string>();
   private nearDirty = true;
@@ -139,6 +166,7 @@ export class Vegetation {
   constructor(
     private readonly land: Landscape,
     url: string,
+    private readonly renderer: THREE.WebGPURenderer,
   ) {
     void this.load(url);
   }
@@ -174,14 +202,26 @@ export class Vegetation {
     this.geometries = KINDS.map((k) =>
       k.ranges.map((_, lod) => geometry(`${k.model}_lod${lod}`)),
     );
-    this.farGeometries = FAR.map(geometry);
-    // Far stand-ins scaled to each kind's height.
-    this.farScale = KINDS.map((k, i) =>
-      k.family === undefined
-        ? 1
-        : this.geometries![i]![0]!.boundingBox!.max.y /
-          this.farHeight(k.family),
-    );
+    this.billboards();
+    const shadowOnly = new Map<THREE.Material, THREE.Material>();
+    KINDS.forEach((k, i) => {
+      if (k.family === undefined) return;
+      const g = this.geometries![i]![1]!;
+      this.shadowMaterials.set(
+        g,
+        (g.userData.materials as THREE.MeshStandardNodeMaterial[]).map((m) => {
+          let s = shadowOnly.get(m);
+          if (!s) {
+            const c = m.clone() as THREE.MeshStandardNodeMaterial;
+            // Leaves keep their alpha mask in the shadow pass; nothing reaches the screen.
+            c.maskShadowNode = m.maskShadowNode ?? float(1).greaterThan(0);
+            c.maskNode = float(0).greaterThan(1);
+            shadowOnly.set(m, (s = c));
+          }
+          return s;
+        }),
+      );
+    });
     this.nearDirty = true;
     for (const block of this.byBlock.keys()) this.dirtyBlocks.add(block);
   }
@@ -282,7 +322,7 @@ export class Vegetation {
             sample.height - 0.15,
             z,
             yaw,
-            1.3 + hash2(gx, gz, 14) ** 1.5 * 1.1,
+            0.7 + hash2(gx, gz, 14) ** 1.3 * 1.1,
             kind,
           );
           // Undergrowth at its foot: ferns and long grass.
@@ -301,14 +341,13 @@ export class Vegetation {
               );
             }
         } else {
-          const kind =
-            hash2(gx, gz, 17) < 0.7 ? K.Bush_Common! : K.Bush_Common_Flowers!;
+          const kind = BUSHES[Math.floor(hash2(gx, gz, 17) * BUSHES.length)]!;
           put(
             x,
             sample.height - 0.1,
             z,
             yaw,
-            0.55 + hash2(gx, gz, 14) * 0.5,
+            0.7 + hash2(gx, gz, 14) * 0.7,
             kind,
           );
         }
@@ -411,6 +450,12 @@ export class Vegetation {
     return new Float32Array(out);
   }
 
+  /** Sun (or moon) direction and light, for light shining through the leaves. */
+  setSun(light: THREE.DirectionalLight): void {
+    sunDirection.value.copy(light.position).normalize();
+    sunLight.value.copy(light.color).multiplyScalar(light.intensity);
+  }
+
   /** Refills pools for the focus position. */
   update(focus: THREE.Vector3): void {
     if (!this.geometries) return;
@@ -427,9 +472,6 @@ export class Vegetation {
       const handover = KINDS[0]!.ranges.at(-1)! + 2 * REFILL;
       for (const block of this.byBlock.keys())
         if (blockDistance(block, focus) < handover) this.dirtyBlocks.add(block);
-      for (const [key, p] of this.far)
-        p.mesh.castShadow =
-          blockDistance(key.split(":")[0]!, focus) < FAR_SHADOWS;
     }
     for (const block of this.dirtyBlocks) this.fillFar(block, this.lastFill);
     this.dirtyBlocks.clear();
@@ -488,18 +530,37 @@ export class Vegetation {
       pool.mesh.count = 0;
       pools[Number(key)] = pool;
     }
+    // Nearest trees cast their shadow from the next level (a shadow-only proxy), so the
+    // shadow keeps its shape when they switch levels.
+    const proxies: (Pool | undefined)[] = [];
+    for (const [key, pool] of this.proxies) {
+      pool.count = 0;
+      pool.mesh.count = 0;
+      proxies[Number(key)] = pool;
+    }
     counts.forEach((n, key) => {
       if (!n) return;
       const k = Math.floor(key / levels);
+      const lod = key % levels;
+      const proxied = lod === 0 && KINDS[k]!.family !== undefined;
       pools[key] = this.pool(
         this.near,
         String(key),
-        this.geometries![k]![key % levels]!,
+        this.geometries![k]![lod]!,
         n,
-        KINDS[k]!.shadows,
+        KINDS[k]!.shadows && !proxied,
       );
+      if (proxied)
+        proxies[k] = this.pool(
+          this.proxies,
+          String(k),
+          this.geometries![k]![1]!,
+          n,
+          true,
+          this.shadowMaterials.get(this.geometries![k]![1]!)!,
+        );
     });
-    visit((i, r, k, lod, s) =>
+    visit((i, r, k, lod, s) => {
       write(
         pools[k * levels + lod]!,
         r[i]!,
@@ -507,73 +568,202 @@ export class Vegetation {
         r[i + 2]!,
         r[i + 3]!,
         s,
-      ),
-    );
+      );
+      if (lod === 0 && proxies[k])
+        write(proxies[k], r[i]!, r[i + 1]!, r[i + 2]!, r[i + 3]!, s);
+    });
     counts.forEach((n, key) => {
       if (n) finish(pools[key]!, false);
     });
+    for (const p of proxies) if (p) finish(p, false);
   }
 
   /** Far stand-ins for the trees of one block that are beyond the near pools. */
   private fillFar(block: string, focus: THREE.Vector3): void {
     const start = KINDS[0]!.ranges.at(-1)!;
     const tiles = this.byBlock.get(block);
-    const counts = FAR.map(() => 0);
-    const visit = (
-      fn: (r: Float32Array, i: number, family: number) => void,
-    ) => {
+    const visit = (fn: (r: Float32Array, i: number) => void) => {
       for (const t of tiles ?? []) {
         const r = t.records;
         // Trees come after the ground cover.
         for (let i = t.coverEnd; i < r.length; i += STRIDE) {
-          const family = KINDS[r[i + 5]!]!.family;
-          if (family === undefined) continue;
+          if (KINDS[r[i + 5]!]!.family === undefined) continue;
           const ex = r[i]! - focus.x;
           const ez = r[i + 2]! - focus.z;
           if (ex * ex + ez * ez <= start * start) continue;
-          fn(r, i, family);
+          fn(r, i);
         }
       }
     };
-    visit((_r, _i, f) => counts[f]!++);
-    const pools = FAR.map((_, f) => {
-      const key = `${block}:${f}`;
-      if (counts[f] === 0) {
-        const p = this.far.get(key);
-        if (p) {
-          this.group.remove(p.mesh);
-          p.mesh.dispose();
-          this.far.delete(key);
-        }
-        return undefined;
+    let n = 0;
+    visit(() => n++);
+    if (n === 0) {
+      const p = this.far.get(block);
+      if (p) {
+        this.group.remove(p.mesh);
+        p.mesh.dispose();
+        this.far.delete(block);
       }
-      const p = this.pool(
-        this.far,
-        key,
-        this.farGeometries[f]!,
-        counts[f]!,
-        true,
+      return;
+    }
+    const p = this.pool(this.far, block, this.farGeometry!, n, true, [
+      this.farMaterial!,
+    ]);
+    // Own copy of the quads per pool, for its per-instance atlas cells.
+    let cells = p.mesh.geometry.getAttribute("cell") as
+      THREE.InstancedBufferAttribute | undefined;
+    if (!cells || cells.count < p.mesh.instanceMatrix.count) {
+      p.mesh.geometry = this.farGeometry!.clone();
+      cells = new THREE.InstancedBufferAttribute(
+        new Float32Array(p.mesh.instanceMatrix.count),
+        1,
       );
-      p.mesh.castShadow = blockDistance(block, focus) < FAR_SHADOWS;
-      return p;
-    });
-    visit((r, i, f) =>
-      write(
-        pools[f]!,
+      p.mesh.geometry.setAttribute("cell", cells);
+    }
+    const cellArray = cells.array as Float32Array;
+    visit((r, i) => {
+      const kind = r[i + 5]!;
+      const box = this.farBoxes[kind]!;
+      const s = r[i + 4]!;
+      cellArray[p.count] = this.cellOf[kind]!;
+      // Unit quads stretched to the kind's crown width and height, standing on its base.
+      writeScaled(
+        p,
         r[i]!,
-        r[i + 1]!,
+        r[i + 1]! + box.bottom * s,
         r[i + 2]!,
         r[i + 3]!,
-        r[i + 4]! * this.farScale[r[i + 5]!]!,
-      ),
-    );
-    for (const p of pools) if (p) finish(p, true);
+        box.width * s,
+        (box.top - box.bottom) * s,
+      );
+    });
+    cells.needsUpdate = true;
+    finish(p, true);
   }
 
-  private farHeight(family: number): number {
-    const g = this.farGeometries[family]!;
-    if (!g.boundingBox) g.computeBoundingBox();
-    return g.boundingBox!.max.y;
+  /**
+   * Distant stand-ins for trees: every tree kind's side view rendered once (unlit colour and
+   * alpha) into a cell of one atlas, shown on two crossed quads lit with crown normals like
+   * the near leaves. Each far instance picks its kind's cell, so a block takes one draw.
+   */
+  private billboards(): void {
+    const kinds = KINDS.flatMap((k, i) => (k.family === undefined ? [] : [i]));
+    const target = new THREE.RenderTarget(
+      BILLBOARD * ATLAS_COLS,
+      BILLBOARD * ATLAS_ROWS,
+      {
+        generateMipmaps: true,
+        minFilter: THREE.LinearMipmapLinearFilter,
+      },
+    );
+    const r = this.renderer;
+    const prevTarget = r.getRenderTarget();
+    const prevColor = r.getClearColor(new THREE.Color());
+    const prevAlpha = r.getClearAlpha();
+    const prevAuto = r.autoClear;
+    // Leaf-coloured but transparent background, so mipmaps don't bleed dark edges in.
+    r.setClearColor(new THREE.Color(0.16, 0.22, 0.08), 0);
+    r.setRenderTarget(target);
+    r.clear();
+    r.autoClear = false;
+    this.farBoxes = KINDS.map(() => ({ width: 1, bottom: 0, top: 1 }));
+    kinds.forEach((kind, cell) => {
+      const tree = this.geometries![kind]![0]!;
+      const box = tree.boundingBox!;
+      const w = Math.max(box.max.x - box.min.x, box.max.z - box.min.z) * 1.02;
+      this.farBoxes[kind] = { width: w, bottom: box.min.y, top: box.max.y };
+      const flat = (
+        tree.userData.materials as THREE.MeshStandardNodeMaterial[]
+      ).map((m) => {
+        const b = new THREE.MeshBasicNodeMaterial({ side: THREE.DoubleSide });
+        b.colorNode = m.colorNode;
+        if (m.maskShadowNode) b.maskNode = m.maskShadowNode;
+        return b;
+      });
+      const capture = new THREE.Scene();
+      capture.add(new THREE.Mesh(tree, flat));
+      const camera = new THREE.OrthographicCamera(
+        -w / 2,
+        w / 2,
+        box.max.y,
+        box.min.y,
+        0.1,
+        400,
+      );
+      camera.position.set(0, 0, 200);
+      camera.lookAt(0, 0, 0);
+      target.viewport.set(
+        (cell % ATLAS_COLS) * BILLBOARD,
+        Math.floor(cell / ATLAS_COLS) * BILLBOARD,
+        BILLBOARD,
+        BILLBOARD,
+      );
+      r.render(capture, camera);
+      for (const m of flat) m.dispose();
+    });
+    target.viewport.set(0, 0, target.width, target.height);
+    r.autoClear = prevAuto;
+    r.setRenderTarget(prevTarget);
+    r.setClearColor(prevColor, prevAlpha);
+    this.cellOf = KINDS.map((_, i) => kinds.indexOf(i));
+    this.atlas = target;
+
+    // Two crossed unit quads (x, z in -0.5..0.5, y in 0..1); crown normals out from the
+    // centre and a little up.
+    const pos: number[] = [];
+    const nor: number[] = [];
+    const uvs: number[] = [];
+    const index: number[] = [];
+    for (const axis of [0, 1]) {
+      const base = pos.length / 3;
+      for (const [u, v] of [
+        [0, 0],
+        [1, 0],
+        [1, 1],
+        [0, 1],
+      ] as const) {
+        const a = u - 0.5;
+        const p = axis === 0 ? [a, v, 0] : [0, v, a];
+        pos.push(...p);
+        const n = new THREE.Vector3(
+          p[0]! * 2,
+          (v - 0.5) * 2 + 0.3,
+          p[2]! * 2,
+        ).normalize();
+        nor.push(n.x, n.y, n.z);
+        uvs.push(u, v);
+      }
+      index.push(base, base + 1, base + 2, base, base + 2, base + 3);
+    }
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute("position", new THREE.Float32BufferAttribute(pos, 3));
+    geo.setAttribute("normal", new THREE.Float32BufferAttribute(nor, 3));
+    geo.setAttribute("uv", new THREE.Float32BufferAttribute(uvs, 2));
+    geo.setIndex(index);
+    geo.addGroup(0, index.length, 0);
+    this.farGeometry = geo;
+
+    const m = new THREE.MeshStandardNodeMaterial({
+      roughness: 0.9,
+      metalness: 0,
+      side: THREE.DoubleSide,
+    });
+    const cell = attribute<"float">("cell", "float");
+    // Render targets are stored top row first and sampled unflipped in WebGPU: the cell's top
+    // (the treetop) is at its smallest v.
+    const cellUv = vec2(cell.mod(ATLAS_COLS), cell.div(ATLAS_COLS).floor())
+      .add(vec2(uv().x, uv().y.oneMinus()))
+      .div(vec2(ATLAS_COLS, ATLAS_ROWS));
+    const tex = texture(target.texture, cellUv);
+    // A touch brighter: the capture has no sky light bouncing inside the crown.
+    m.colorNode = tex.rgb.mul(1.25);
+    const t = uv().mul(BILLBOARD);
+    const lod = log2(max(max(dFdx(t).length(), dFdy(t).length()), 1));
+    m.maskNode = tex.a.mul(lod.mul(0.3).add(1)).greaterThan(0.45);
+    m.maskShadowNode = tex.a.greaterThan(0.5);
+    m.normalNode = normalViewGeometry;
+    m.emissiveNode = translucency(tex.rgb);
+    this.farMaterial = m;
   }
 
   /** The pool for `key`, with room for `n` instances (recreated larger if needed). */
@@ -583,6 +773,7 @@ export class Vegetation {
     geometry: THREE.BufferGeometry,
     n: number,
     shadows: boolean,
+    materials?: THREE.Material[],
   ): Pool {
     let p = pools.get(key);
     if (p && p.mesh.instanceMatrix.count < n) {
@@ -595,7 +786,7 @@ export class Vegetation {
       while (capacity < n) capacity *= 2;
       const mesh = new THREE.InstancedMesh(
         geometry,
-        geometry.userData.materials as THREE.Material[],
+        materials ?? (geometry.userData.materials as THREE.Material[]),
         capacity,
       );
       mesh.instanceColor = new THREE.InstancedBufferAttribute(
@@ -660,6 +851,27 @@ function blockDistance(block: string, p: THREE.Vector3): number {
   return Math.hypot(dx, dz);
 }
 
+function writeScaled(
+  p: Pool,
+  x: number,
+  y: number,
+  z: number,
+  yaw: number,
+  sxz: number,
+  sy: number,
+): void {
+  const m = p.mesh.instanceMatrix.array as Float32Array;
+  const o = p.count * 16;
+  const c = Math.cos(yaw);
+  const n = Math.sin(yaw);
+  m.set(
+    [c * sxz, 0, -n * sxz, 0, 0, sy, 0, 0, n * sxz, 0, c * sxz, 0, x, y, z, 1],
+    o,
+  );
+  tint(p, x, z);
+  p.count++;
+}
+
 function write(
   p: Pool,
   x: number,
@@ -668,34 +880,17 @@ function write(
   yaw: number,
   s: number,
 ): void {
-  const m = p.mesh.instanceMatrix.array as Float32Array;
-  const o = p.count * 16;
-  const c = Math.cos(yaw) * s;
-  const n = Math.sin(yaw) * s;
-  m[o] = c;
-  m[o + 1] = 0;
-  m[o + 2] = -n;
-  m[o + 3] = 0;
-  m[o + 4] = 0;
-  m[o + 5] = s;
-  m[o + 6] = 0;
-  m[o + 7] = 0;
-  m[o + 8] = n;
-  m[o + 9] = 0;
-  m[o + 10] = c;
-  m[o + 11] = 0;
-  m[o + 12] = x;
-  m[o + 13] = y;
-  m[o + 14] = z;
-  m[o + 15] = 1;
-  // Per-plant tint: brightness and a slight warm/cool shift, from its position.
+  writeScaled(p, x, y, z, yaw, s, s);
+}
+
+/** Per-plant tint: brightness and a slight warm/cool shift, from its position. */
+function tint(p: Pool, x: number, z: number): void {
   const b = 0.82 + 0.3 * hash2(x, z, 41);
   const h = hash2(x, z, 42) * 2 - 1;
   const col = p.mesh.instanceColor!.array as Float32Array;
   col[p.count * 3] = b * (1 + 0.07 * h);
   col[p.count * 3 + 1] = b;
   col[p.count * 3 + 2] = b * (1 - 0.12 * h);
-  p.count++;
 }
 
 function finish(p: Pool, bounds: boolean): void {
@@ -724,6 +919,16 @@ function bake(mesh: THREE.Mesh): THREE.BufferGeometry {
   return geo;
 }
 
+/**
+ * Light through the leaves: strongest looking towards the sun, plus a little all round, so
+ * backlit and shaded crowns don't go black.
+ */
+function translucency(albedo: Node<"vec3">): Node<"vec3"> {
+  const view = positionWorld.sub(cameraPosition).normalize();
+  const back = max(view.dot(sunDirection), 0).pow(3);
+  return albedo.mul(sunLight).mul(back.mul(0.2).add(0.035));
+}
+
 /** Node material for a kit material: textured, vertex-coloured, leaves alpha-masked. */
 function makeMaterial(src: THREE.MeshStandardMaterial): THREE.Material {
   const m = new THREE.MeshStandardNodeMaterial({
@@ -731,8 +936,8 @@ function makeMaterial(src: THREE.MeshStandardMaterial): THREE.Material {
     roughness: src.name === "rock" ? 0.85 : 0.9,
     metalness: 0,
     vertexColors: true,
-    side:
-      src.alphaTest > 0 || src.transparent ? THREE.DoubleSide : THREE.FrontSide,
+    // Blades, cards and leaves are single planes; only trunks and rocks are closed.
+    side: /bark|rock/.test(src.name) ? THREE.FrontSide : THREE.DoubleSide,
   });
   const map = src.map!;
   map.colorSpace = THREE.SRGBColorSpace;
@@ -753,6 +958,16 @@ function makeMaterial(src: THREE.MeshStandardMaterial): THREE.Material {
     const t = uv().mul(size);
     const lod = log2(max(max(dFdx(t).length(), dFdy(t).length()), 1));
     m.maskNode = tex.a.mul(lod.mul(0.35).add(1)).greaterThan(0.4);
+    // Shadow maps sample the texture coarsely, where the boost would make crowns solid.
+    m.maskShadowNode = tex.a.greaterThan(0.5);
+  }
+  // Generated leaves carry crown normals (outwards from the crown); three would flip them on
+  // back faces, which turns half the cards towards the trunk and darkens the crown.
+  if (src.name.startsWith("leaves_")) {
+    m.normalNode = normalViewGeometry;
+    // Light through the leaves: strongest looking towards the sun, plus a little all round,
+    // so backlit and shaded crowns don't go black.
+    m.emissiveNode = translucency(rgb.mul(vec3(tint.r, tint.g, tint.b)));
   }
   return m;
 }
