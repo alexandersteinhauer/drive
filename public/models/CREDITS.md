@@ -25,6 +25,7 @@ Quaternius, released under CC0 1.0 (https://creativecommons.org/publicdomain/zer
 Source: https://quaternius.com/packs/stylizednaturemegakit.html
 
 Changes: normalised to metres, leaf normals bent outwards from each crown, two levels of detail
-per tree (simplified, small branches dropped, leaf cards thinned out), textures resized and
-converted to WebP, meshes compressed. Generated with `scripts/prepare-nature.ts`. Distant trees
+per tree (simplified, small branches dropped, leaf cards thinned out), generated trees cut to
+under ~1,000 triangles with their leaf textures rebuilt as clumps of sixteen sprigs (four for
+bushes) on few, large cards, textures resized and converted to WebP, meshes compressed. Generated with `scripts/prepare-nature.ts`. Distant trees
 are billboards rendered from these models at load time.

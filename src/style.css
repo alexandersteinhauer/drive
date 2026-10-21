@@ -39,3 +39,14 @@ canvas {
   text-shadow: 0 1px 4px rgb(0 0 0 / 50%);
   pointer-events: none;
 }
+
+#stats {
+  position: fixed;
+  top: 12px;
+  left: 12px;
+  pointer-events: none;
+}
+
+#stats[hidden] {
+  display: none;
+}

@@ -17,6 +17,7 @@ import {
   vec3,
 } from "three/tsl";
 import type { Node } from "three/webgpu";
+import { MatteNodeMaterial } from "./matte";
 import { Surface, type Landscape, type LandSample } from "./world/landscape";
 import { hash2, rng } from "./world/noise";
 import { meadowColor } from "./terrainMaterial";
@@ -82,7 +83,11 @@ export class Grass {
   constructor(private readonly land: Landscape) {}
 
   setSun(light: THREE.DirectionalLight): void {
-    sunDirection.value.copy(light.position).normalize();
+    // Towards the light: it follows the car (shadow box), so not its position alone.
+    sunDirection.value
+      .copy(light.position)
+      .sub(light.target.position)
+      .normalize();
     sunLight.value.copy(light.color).multiplyScalar(light.intensity);
   }
 
@@ -428,11 +433,12 @@ function grassMaterial(width: number): THREE.MeshStandardNodeMaterial {
   const ny = sqrt(float(1).sub(ground.dot(ground)).max(0.1));
   // Roots follow the slope.
   const ly = p.y.mul(h).sub(ground.x.mul(lx).add(ground.y.mul(lz)).div(ny));
-  const m = new THREE.MeshStandardNodeMaterial({
+  const m = new MatteNodeMaterial({
     side: THREE.DoubleSide,
     roughness: 0.85,
     metalness: 0,
   });
+  m.sheen = 0.01;
   m.positionNode = vec3(root.x.add(lx), root.y.add(ly), root.z.add(lz));
 
   // The ground's colour at the root, darker down in the tuft, lighter at the tips; some

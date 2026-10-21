@@ -317,8 +317,8 @@ export class TerrainView {
     const old = this.tiles.get(key);
     if (old) this.drop(key, old);
     const mesh = new THREE.Mesh(geo, this.material);
+    // Receives the car's shadow; its own come from the SunField.
     mesh.receiveShadow = true;
-    mesh.castShadow = true;
     this.group.add(mesh);
     const tile: Tile = { key, sig: w.sig, mesh, trees: planted };
     for (const [treeKey, items] of planted) {

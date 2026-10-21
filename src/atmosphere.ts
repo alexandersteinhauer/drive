@@ -14,8 +14,8 @@ import {
   vec4,
 } from "three/tsl";
 import type { Node, UniformNode } from "three/webgpu";
-import { CSMShadowNode } from "three/addons/csm/CSMShadowNode.js";
 import { SkyMesh } from "three/addons/objects/SkyMesh.js";
+import type { SunField } from "./sunField";
 
 export interface AtmosphereOptions {
   /** Local solar time in hours (0-24). */
@@ -107,33 +107,20 @@ export class Atmosphere {
     this.sky.scale.setScalar(2000);
     scene.add(this.sky);
 
+    // The shadow map holds only the car (nothing else casts): a small box that follows it
+    // (see `follow`), so its shadow is sharp at any distance from the camera. The land's
+    // and the woods' shadows come from the SunField instead (see `useField`).
     this.sun.castShadow = true;
-    this.sun.shadow.mapSize.set(2048, 2048);
-    // Each cascade's shadow camera starts LIGHT_MARGIN beyond its slice towards the sun and
-    // must reach past it: with a low sun the far slice spans ~1 km along the light, and the
-    // default 500 m depth cut shadows off at the second cascade (~110 m), a seam on the road.
-    this.sun.shadow.camera.far = SHADOW_DEPTH;
-    // Depth bias is a fraction of that range: ~0.15 m, as before at 500 m.
-    this.sun.shadow.bias = -0.0003 * (500 / SHADOW_DEPTH);
-    this.sun.shadow.normalBias = 0.05;
-    // Cascaded shadows: sharp near the car, still present on hills hundreds of metres away.
-    // Split by hand so the first cascade covers only the car and its surroundings (~2 cm
-    // texels); the automatic split gave it ~75 m and a blurry car shadow. Three cascades,
-    // since each costs the terrain shader a texture.
-    const csm = new CSMShadowNode(this.sun, {
-      cascades: 3,
-      maxFar: SHADOW_SPLITS.at(-1)!,
-      mode: "custom",
-      customSplitsCallback: (
-        _cascades: number,
-        _near: number,
-        far: number,
-        breaks: number[],
-      ) => breaks.push(...SHADOW_SPLITS.map((d) => Math.min(1, d / far))),
-      lightMargin: LIGHT_MARGIN,
-    });
-    csm.fade = true;
-    this.sun.shadow.shadowNode = csm;
+    this.sun.shadow.mapSize.set(1024, 1024);
+    const box = this.sun.shadow.camera as THREE.OrthographicCamera;
+    box.left = box.bottom = -SHADOW_BOX;
+    box.right = box.top = SHADOW_BOX;
+    box.near = 1;
+    box.far = 2 * SHADOW_REACH;
+    box.updateProjectionMatrix();
+    // ~4 cm of depth bias, a fraction of the box's depth.
+    this.sun.shadow.bias = -0.04 / box.far;
+    this.sun.shadow.normalBias = 0.01;
     scene.add(this.sun, this.sun.target);
     // Soft neutral fill (sky above, warm earth bounce below): lifts shaded slopes out of a
     // murky blue-teal without brightening reflections the way more sky light would.
@@ -214,6 +201,35 @@ export class Atmosphere {
     return this.hours;
   }
 
+  /** Gives the sun the land's and the woods' shadows (before anything is rendered). */
+  useField(field: SunField): void {
+    this.sun.shadow.shadowNode = field.shadowNode(this.sun);
+  }
+
+  /**
+   * Centres the shadow box on `point` (the car), snapped to whole shadow texels across the
+   * light so its shadow's edges don't crawl as it moves.
+   */
+  follow(point: THREE.Vector3): void {
+    const texel = (2 * SHADOW_BOX) / this.sun.shadow.mapSize.x;
+    _basis.lookAt(_zero, this.lightDirection, _up);
+    _local.copy(point).applyMatrix4(_inverse.copy(_basis).invert());
+    _local.x = Math.round(_local.x / texel) * texel;
+    _local.y = Math.round(_local.y / texel) * texel;
+    _local.applyMatrix4(_basis);
+    this.sun.target.position.copy(_local);
+    this.sun.position
+      .copy(_local)
+      .addScaledVector(this.lightDirection, SHADOW_REACH);
+    this.sun.target.updateMatrixWorld();
+    this.sun.updateMatrixWorld();
+    // Now, not during the render: the shadow lookup reads this matrix (see SunField).
+    this.sun.shadow.updateMatrices(this.sun);
+  }
+
+  /** Unit vector towards the sun (or at night the moon), as the light shines. */
+  readonly lightDirection = new THREE.Vector3(0, 1, 0);
+
   /** Moves the sun (or at night the moon) and the lighting to a local solar time. */
   setTime(hours: number): void {
     this.hours = ((hours % 24) + 24) % 24;
@@ -236,14 +252,18 @@ export class Atmosphere {
     if (elevation > -1) {
       this.sun.color.setRGB(1, 0.8 + 0.18 * warm, 0.6 + 0.36 * warm);
       this.sun.intensity = o.sunLight * (0.7 + 0.3 * warm) * day;
-      this.sun.position.copy(this.sunDirection);
+      this.lightDirection.copy(this.sunDirection);
     } else {
       this.sun.color.setRGB(0.6, 0.7, 1);
       this.sun.intensity =
         MOONLIGHT * THREE.MathUtils.smoothstep(-elevation, 1, 6);
-      this.sun.position.setFromSphericalCoords(1, rad(50), rad(azimuth + 180));
+      this.lightDirection.setFromSphericalCoords(
+        1,
+        rad(50),
+        rad(azimuth + 180),
+      );
     }
-    this.sun.position.multiplyScalar(500);
+    this.follow(this.sun.target.position);
     this.fill.intensity =
       o.fillLight *
       Math.max(0.04, THREE.MathUtils.smoothstep(elevation, -8, 12));
@@ -281,11 +301,16 @@ export class Atmosphere {
   }
 }
 
-/** Shadow camera depth (m), and how far beyond a cascade towards the sun casters count. */
-const SHADOW_DEPTH = 2500;
-const LIGHT_MARGIN = 300;
-/** Far end of each shadow cascade, in metres from the camera. */
-const SHADOW_SPLITS = [16, 110, 700];
+/** Half the shadow box across the light (m): the car, with room to spare. */
+const SHADOW_BOX = 4;
+/** How far the shadow box reaches along the light either side of the car (m): its shadow
+ *  is ~20 m long with the sun 4 degrees up. */
+const SHADOW_REACH = 40;
+const _basis = new THREE.Matrix4();
+const _inverse = new THREE.Matrix4();
+const _local = new THREE.Vector3();
+const _zero = new THREE.Vector3();
+const _up = new THREE.Vector3(0, 1, 0);
 
 /** Sun elevation (degrees) whose light the base exposure is tuned for. */
 const REFERENCE_ELEVATION = 23;

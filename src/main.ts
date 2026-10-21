@@ -23,6 +23,8 @@ import { TerrainView } from "./terrainView";
 import { Vegetation } from "./vegetation";
 import { Grass } from "./grass";
 import { Landscape } from "./world/landscape";
+import { Stats } from "./stats";
+import { SunField } from "./sunField";
 
 const DT = 1 / 480;
 /** How far ahead (along -Z) the road is generated beyond the car; must exceed the view radius. */
@@ -66,6 +68,8 @@ function setPost(skip: Parameters<typeof createPipeline>[3]): void {
 
 const land = new Landscape();
 land.road.ensure(ROAD_AHEAD);
+const sunField = new SunField(renderer, land);
+atmosphere.useField(sunField);
 const vegetation = new Vegetation(
   land,
   import.meta.env.BASE_URL + "models/nature.glb",
@@ -102,6 +106,7 @@ let view = makeView(0);
 scene.add(view.group);
 const input = new Input(window);
 const speedEl = document.getElementById("speed")!;
+const stats = new Stats(renderer);
 if (import.meta.env.DEV)
   Object.assign(window, {
     car,
@@ -111,6 +116,7 @@ if (import.meta.env.DEV)
     vegetation,
     grass,
     roadView,
+    sunField,
     renderer,
     camera,
     scene,
@@ -184,12 +190,14 @@ let shownSpeed = -1;
 
 function frame(now: number): void {
   if (!pausedEl.hidden) return;
+  stats.begin();
   const dt = Math.min(0.1, (now - last) / 1000);
   last = now;
   const controls = input.update(dt);
   if (input.take("KeyR"))
     placeOnRoad(land.road.nearestIndex(car.position.x, car.position.z));
   if (input.take("KeyC")) switchCar();
+  if (input.take("KeyF")) stats.visible = !stats.visible;
   // Hold [ / ] to turn time back / forward, two hours per second.
   const timeStep =
     (input.held("BracketRight") ? 1 : 0) - (input.held("BracketLeft") ? 1 : 0);
@@ -240,6 +248,8 @@ function frame(now: number): void {
   vegetation.update(pos);
   roadView.update(pos);
   atmosphere.update(camera);
+  atmosphere.follow(view.root.position);
+  sunField.update(camera.position, atmosphere.lightDirection, 1);
   vegetation.setSun(atmosphere.sun);
   vegetation.setViewer(camera.position);
   grass.setSun(atmosphere.sun);
@@ -258,6 +268,7 @@ function frame(now: number): void {
   if (kmh !== shownSpeed) speedEl.textContent = String((shownSpeed = kmh));
 
   pipeline.render();
+  stats.end();
 }
 
 addEventListener("resize", () => {
@@ -270,5 +281,7 @@ addEventListener("resize", () => {
 
 // Build the surroundings up front; after that, tiles stream in within a per-frame budget.
 terrain.update(car.position, Infinity);
+// The land's and trees' shadows around the start, before the first frame.
+sunField.prime(car.position, atmosphere.lightDirection);
 roadView.update(car.position);
 renderer.setAnimationLoop(frame);

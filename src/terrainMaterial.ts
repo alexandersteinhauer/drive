@@ -2,6 +2,8 @@ import * as THREE from "three/webgpu";
 import {
   abs,
   attribute,
+  Fn,
+  If,
   cameraPosition,
   float,
   mix,
@@ -145,31 +147,43 @@ export function terrainMaterial(
   const ry = vec2(p.x, p.z).div(rockScale);
   const rz = vec2(p.x, p.y).div(rockScale);
 
+  // Layers are only sampled where they show (most of the ground is plain meadow): the
+  // weights pick branches, so a pixel pays for the textures it uses. Their edges are soft
+  // blends, so the threshold doesn't show.
+  const SHOWS = 0.002;
+  const hasDirt = dirtW.greaterThan(SHOWS);
+  const hasRock = rockW.greaterThan(SHOWS);
+  const hasGravel = gravelW.greaterThan(SHOWS);
+
   // Colour.
-  const top = mix(
-    meadowColor(uvTop, variation, forest),
-    texture(dirt.color, dirtUv).rgb,
-    dirtW,
-  );
-  const rockColor = texture(rock.color, rx)
-    .rgb.mul(tri.x)
-    .add(texture(rock.color, ry).rgb.mul(tri.y))
-    .add(texture(rock.color, rz).rgb.mul(tri.z));
-  // A touch more contrast on the rock so its structure reads from the road.
-  // Large-scale variation over the rock face hides the scan's repeating streaks.
-  const rockMacro = texture(rock.color, ry.div(4.3)).r.mul(1.6).add(0.5);
-  // Lighter, greyer and a little more contrasty than the scan, so cuttings read as rock.
-  const rockLum = rockColor.dot(vec3(0.2126, 0.7152, 0.0722));
-  const rockGraded = mix(
-    rockColor.mul(rockMacro),
-    vec3(rockLum.mul(rockMacro)),
-    0.35,
-  )
-    .sub(0.08)
-    .mul(1.9)
-    .add(0.12)
-    .max(0);
-  const color = mix(top, rockGraded, rockW);
+  const color = Fn(() => {
+    const c = meadowColor(uvTop, variation, forest).toVar();
+    If(hasDirt, () => {
+      c.assign(mix(c, texture(dirt.color, dirtUv).rgb, dirtW));
+    });
+    If(hasRock, () => {
+      const rockColor = texture(rock.color, rx)
+        .rgb.mul(tri.x)
+        .add(texture(rock.color, ry).rgb.mul(tri.y))
+        .add(texture(rock.color, rz).rgb.mul(tri.z));
+      // A touch more contrast on the rock so its structure reads from the road.
+      // Large-scale variation over the rock face hides the scan's repeating streaks.
+      const rockMacro = texture(rock.color, ry.div(4.3)).r.mul(1.6).add(0.5);
+      // Lighter, greyer and a little more contrasty than the scan, so cuttings read as rock.
+      const rockLum = rockColor.dot(vec3(0.2126, 0.7152, 0.0722));
+      const rockGraded = mix(
+        rockColor.mul(rockMacro),
+        vec3(rockLum.mul(rockMacro)),
+        0.35,
+      )
+        .sub(0.08)
+        .mul(1.9)
+        .add(0.12)
+        .max(0);
+      c.assign(mix(c, rockGraded, rockW));
+    });
+    return c;
+  })();
 
   // Roughness: per-layer constants.
   const roughness = mix(
@@ -180,30 +194,33 @@ export function terrainMaterial(
 
   // Normals. Fine detail fades out with distance, where it only adds shimmer.
   const detail = float(1).sub(smoothstep(25, 140, p.distance(cameraPosition)));
-  const topTangent = mix(
-    mix(
-      decode(grass.normal, grassUv, 0.9),
-      decode(dirt.normal, dirtUv, 1),
-      dirtW,
-    ),
-    decode(gravel.normal, gravelUv, 1),
-    gravelW,
-  ).mul(vec3(detail, detail, 1));
-  // UDN on the top projection: tangent x -> world x, tangent y -> world z.
-  const topWorld = vec3(
-    topTangent.x.add(n.x),
-    n.y,
-    topTangent.y.add(n.z),
-  ).normalize();
-  const tx = decode(rock.normal, rx, 1);
-  const ty = decode(rock.normal, ry, 1);
-  const tz = decode(rock.normal, rz, 1);
-  const rockWorld = vec3(n.x, tx.y.add(n.y), tx.x.add(n.z))
-    .mul(tri.x)
-    .add(vec3(ty.x.add(n.x), n.y, ty.y.add(n.z)).mul(tri.y))
-    .add(vec3(tz.x.add(n.x), tz.y.add(n.y), n.z).mul(tri.z))
-    .normalize();
-  const world = mix(topWorld, rockWorld, rockW).normalize();
+  const world = Fn(() => {
+    const w = n.toVar();
+    If(detail.greaterThan(0), () => {
+      const t = decode(grass.normal, grassUv, 0.9).toVar();
+      If(hasDirt, () => {
+        t.assign(mix(t, decode(dirt.normal, dirtUv, 1), dirtW));
+      });
+      If(hasGravel, () => {
+        t.assign(mix(t, decode(gravel.normal, gravelUv, 1), gravelW));
+      });
+      t.mulAssign(vec3(detail, detail, 1));
+      // UDN on the top projection: tangent x -> world x, tangent y -> world z.
+      w.assign(vec3(t.x.add(n.x), n.y, t.y.add(n.z)).normalize());
+    });
+    If(hasRock, () => {
+      const tx = decode(rock.normal, rx, 1);
+      const ty = decode(rock.normal, ry, 1);
+      const tz = decode(rock.normal, rz, 1);
+      const rockWorld = vec3(n.x, tx.y.add(n.y), tx.x.add(n.z))
+        .mul(tri.x)
+        .add(vec3(ty.x.add(n.x), n.y, ty.y.add(n.z)).mul(tri.y))
+        .add(vec3(tz.x.add(n.x), tz.y.add(n.y), n.z).mul(tri.z))
+        .normalize();
+      w.assign(mix(w, rockWorld, rockW).normalize());
+    });
+    return w;
+  })();
 
   const material = new THREE.MeshStandardNodeMaterial();
   material.colorNode = color;

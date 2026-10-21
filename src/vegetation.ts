@@ -1,7 +1,9 @@
 import * as THREE from "three/webgpu";
 import {
+  abs,
   atan,
   attribute,
+  cross,
   cameraPosition,
   cameraWorldMatrix,
   positionGeometry,
@@ -9,6 +11,7 @@ import {
   transformNormalToView,
   dFdx,
   dFdy,
+  exp,
   float,
   interleavedGradientNoise,
   log2,
@@ -26,6 +29,7 @@ import {
   vec4,
 } from "three/tsl";
 import type { Node } from "three/webgpu";
+import { MatteNodeMaterial } from "./matte";
 import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
 import { MeshoptDecoder } from "three/addons/libs/meshopt_decoder.module.js";
 import { mergeGeometries } from "three/addons/utils/BufferGeometryUtils.js";
@@ -39,8 +43,8 @@ import { hash2 } from "./world/noise";
  * Terrain tiles scatter items into packed records (x, y, z, yaw, scale, kind). Near the car
  * every kind is drawn from a shared instanced mesh per kind and level of detail, refilled as
  * the car moves; things that end (rocks) grow in and out at the edge
- * of their range instead of popping. The nearest trees cast their shadow from the medium
- * level, so it keeps its shape when they switch. Distant trees are camera-facing billboards
+ * of their range instead of popping. None of it casts into the shadow map: the trees'
+ * shadows come from the SunField (sunField.ts). Distant trees are camera-facing billboards
  * from a multi-view atlas rendered at load, pooled per 512 m block so off-screen blocks are
  * culled.
  */
@@ -67,23 +71,21 @@ interface Kind {
   ranges: number[];
   /** Far family (index into FAR), for trees. */
   family?: number;
-  shadows: boolean;
 }
 
 const tree = (model: string, family: number): Kind => ({
   model,
   ranges: [NEAR_END],
   family,
-  shadows: true,
 });
 const KINDS: Kind[] = [
   ...["Oak_1", "Oak_2", "Oak_3"].map((m) => tree(m, 0)),
   ...["Ash_1", "Ash_2"].map((m) => tree(m, 1)),
   ...["Pine_1", "Pine_2", "Pine_3"].map((m) => tree(m, 2)),
   ...["Bush_1", "Bush_2", "Bush_3"].map((m) => tree(m, 3)),
-  { model: "Rock_Medium_1", ranges: [80, 320], shadows: true },
-  { model: "Rock_Medium_2", ranges: [80, 320], shadows: true },
-  { model: "Rock_Medium_3", ranges: [80, 320], shadows: true },
+  { model: "Rock_Medium_1", ranges: [80, 320] },
+  { model: "Rock_Medium_2", ranges: [80, 320] },
+  { model: "Rock_Medium_3", ranges: [80, 320] },
 ];
 /** Farthest any kind reaches. */
 const MAX_RANGE = Math.max(...KINDS.map((k) => k.ranges.at(-1)!));
@@ -100,6 +102,10 @@ const BUSHES = [8, 9, 10];
 const CELL = 384;
 /** Billboard brightness relative to the captured (unshaded) crown colour. */
 const BILLBOARD_SHADE = 0.5;
+/** How quickly sunlight fades through foliage (per metre), and the skylight left at a
+ *  crown's centre. */
+const CROWN_DENSITY = 0.3;
+const CROWN_AMBIENT = 0.5;
 const VIEWS = 8;
 
 /** Direction towards the sun and its light (colour times intensity), for translucency. */
@@ -144,6 +150,8 @@ export class Vegetation {
   private readonly tiles = new Map<string, TileItems>();
   /** Geometry per kind and level, and the far stand-ins; null until loaded. */
   private geometries: THREE.BufferGeometry[][] | null = null;
+  /** Per kind with leaves: crown centre height, horizontal and vertical radius (scale 1). */
+  private crowns: ([number, number, number] | null)[] = [];
   /** Distant tree billboards: shared quads, and each kind's atlas cell and size. */
   private farGeometry: THREE.BufferGeometry | null = null;
   private farMaterial: THREE.Material | null = null;
@@ -198,6 +206,7 @@ export class Vegetation {
     this.geometries = KINDS.map((k) =>
       k.ranges.map((_, lod) => geometry(`${k.model}_lod${lod}`)),
     );
+    this.crowns = this.geometries.map((levels) => crownOf(levels[0]!));
     this.billboards();
     this.nearDirty = true;
     for (const block of this.byBlock.keys()) this.dirtyBlocks.add(block);
@@ -264,53 +273,22 @@ export class Vegetation {
     ) => out.push(x, y, z, yaw, s, kind);
     // Trees and bushes on a 5 m grid; far tiles the same trees, so nothing changes when a
     // tile turns from near to far.
-    const step = 5;
+    const step = PLANT_STEP;
     for (let j = 0; j < size / step; j++) {
       for (let i = 0; i < size / step; i++) {
         const gx = Math.floor(x0 / step) + i;
         const gz = Math.floor(z0 / step) + j;
-        const x = (gx + hash2(gx, gz, 11)) * step;
-        const z = (gz + hash2(gx, gz, 12)) * step;
-        const d = forest(x, z);
-        const roll = hash2(gx, gz, 13);
-        // Dense woods, plus lone trees in the meadows.
-        const isTree = roll < d * 0.92 + 0.02;
-        const isBush =
-          !far && !isTree && roll < d * 0.96 + 0.03 + 0.08 * edgeOf(d);
-        if (!isTree && !isBush) continue;
-        land.sample(x, z, sample);
-        // Woods stop a varying distance from the road, not in a straight wall.
-        const clear = isTree ? 5 + 10 * hash2(gx, gz, 18) ** 2 : 3;
-        if (sample.roadDistance < edge + clear) continue;
-        if (land.normal(x, z, normal).y < 0.8) continue;
-        const yaw = hash2(gx, gz, 15) * Math.PI * 2;
-        if (isTree) {
-          // Pines on the higher ground, broadleaf below, mixed in between.
-          const pine =
-            hash2(gx, gz, 16) <
-            0.2 + 0.7 * THREE.MathUtils.smoothstep(sample.height, 5, 35);
-          const kinds = pine ? PINE : BROADLEAF;
-          const kind = kinds[Math.floor(hash2(gx, gz, 17) * kinds.length)]!;
-          // Far, sunk a little: the coarse terrain there is up to a metre off.
-          put(
-            x,
-            sample.height - (far ? 0.8 : 0.15),
-            z,
-            yaw,
-            0.7 + hash2(gx, gz, 14) ** 1.3 * 1.1,
-            kind,
-          );
-        } else {
-          const kind = BUSHES[Math.floor(hash2(gx, gz, 17) * BUSHES.length)]!;
-          put(
-            x,
-            sample.height - 0.1,
-            z,
-            yaw,
-            0.7 + hash2(gx, gz, 14) * 0.7,
-            kind,
-          );
-        }
+        if (!plantAt(land, gx, gz, far, plant)) continue;
+        // Far, sunk a little: the coarse terrain there is up to a metre off.
+        const sink = plant.tree ? (far ? 0.8 : 0.15) : 0.1;
+        put(
+          plant.x,
+          plant.y - sink,
+          plant.z,
+          plant.yaw,
+          plant.scale,
+          plant.kind,
+        );
       }
       yield;
     }
@@ -359,7 +337,11 @@ export class Vegetation {
 
   /** Sun (or moon) direction and light, for light shining through the leaves. */
   setSun(light: THREE.DirectionalLight): void {
-    sunDirection.value.copy(light.position).normalize();
+    // Towards the light: it follows the car (shadow box), so not its position alone.
+    sunDirection.value
+      .copy(light.position)
+      .sub(light.target.position)
+      .normalize();
     sunLight.value.copy(light.color).multiplyScalar(light.intensity);
   }
 
@@ -375,7 +357,7 @@ export class Vegetation {
       this.nearDirty = false;
       this.fillNear(focus);
       // Blocks near the focus hand trees to and from the near pools.
-      // Blocks across the near/far boundary hand trees over; the others only update shadows.
+      // Blocks across the near/far boundary hand trees over.
       const handover = KINDS[0]!.ranges.at(-1)! + 2 * REFILL;
       for (const block of this.byBlock.keys())
         if (blockDistance(block, focus) < handover) this.dirtyBlocks.add(block);
@@ -443,19 +425,25 @@ export class Vegetation {
         String(key),
         this.geometries![k]![key % levels]!,
         n,
-        KINDS[k]!.shadows,
       );
     });
+    // Nearest first: the GPU then rejects most hidden leaves by depth before shading them
+    // (alpha-tested leaves can't be culled after the fact), several times fewer in woods.
+    const order: [number, number, Float32Array, number, number][] = [];
     visit((i, r, k, lod, s) => {
-      write(
-        pools[k * levels + lod]!,
-        r[i]!,
-        r[i + 1]!,
-        r[i + 2]!,
-        r[i + 3]!,
-        s,
-      );
+      const ex = r[i]! - focus.x;
+      const ez = r[i + 2]! - focus.z;
+      order.push([ex * ex + ez * ez, i, r, k * levels + lod, s]);
     });
+    order.sort((a, b) => a[0] - b[0]);
+    for (const [key, p] of pools.entries())
+      if (p && this.crowns[Math.floor(key / levels)]) crownAttributes(p);
+    for (const [, i, r, key, s] of order) {
+      const p = pools[key]!;
+      const crown = this.crowns[Math.floor(key / levels)];
+      if (crown) writeCrown(p, crown, r[i]!, r[i + 1]!, r[i + 2]!, s);
+      write(p, r[i]!, r[i + 1]!, r[i + 2]!, r[i + 3]!, s);
+    }
     counts.forEach((n, key) => {
       if (n) finish(pools[key]!, false);
     });
@@ -488,7 +476,7 @@ export class Vegetation {
       }
       return;
     }
-    const p = this.pool(this.far, block, this.farGeometry!, n, true, [
+    const p = this.pool(this.far, block, this.farGeometry!, n, [
       this.farMaterial!,
     ]);
     // Own copy of the quad per pool, for its per-instance atlas rows and yaws.
@@ -503,10 +491,12 @@ export class Vegetation {
       p.mesh.geometry.setAttribute("cell", cells);
     }
     const cellArray = cells.array as Float32Array;
+    crownAttributes(p);
     visit((r, i) => {
       const kind = r[i + 5]!;
       const box = this.farBoxes[kind]!;
       const s = r[i + 4]!;
+      writeCrown(p, this.crowns[kind]!, r[i]!, r[i + 1]!, r[i + 2]!, s);
       cellArray[p.count * 3] = this.cellOf[kind]!;
       cellArray[p.count * 3 + 1] = r[i + 3]!;
       cellArray[p.count * 3 + 2] = box.width * s;
@@ -599,7 +589,7 @@ export class Vegetation {
     geo.addGroup(0, geo.index!.count, 0);
     this.farGeometry = geo;
 
-    const m = new THREE.MeshStandardNodeMaterial({
+    const m = new MatteNodeMaterial({
       roughness: 0.9,
       metalness: 0,
       side: THREE.DoubleSide,
@@ -607,8 +597,7 @@ export class Vegetation {
     // Per instance: atlas row (kind), yaw and width.
     const cell = attribute<"vec3">("cell", "vec3");
     // The quad faces the camera (turning about the vertical only): its right-hand side is
-    // perpendicular to the camera's backward axis. In shadow passes that camera is the light's,
-    // so the shadow is the crown's outline as the sun sees it.
+    // perpendicular to the camera's backward axis.
     const back = cameraWorldMatrix.mul(vec4(0, 0, 1, 0)).xyz;
     const back2 = vec2(back.x, back.z).normalize();
     const right = vec3(back2.y, 0, back2.x.negate());
@@ -652,13 +641,6 @@ export class Vegetation {
     const t = uv().mul(CELL);
     const lod = log2(max(max(dFdx(t).length(), dFdy(t).length()), 1));
     m.maskNode = tex.a.mul(lod.mul(0.3).add(1)).greaterThan(0.45).and(showFar);
-    // The far shadow cascades see billboards only a few texels wide, sampled from small mip
-    // levels where the plain alpha test would drop almost the whole crown (shadows stopped
-    // at the second cascade, ~110 m): boosted as in the main pass.
-    m.maskShadowNode = tex.a
-      .mul(lod.mul(0.3).add(1))
-      .greaterThan(0.5)
-      .and(showFar);
     // Crown normals: out from the centre, a little up, and towards the camera, like the
     // near trees' leaves.
     const crown = right
@@ -667,6 +649,27 @@ export class Vegetation {
       .add(vec3(back2.x, 0, back2.y).mul(0.9))
       .normalize();
     m.normalNode = transformNormalToView(crown);
+    // The same crown shading as the 3D trees, at the visible (camera-facing) surface of
+    // the crown's ellipsoid behind this point of the card.
+    const radii = vec3(crownA.w, crownB, crownA.w);
+    const off = positionWorld.sub(crownA.xyz);
+    const lateral = off.dot(right).div(crownA.w);
+    const height = off.y.div(crownB);
+    const depth = float(1)
+      .sub(lateral.mul(lateral))
+      .sub(height.mul(height))
+      .max(0)
+      .sqrt();
+    const front = right
+      .mul(off.dot(right))
+      .add(vec3(0, off.y, 0))
+      .add(vec3(back2.x, 0, back2.y).mul(depth.mul(crownA.w)));
+    const sun = throughCrown(front, radii);
+    (m as unknown as { sunFieldPosition: Node<"vec3"> }).sunFieldPosition =
+      crownA.xyz.add(front);
+    (
+      m as unknown as { receivedShadowNode: (s: Node<"float">) => Node }
+    ).receivedShadowNode = (shadow) => shadow.mul(sun);
     m.emissiveNode = translucency(tex.rgb.mul(BILLBOARD_SHADE));
     this.farMaterial = m;
   }
@@ -677,7 +680,6 @@ export class Vegetation {
     key: string,
     geometry: THREE.BufferGeometry,
     n: number,
-    shadows: boolean,
     materials?: THREE.Material[],
   ): Pool {
     let p = pools.get(key);
@@ -698,7 +700,8 @@ export class Vegetation {
         new Float32Array(capacity * 3),
         3,
       );
-      mesh.castShadow = shadows;
+      // No vegetation casts into the shadow map (it holds only the car): trees' shadows
+      // come from the SunField, which plants the same crowns (see plantAt).
       mesh.receiveShadow = true;
       mesh.frustumCulled = pools === this.far;
       this.group.add(mesh);
@@ -708,6 +711,77 @@ export class Vegetation {
     p.count = 0;
     return p;
   }
+}
+
+/** Spacing of the grid trees and bushes are planted on (m). */
+export const PLANT_STEP = 5;
+
+/** A tree or bush planted at a grid cell (see `plantAt`). */
+export interface Plant {
+  x: number;
+  y: number;
+  z: number;
+  yaw: number;
+  scale: number;
+  kind: number;
+  tree: boolean;
+}
+
+const plant: Plant = {
+  x: 0,
+  y: 0,
+  z: 0,
+  yaw: 0,
+  scale: 1,
+  kind: 0,
+  tree: true,
+};
+
+/**
+ * What grows in grid cell (gx, gz), if anything: the one place trees are decided, so
+ * everything that depends on them (the meshes, their shadows) agrees. `treesOnly` skips
+ * the bushes (as far tiles do).
+ */
+export function plantAt(
+  land: Landscape,
+  gx: number,
+  gz: number,
+  treesOnly: boolean,
+  out: Plant,
+): boolean {
+  const step = PLANT_STEP;
+  const x = (gx + hash2(gx, gz, 11)) * step;
+  const z = (gz + hash2(gx, gz, 12)) * step;
+  const d = forest(x, z);
+  const roll = hash2(gx, gz, 13);
+  // Dense woods, plus lone trees in the meadows.
+  const isTree = roll < d * 0.92 + 0.02;
+  const isBush =
+    !treesOnly && !isTree && roll < d * 0.96 + 0.03 + 0.08 * edgeOf(d);
+  if (!isTree && !isBush) return false;
+  land.sample(x, z, sample);
+  // Woods stop a varying distance from the road, not in a straight wall.
+  const clear = isTree ? 5 + 10 * hash2(gx, gz, 18) ** 2 : 3;
+  if (sample.roadDistance < land.road.edge + clear) return false;
+  const y = sample.height;
+  if (land.normal(x, z, normal).y < 0.8) return false;
+  out.x = x;
+  out.y = y;
+  out.z = z;
+  out.yaw = hash2(gx, gz, 15) * Math.PI * 2;
+  out.tree = isTree;
+  if (isTree) {
+    // Pines on the higher ground, broadleaf below, mixed in between.
+    const pine =
+      hash2(gx, gz, 16) < 0.2 + 0.7 * THREE.MathUtils.smoothstep(y, 5, 35);
+    const kinds = pine ? PINE : BROADLEAF;
+    out.kind = kinds[Math.floor(hash2(gx, gz, 17) * kinds.length)]!;
+    out.scale = 0.7 + hash2(gx, gz, 14) ** 1.3 * 1.1;
+  } else {
+    out.kind = BUSHES[Math.floor(hash2(gx, gz, 17) * BUSHES.length)]!;
+    out.scale = 0.7 + hash2(gx, gz, 14) * 0.7;
+  }
+  return true;
 }
 
 /**
@@ -784,10 +858,71 @@ function tint(p: Pool, x: number, z: number): void {
   col[p.count * 3 + 2] = b * (1 - 0.12 * h);
 }
 
+/** A kind's crown, from its leaves: centre height, horizontal and vertical radius. */
+function crownOf(geo: THREE.BufferGeometry): [number, number, number] | null {
+  const mats = geo.userData.materials as THREE.Material[];
+  const pos = geo.getAttribute("position");
+  const index = geo.index!;
+  let lo = Infinity;
+  let hi = -Infinity;
+  const radii: number[] = [];
+  for (const g of geo.groups) {
+    if (!mats[g.materialIndex ?? 0]?.name.startsWith("leaves_")) continue;
+    for (let i = g.start; i < g.start + g.count; i++) {
+      const v = index.getX(i);
+      const y = pos.getY(v);
+      lo = Math.min(lo, y);
+      hi = Math.max(hi, y);
+      radii.push(Math.hypot(pos.getX(v), pos.getZ(v)));
+    }
+  }
+  if (!radii.length) return null;
+  radii.sort((a, b) => a - b);
+  return [(lo + hi) / 2, radii[Math.floor(radii.length * 0.9)]!, (hi - lo) / 2];
+}
+
+/** Gives a pool's own geometry the per-instance crown attributes, with room for all. */
+function crownAttributes(p: Pool): void {
+  const n = p.mesh.instanceMatrix.count;
+  const a = p.mesh.geometry.getAttribute("crownA") as
+    THREE.InstancedBufferAttribute | undefined;
+  if (a && a.count >= n) return;
+  // Near pools start out on the kind's shared geometry: an own copy for own attributes.
+  if (!a) p.mesh.geometry = p.mesh.geometry.clone();
+  p.mesh.geometry.setAttribute(
+    "crownA",
+    new THREE.InstancedBufferAttribute(new Float32Array(n * 4), 4),
+  );
+  p.mesh.geometry.setAttribute(
+    "crownB",
+    new THREE.InstancedBufferAttribute(new Float32Array(n), 1),
+  );
+}
+
+/** The next instance's crown: centre and radii in the world. */
+function writeCrown(
+  p: Pool,
+  crown: [number, number, number],
+  x: number,
+  y: number,
+  z: number,
+  s: number,
+): void {
+  const a = p.mesh.geometry.getAttribute("crownA")!.array as Float32Array;
+  const b = p.mesh.geometry.getAttribute("crownB")!.array as Float32Array;
+  a.set([x, y + crown[0] * s, z, crown[1] * s], p.count * 4);
+  b[p.count] = crown[2] * s;
+}
+
 function finish(p: Pool, bounds: boolean): void {
   p.mesh.count = p.count;
   p.mesh.instanceMatrix.needsUpdate = true;
   p.mesh.instanceColor!.needsUpdate = true;
+  const a = p.mesh.geometry.getAttribute("crownA");
+  if (a) {
+    a.needsUpdate = true;
+    p.mesh.geometry.getAttribute("crownB")!.needsUpdate = true;
+  }
   if (bounds && p.count) p.mesh.computeBoundingSphere();
 }
 
@@ -810,7 +945,7 @@ function bake(mesh: THREE.Mesh): THREE.BufferGeometry {
   return geo;
 }
 
-/** Camera position, for the near/far cross-fade (also in shadow passes). */
+/** Camera position, for the near/far cross-fade. */
 const viewer = uniform(new THREE.Vector3());
 
 /** Screen-space dither (0..1) and how far a fragment is into the billboard range (0..1). */
@@ -842,9 +977,38 @@ function translucency(albedo: Node<"vec3">): Node<"vec3"> {
   return albedo.mul(sunLight).mul(back.mul(0.2).add(0.035));
 }
 
+/** Per near instance: crown centre (world) and horizontal radius, and vertical radius. */
+const crownA = attribute<"vec4">("crownA", "vec4");
+const crownB = attribute<"float">("crownB", "float");
+
+/**
+ * Sunlight left after passing through a crown, from a point at `q` relative to its centre:
+ * the leaves are a soft volume (an ellipsoid of radii `r`), and light falls off with the
+ * length of foliage it crosses on its way (Beer-Lambert). Sunny sides stay bright, the
+ * interior and far side go dark, as a shadow map did, at the cost of a little arithmetic.
+ * 3D trees and their billboards use the same crowns, so the hand-over stays seamless.
+ */
+function throughCrown(q: Node<"vec3">, r: Node<"vec3">): Node<"float"> {
+  const u = q.div(r);
+  const d = sunDirection.div(r);
+  const a = d.dot(d);
+  const b = u.dot(d);
+  const c = u.dot(u).sub(1);
+  const root = b.mul(b).sub(a.mul(c)).max(0).sqrt();
+  const exit = root.sub(b).div(a);
+  const entry = root.negate().sub(b).div(a);
+  const path = exit.sub(entry.max(0)).max(0);
+  return exp(path.mul(-CROWN_DENSITY));
+}
+
+/** Skylight inside a crown: less towards its centre (`depth` 0 at the centre, 1 at the edge). */
+function crownAmbient(depth: Node<"float">): Node<"float"> {
+  return mix(float(CROWN_AMBIENT), float(1), smoothstep(0.15, 1, depth));
+}
+
 /** Node material for a kit material: textured, vertex-coloured, leaves alpha-masked. */
 function makeMaterial(src: THREE.MeshStandardMaterial): THREE.Material {
-  const m = new THREE.MeshStandardNodeMaterial({
+  const m = new MatteNodeMaterial({
     name: src.name,
     roughness: src.name === "rock" ? 0.85 : 0.9,
     metalness: 0,
@@ -856,7 +1020,10 @@ function makeMaterial(src: THREE.MeshStandardMaterial): THREE.Material {
   map.colorSpace = THREE.SRGBColorSpace;
   map.anisotropy = 4;
   const tex = texture(map, uv());
-  const tint = new THREE.Color(TINTS[src.name] ?? 0xffffff);
+  // Generated leaves are named per clump size (leaves_oak_x16): tinted by type.
+  const tint = new THREE.Color(
+    TINTS[src.name.replace(/_x\d+$/, "")] ?? 0xffffff,
+  );
   // Bark half desaturated: the kit's is a stylized orange-brown.
   const rgb =
     src.name === "bark"
@@ -870,7 +1037,17 @@ function makeMaterial(src: THREE.MeshStandardMaterial): THREE.Material {
     const size = float((map.image as { width?: number } | null)?.width ?? 1024);
     const t = uv().mul(size);
     const lod = log2(max(max(dFdx(t).length(), dFdy(t).length()), 1));
-    m.maskNode = tex.a.mul(lod.mul(0.35).add(1)).greaterThan(0.4);
+    let alpha = tex.a.mul(lod.mul(0.35).add(1));
+    // Generated leaves are a few large clump cards: seen edge-on, one reads as a long
+    // streak, so cards dissolve as they turn edge-on (face normal from the derivatives).
+    if (src.name.startsWith("leaves_")) {
+      const face = cross(dFdx(positionWorld), dFdy(positionWorld)).normalize();
+      const facing = abs(
+        face.dot(positionWorld.sub(cameraPosition).normalize()),
+      );
+      alpha = alpha.mul(smoothstep(0.08, 0.35, facing));
+    }
+    m.maskNode = alpha.greaterThan(0.4);
     // Shadow maps sample the texture coarsely, where the boost would make crowns solid.
     m.maskShadowNode = tex.a.greaterThan(0.5);
   }
@@ -882,6 +1059,15 @@ function makeMaterial(src: THREE.MeshStandardMaterial): THREE.Material {
     m.maskShadowNode = m.maskShadowNode
       ? (m.maskShadowNode as Node<"bool">).and(showNear)
       : showNear;
+    // The crown shades itself: less sun the deeper in (towards the sun's far side), and
+    // less skylight towards its centre.
+    const r = vec3(crownA.w, crownB, crownA.w);
+    const q = positionWorld.sub(crownA.xyz);
+    const sun = throughCrown(q, r);
+    (
+      m as unknown as { receivedShadowNode: (s: Node<"float">) => Node }
+    ).receivedShadowNode = (shadow) => shadow.mul(sun);
+    m.aoNode = crownAmbient(q.div(r).length());
   }
   // Generated leaves carry crown normals (outwards from the crown); three would flip them on
   // back faces, which turns half the cards towards the trunk and darkens the crown.
