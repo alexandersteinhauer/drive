@@ -25,6 +25,7 @@ import { Grass } from "./grass";
 import { Landscape } from "./world/landscape";
 import { Stats } from "./stats";
 import { SunField } from "./sunField";
+import { WorldWorkers } from "./worldWorkers";
 
 const DT = 1 / 480;
 /** How far ahead (along -Z) the road is generated beyond the car; must exceed the view radius. */
@@ -68,16 +69,17 @@ function setPost(skip: Parameters<typeof createPipeline>[3]): void {
 
 const land = new Landscape();
 land.road.ensure(ROAD_AHEAD);
-const sunField = new SunField(renderer, land);
+// Terrain, vegetation, grass and the sun field's tiles are generated off the main thread.
+const workers = new WorldWorkers(land);
+const sunField = new SunField(renderer, workers);
 atmosphere.useField(sunField);
 const vegetation = new Vegetation(
-  land,
   import.meta.env.BASE_URL + "models/nature.glb",
   renderer,
 );
-const terrain = new TerrainView(land, vegetation);
+const terrain = new TerrainView(land, vegetation, workers);
 const roadView = new RoadView(land);
-const grass = new Grass(land);
+const grass = new Grass(workers);
 scene.add(terrain.group, roadView.group, vegetation.group, grass.group);
 
 const camDir = new THREE.Vector3(0, 0, -1);
@@ -244,12 +246,12 @@ function frame(now: number): void {
   );
 
   land.road.ensure(-pos.z + ROAD_AHEAD);
-  terrain.update(pos, 2.5);
+  terrain.update(pos);
   vegetation.update(pos);
   roadView.update(pos);
   atmosphere.update(camera);
   atmosphere.follow(view.root.position);
-  sunField.update(camera.position, atmosphere.lightDirection, 1);
+  sunField.update(camera.position, atmosphere.lightDirection);
   vegetation.setSun(atmosphere.sun);
   vegetation.setViewer(camera.position);
   grass.setSun(atmosphere.sun);
@@ -279,9 +281,16 @@ addEventListener("resize", () => {
   if (!pausedEl.hidden) pipeline.render();
 });
 
-// Build the surroundings up front; after that, tiles stream in within a per-frame budget.
-terrain.update(car.position, Infinity);
-// The land's and trees' shadows around the start, before the first frame.
-sunField.prime(car.position, atmosphere.lightDirection);
+// Build the surroundings up front (in the workers); after that they stream in a few
+// pieces per frame. Then compile every shader before the first frame, so none is built
+// mid-drive.
+await Promise.all([
+  terrain.prime(car.position),
+  sunField.prime(car.position, atmosphere.lightDirection),
+  vegetation.ready,
+  grass.prime(car.position),
+]);
+vegetation.flush(car.position);
 roadView.update(car.position);
+await renderer.compileAsync(scene, camera);
 renderer.setAnimationLoop(frame);

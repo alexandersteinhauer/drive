@@ -18,26 +18,23 @@ import {
 } from "three/tsl";
 import type { Node } from "three/webgpu";
 import { MatteNodeMaterial } from "./matte";
-import { Surface, type Landscape, type LandSample } from "./world/landscape";
-import { hash2, rng } from "./world/noise";
+import { rng } from "./world/noise";
 import { meadowColor } from "./terrainMaterial";
-import { UNDER_ROAD, variationAt } from "./terrainView";
-import { forest } from "./vegetation";
+import { GRASS_CHUNK, type GrassResult } from "./world/gen";
+import type { WorldWorkers } from "./worldWorkers";
 
-/** Grass is streamed in square chunks (m) on a world-aligned grid. */
-const CHUNK = 32;
-/** Terrain vertex spacing at full detail (128 m tiles, 64 segments): blades sit on its triangles. */
-const CELL = 2;
-/** Clump grid spacing (m). */
-const SPACING = 0.3;
+/** Grass is streamed in square chunks (m) on a world-aligned grid, generated in the
+ *  world workers (world/gen.ts). */
+const CHUNK = GRASS_CHUNK;
+/** Chunks being generated at once, and finished ones turned into meshes per frame. */
+const IN_FLIGHT = 4;
+const APPLY_PER_FRAME = 2;
 /** Grass reaches this far from the camera, sinking into the ground over the last stretch. */
 const RANGE = 75;
 const FADE_FROM = 55;
 /** Clumps thin out with distance to this fraction (widening to keep the cover). */
 const THIN_FROM = 12;
 const THIN_TO = 0.3;
-/** CPU time per frame for building chunks (ms). */
-const BUDGET = 1;
 
 const BLADES = 14;
 /** Beyond this distance, chunks draw only the first half of each tuft's blades, wider. */
@@ -49,12 +46,6 @@ const LEVELS = [0, 0.4, 0.75];
 const viewer = uniform(new THREE.Vector3());
 const sunDirection = uniform(new THREE.Vector3(0, 1, 0));
 const sunLight = uniform(new THREE.Color(1, 1, 1));
-
-const sample: LandSample = {
-  height: 0,
-  surface: Surface.Grass,
-  roadDistance: Infinity,
-};
 
 interface Chunk {
   mesh: THREE.Mesh<THREE.InstancedBufferGeometry>;
@@ -77,10 +68,14 @@ export class Grass {
   private readonly clump = clumpGeometry();
   private focusKey = "";
   private queue: [number, number][] = [];
-  private job: { key: string; gen: Generator<void, Chunk | null> } | null =
-    null;
+  /** Chunks being generated, and those finished (null: nothing grows there). */
+  private readonly building = new Set<string>();
+  private readonly finished: [number, number, GrassResult | null][] = [];
+  /** Chunks known to be bare, so they aren't requested again. */
+  private readonly bare = new Set<string>();
+  private wanted = new Set<string>();
 
-  constructor(private readonly land: Landscape) {}
+  constructor(private readonly workers: WorldWorkers) {}
 
   setSun(light: THREE.DirectionalLight): void {
     // Towards the light: it follows the car (shadow box), so not its position alone.
@@ -91,8 +86,20 @@ export class Grass {
     sunLight.value.copy(light.color).multiplyScalar(light.intensity);
   }
 
+  /** Builds everything around `camera` (start-up), as fast as the workers go. */
+  async prime(camera: THREE.Vector3): Promise<void> {
+    this.update(camera, Infinity, 0);
+    while (this.building.size)
+      await new Promise<void>((resolve) => setTimeout(resolve, 10));
+    this.update(camera, 0, Infinity);
+  }
+
   /** Streams chunks around the camera and trims distant ones. */
-  update(camera: THREE.Vector3, budget = BUDGET): void {
+  update(
+    camera: THREE.Vector3,
+    inFlight = IN_FLIGHT,
+    apply = APPLY_PER_FRAME,
+  ): void {
     viewer.value.copy(camera);
     const fx = Math.floor(camera.x / CHUNK);
     const fz = Math.floor(camera.z / CHUNK);
@@ -101,23 +108,28 @@ export class Grass {
       this.focusKey = key;
       this.rescan(camera);
     }
-    const end = performance.now() + budget;
-    while (performance.now() < end) {
-      if (!this.job) {
-        const next = this.queue.shift();
-        if (!next) break;
-        const k = `${next[0]},${next[1]}`;
-        if (this.chunks.has(k)) continue;
-        this.job = { key: k, gen: this.build(next[0], next[1]) };
+    for (let n = 0; n < apply && this.finished.length; n++) {
+      const [cx, cz, r] = this.finished.shift()!;
+      const k = `${cx},${cz}`;
+      if (!this.wanted.has(k) || this.chunks.has(k)) continue;
+      if (!r) {
+        this.bare.add(k);
+        continue;
       }
-      const r = this.job.gen.next();
-      if (r.done) {
-        if (r.value) {
-          this.chunks.set(this.job.key, r.value);
-          this.group.add(r.value.mesh);
-        }
-        this.job = null;
-      }
+      const chunk = this.chunk(cx, cz, r);
+      this.chunks.set(k, chunk);
+      this.group.add(chunk.mesh);
+    }
+    while (this.building.size < inFlight && this.queue.length) {
+      const [cx, cz] = this.queue.shift()!;
+      const k = `${cx},${cz}`;
+      if (this.chunks.has(k) || this.bare.has(k) || this.building.has(k))
+        continue;
+      this.building.add(k);
+      void this.workers.run({ kind: "grass", cx, cz }).then((r) => {
+        this.building.delete(k);
+        this.finished.push([cx, cz, r]);
+      });
     }
     // Draw only as many clumps (sorted by rank) as the nearest point needs.
     for (const c of this.chunks.values()) {
@@ -152,155 +164,19 @@ export class Grass {
         c.mesh.geometry.dispose();
         this.chunks.delete(k);
       }
-    if (this.job && !wanted.has(this.job.key)) this.job = null;
+    for (const k of this.bare) if (!wanted.has(k)) this.bare.delete(k);
+    this.wanted = wanted;
     list.sort((a, b) => a[2] - b[2]);
     this.queue = list
       .filter(([cx, cz]) => !this.chunks.has(`${cx},${cz}`))
       .map(([cx, cz]) => [cx, cz]);
   }
 
-  private *build(cx: number, cz: number): Generator<void, Chunk | null> {
-    const land = this.land;
-    const edge = land.road.edge;
+  /** A generated chunk as a mesh: the clump geometry, instanced over its clumps. */
+  private chunk(cx: number, cz: number, r: GrassResult): Chunk {
+    const { root, info, ground, count, minY, maxY } = r;
     const x0 = cx * CHUNK;
     const z0 = cz * CHUNK;
-    // The terrain's own vertices (with a one-sample border for normals), so the blades sit
-    // exactly on its triangles.
-    const n = CHUNK / CELL;
-    const g = n + 3;
-    const hs = new Float32Array(g * g);
-    const rs = new Float32Array(g * g);
-    for (let j = 0; j < g; j++) {
-      for (let i = 0; i < g; i++) {
-        land.sample(x0 + (i - 1) * CELL, z0 + (j - 1) * CELL, sample);
-        hs[j * g + i] = sample.height;
-        rs[j * g + i] = Math.min(sample.roadDistance, 100);
-      }
-      if (j % 6 === 5) yield;
-    }
-    const v = n + 1;
-    // Per vertex: height, normal x/y/z, road distance, variation, forest.
-    const vert = new Float32Array(v * v * 7);
-    for (let j = 0; j < v; j++)
-      for (let i = 0; i < v; i++) {
-        const at = (di: number, dj: number) =>
-          hs[(j + 1 + dj) * g + i + 1 + di]!;
-        const road = rs[(j + 1) * g + i + 1]!;
-        const under =
-          UNDER_ROAD *
-          (1 - Math.min(1, Math.max(0, (road - edge + 1.2) / 1.2)));
-        const nx = -(at(1, 0) - at(-1, 0));
-        const ny = 2 * CELL;
-        const nz = -(at(0, 1) - at(0, -1));
-        const len = Math.hypot(nx, ny, nz);
-        const x = x0 + i * CELL;
-        const z = z0 + j * CELL;
-        const o = (j * v + i) * 7;
-        vert[o] = at(0, 0) - under;
-        vert[o + 1] = nx / len;
-        vert[o + 2] = ny / len;
-        vert[o + 3] = nz / len;
-        vert[o + 4] = road;
-        vert[o + 5] = variationAt(x, z);
-        vert[o + 6] = forest(x, z);
-      }
-    yield;
-
-    // Interpolates the vertex values over the terrain's triangles (split along the
-    // (i+1, j)-(i, j+1) diagonal), into `p`.
-    const p = new Float32Array(7);
-    const interpolate = (x: number, z: number) => {
-      const fx = (x - x0) / CELL;
-      const fz = (z - z0) / CELL;
-      const i = Math.min(n - 1, Math.floor(fx));
-      const j = Math.min(n - 1, Math.floor(fz));
-      const u = fx - i;
-      const w = fz - j;
-      const a = (j * v + i) * 7;
-      const b = a + 7; // (i+1, j)
-      const c = a + v * 7; // (i, j+1)
-      const d = c + 7; // (i+1, j+1)
-      if (u + w <= 1)
-        for (let k = 0; k < 7; k++)
-          p[k] =
-            vert[a + k]! +
-            u * (vert[b + k]! - vert[a + k]!) +
-            w * (vert[c + k]! - vert[a + k]!);
-      else
-        for (let k = 0; k < 7; k++)
-          p[k] =
-            vert[d + k]! +
-            (1 - u) * (vert[c + k]! - vert[d + k]!) +
-            (1 - w) * (vert[b + k]! - vert[d + k]!);
-    };
-
-    const cells = Math.round(CHUNK / SPACING);
-    // Per clump: x, y, z, yaw | height, rank, variation, forest | normal x, z.
-    const out: number[] = [];
-    for (let j = 0; j < cells; j++) {
-      for (let i = 0; i < cells; i++) {
-        const gx = Math.round(x0 / SPACING) + i;
-        const gz = Math.round(z0 / SPACING) + j;
-        const x = (gx + hash2(gx, gz, 41)) * SPACING;
-        const z = (gz + hash2(gx, gz, 42)) * SPACING;
-        if (x < x0 || x >= x0 + CHUNK || z < z0 || z >= z0 + CHUNK) continue;
-        interpolate(x, z);
-        const r = p[4]! - edge;
-        if (r < 0.7) continue;
-        const slope = 1 - p[2]!;
-        const woods = p[6]!;
-        // Patches of taller and thinner grass across the meadows.
-        const patch =
-          0.5 +
-          0.5 *
-            Math.sin(x * 0.13 + Math.sin(z * 0.09) * 2.1) *
-            Math.sin(z * 0.11 + x * 0.04);
-        const density =
-          THREE.MathUtils.smoothstep(r, 0.7, 2.2) *
-          (1 - THREE.MathUtils.smoothstep(slope, 0.08, 0.17)) *
-          (1 - 0.85 * woods) *
-          (0.75 + 0.25 * patch);
-        if (hash2(gx, gz, 43) > density) continue;
-        // Mown short along the verge, longer out in the meadow, longest in its patches.
-        const field = THREE.MathUtils.smoothstep(r, 2, 7);
-        const height =
-          (0.45 + field * (0.4 + 0.6 * patch * patch)) *
-          (0.7 + 0.6 * hash2(gx, gz, 44)) *
-          (1 - 0.35 * woods);
-        out.push(
-          x,
-          p[0]!,
-          z,
-          hash2(gx, gz, 45) * Math.PI * 2,
-          height,
-          hash2(gx, gz, 46),
-          p[5]!,
-          woods,
-          p[1]!,
-          p[3]!,
-        );
-      }
-      if (j % 10 === 9) yield;
-    }
-    const count = out.length / 10;
-    if (count === 0) return null;
-    // Sorted by rank, so drawing a prefix thins the chunk out evenly.
-    const order = [...Array(count).keys()].toSorted(
-      (a, b) => out[a * 10 + 5]! - out[b * 10 + 5]!,
-    );
-    const root = new Float32Array(count * 4);
-    const info = new Float32Array(count * 4);
-    const ground = new Float32Array(count * 2);
-    let minY = Infinity;
-    let maxY = -Infinity;
-    order.forEach((src, k) => {
-      const s = src * 10;
-      root.set(out.slice(s, s + 4), k * 4);
-      info.set(out.slice(s + 4, s + 8), k * 4);
-      ground.set(out.slice(s + 8, s + 10), k * 2);
-      minY = Math.min(minY, out[s + 1]!);
-      maxY = Math.max(maxY, out[s + 1]!);
-    });
     const geo = new THREE.InstancedBufferGeometry();
     geo.index = this.clump.index;
     for (const [name, a] of Object.entries(this.clump.attributes))

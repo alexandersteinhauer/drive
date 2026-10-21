@@ -21,8 +21,7 @@ import {
   vec2,
   vec4,
 } from "three/tsl";
-import { PLANT_STEP, plantAt, type Plant } from "./vegetation";
-import type { Landscape, LandSample } from "./world/landscape";
+import type { WorldWorkers } from "./worldWorkers";
 
 type F = THREE.Node<"float">;
 type I = THREE.Node<"int">;
@@ -57,44 +56,20 @@ const EDGE_NOISE = 0.6;
 /** Highest relief that can cast a shadow (m): bounds how far towards the sun to look. */
 const RELIEF = 180;
 
-const sample: LandSample = { height: 0, surface: 2, roadDistance: Infinity };
-const plant: Plant = {
-  x: 0,
-  y: 0,
-  z: 0,
-  yaw: 0,
-  scale: 1,
-  kind: 0,
-  tree: true,
-};
-
-/**
- * Crowns per tree kind (vegetation.ts KINDS), at scale 1, from the models' leaves: bottom
- * and top above the ground and radius (m), and whether a cone (pines) or rounded.
- */
-const CROWN: [number, number, number, boolean][] = [
-  [2.0, 9.6, 3.6, false],
-  [2.4, 9.6, 3.1, false],
-  [2.4, 11.5, 4.7, false],
-  [2.3, 10.7, 4.1, false],
-  [1.7, 10.4, 3.7, false],
-  [1.3, 10.9, 2.2, true],
-  [1.0, 10.8, 2.2, true],
-  [1.0, 13.0, 2.9, true],
-];
-/** Widest crown at the largest scale (m): trees this far outside a tile still shade it. */
-const CROWN_REACH = 4.7 * 1.8;
+/** Tiles per worker job, and jobs in flight while driving. */
+const BATCH = 32;
+const IN_FLIGHT = 2;
 
 /**
  * Sun shadows of the land, and the shade of the woods, as world-space data: the same point
  * always gets the same answer, wherever the camera is, so nothing pops or slides as it
  * moves (unlike a shadow map's cascades).
  *
- * Heights on a 2 m grid, 4 km across, follow the focus a 64 m tile at a time (the CPU
- * fills new tiles within a per-frame budget; storage wraps around, so nothing is moved).
- * Tree crowns stand on them as solid shapes (rounded, or cones for pines), placed exactly
- * as vegetation.ts plants them, so the trees cast shadows too, near and far alike, and
- * shade each other and themselves (a crown's far side is in its own shadow).
+ * Heights on a 2 m grid, 4 km across, follow the focus a 64 m tile at a time (generated in
+ * the world workers; storage wraps around, so nothing is moved). Tree crowns stand on them
+ * as solid shapes (rounded, or cones for pines), placed exactly as the trees are planted
+ * (world/plants.ts), so the trees cast shadows too, near and far alike, and shade each
+ * other and themselves (a crown's far side is in its own shadow).
  * The GPU turns them into a "shadow height" per texel, the height below which a point
  * there is in the sun's shadow: max over t of h(p + t·d) - t·tan(elevation), towards the
  * sun along d. Rather than marching every texel, K passes double the reach each time
@@ -147,7 +122,14 @@ export class SunField {
   private wantZ = NaN;
   private readonly filled = new Map<number, string>();
   private queue: [number, number][] = [];
-  private job: Generator<void, void> | null = null;
+  /** Tiles being generated (slot -> key), and finished batches to copy in. */
+  private readonly building = new Map<number, string>();
+  private readonly finished: {
+    tiles: number[];
+    heights: Float32Array;
+    tops: Float32Array;
+  }[] = [];
+  private batches = 0;
   private dirty: number[] = [];
   /** Recompute in progress: passes left, and which buffer holds the last one. */
   private pass = -1;
@@ -158,7 +140,7 @@ export class SunField {
 
   constructor(
     private readonly renderer: THREE.WebGPURenderer,
-    private readonly land: Landscape,
+    private readonly workers: WorldWorkers,
   ) {
     this.out.type = THREE.HalfFloatType;
     this.out.wrapS = this.out.wrapT = THREE.RepeatWrapping;
@@ -417,8 +399,11 @@ export class SunField {
    * Follows `focus` and the light: fills new tiles within `budgetMs` of CPU time, then
    * recomputes the shadows over the next frames, two passes per frame.
    */
-  update(focus: THREE.Vector3, light: THREE.Vector3, budgetMs: number): void {
-    const start = performance.now();
+  update(
+    focus: THREE.Vector3,
+    light: THREE.Vector3,
+    inFlight = IN_FLIGHT,
+  ): void {
     const tx = Math.floor(focus.x / (T * TS)) - NT / 2;
     const tz = Math.floor(focus.z / (T * TS)) - NT / 2;
     if (tx !== this.wantX || tz !== this.wantZ) {
@@ -429,8 +414,10 @@ export class SunField {
         for (let i = 0; i < NT; i++) {
           const x = tx + i;
           const z = tz + j;
-          if (this.filled.get(slot(x, z)) !== `${x},${z}`)
-            this.queue.push([x, z]);
+          const key = `${x},${z}`;
+          if (this.filled.get(slot(x, z)) === key) continue;
+          if (this.building.get(slot(x, z)) === key) continue;
+          this.queue.push([x, z]);
         }
       // Nearest first.
       const cx = tx + NT / 2;
@@ -439,21 +426,30 @@ export class SunField {
         (p, q) =>
           Math.hypot(q[0] - cx, q[1] - cz) - Math.hypot(p[0] - cx, p[1] - cz),
       );
-      this.job = null;
     }
-    while (performance.now() - start < budgetMs) {
-      if (!this.job) {
-        const next = this.queue.pop();
-        if (!next) break;
-        this.job = this.fill(next[0], next[1]);
+    // Copy finished tiles in (a few microseconds each).
+    for (const r of this.finished.splice(0)) this.store(r);
+    while (this.batches < inFlight && this.queue.length) {
+      const tiles: number[] = [];
+      while (tiles.length < BATCH * 2 && this.queue.length) {
+        const [x, z] = this.queue.pop()!;
+        this.building.set(slot(x, z), `${x},${z}`);
+        tiles.push(x, z);
       }
-      if (this.job.next().done) this.job = null;
+      this.batches++;
+      void this.workers
+        .run({ kind: "sun", tiles, size: TS, texel: T })
+        .then(({ heights, tops }) => {
+          this.batches--;
+          this.finished.push({ tiles, heights, tops });
+        });
     }
 
     const key = `${light.x.toFixed(4)},${light.y.toFixed(4)},${light.z.toFixed(4)}`;
     const moved = key !== this.lightKey;
     this.lightKey = key;
-    const ready = !this.job && this.queue.length === 0;
+    const ready =
+      this.batches === 0 && this.queue.length === 0 && !this.finished.length;
     if (moved && ready) {
       // The light moved (the time is being changed): all passes at once (~1 ms), so the
       // shadows follow the sun smoothly instead of freezing until it stops.
@@ -472,59 +468,46 @@ export class SunField {
   }
 
   /** Fills everything and computes the shadows at once (start-up). */
-  prime(focus: THREE.Vector3, light: THREE.Vector3): void {
+  async prime(focus: THREE.Vector3, light: THREE.Vector3): Promise<void> {
     this.update(focus, light, Infinity);
+    while (this.batches)
+      await new Promise<void>((resolve) => setTimeout(resolve, 10));
+    this.update(focus, light, 0);
     this.step(MAX_PASSES + 1);
+    // The GPU buffers were created from the whole arrays just now; three doesn't clear the
+    // ranges on creation, and they'd all go out (32 MB) with the first new tiles.
+    this.heightAttr.clearUpdateRanges();
+    this.topAttr.clearUpdateRanges();
   }
 
-  private *fill(x: number, z: number): Generator<void, void> {
-    const base = slot(x, z) * TS * TS;
-    for (let lz = 0; lz < TS; lz++) {
-      const wz = (z * TS + lz) * T;
-      for (let lx = 0; lx < TS; lx++) {
-        this.land.sample((x * TS + lx) * T, wz, sample);
-        this.heights[base + lz * TS + lx] = sample.height;
-      }
-      if (lz % 8 === 7) yield;
+  /** A generated batch into storage, for the next recompute. */
+  private store({
+    tiles,
+    heights,
+    tops,
+  }: {
+    tiles: number[];
+    heights: Float32Array;
+    tops: Float32Array;
+  }): void {
+    const n = TS * TS;
+    for (let t = 0; t < tiles.length / 2; t++) {
+      const x = tiles[t * 2]!;
+      const z = tiles[t * 2 + 1]!;
+      const s = slot(x, z);
+      const key = `${x},${z}`;
+      if (this.building.get(s) === key) this.building.delete(s);
+      // The window moved on and this slot now belongs to another tile.
+      const ox = this.wantX;
+      const oz = this.wantZ;
+      if (x < ox || z < oz || x >= ox + NT || z >= oz + NT) continue;
+      const base = s * n;
+      this.heights.set(heights.subarray(t * n, t * n + n), base);
+      this.tops.set(tops.subarray(t * n, t * n + n), base);
+      this.filled.set(s, key);
+      this.dirty.push(base);
+      this.stale = true;
     }
-    // Occluders: the ground, and the crowns over it.
-    this.tops.set(this.heights.subarray(base, base + TS * TS), base);
-    const x0 = x * TS * T;
-    const z0 = z * TS * T;
-    const span = TS * T;
-    const g0x = Math.floor((x0 - CROWN_REACH) / PLANT_STEP);
-    const g1x = Math.floor((x0 + span + CROWN_REACH) / PLANT_STEP);
-    const g0z = Math.floor((z0 - CROWN_REACH) / PLANT_STEP);
-    const g1z = Math.floor((z0 + span + CROWN_REACH) / PLANT_STEP);
-    for (let gz = g0z; gz <= g1z; gz++) {
-      for (let gx = g0x; gx <= g1x; gx++) {
-        if (!plantAt(this.land, gx, gz, true, plant)) continue;
-        const [bottom, top, radius, cone] = CROWN[plant.kind]!;
-        const s = plant.scale;
-        const r = radius * s;
-        const lo = plant.y + bottom * s;
-        const hi = plant.y + top * s;
-        const ix0 = Math.max(0, Math.ceil((plant.x - r - x0) / T));
-        const ix1 = Math.min(TS - 1, Math.floor((plant.x + r - x0) / T));
-        const iz0 = Math.max(0, Math.ceil((plant.z - r - z0) / T));
-        const iz1 = Math.min(TS - 1, Math.floor((plant.z + r - z0) / T));
-        for (let iz = iz0; iz <= iz1; iz++)
-          for (let ix = ix0; ix <= ix1; ix++) {
-            const d =
-              Math.hypot(x0 + ix * T - plant.x, z0 + iz * T - plant.z) / r;
-            if (d >= 1) continue;
-            const h = cone
-              ? hi - (hi - lo) * d
-              : (lo + hi) / 2 + ((hi - lo) / 2) * Math.sqrt(1 - d * d);
-            const i = base + iz * TS + ix;
-            if (h > this.tops[i]!) this.tops[i] = h;
-          }
-      }
-      yield;
-    }
-    this.filled.set(slot(x, z), `${x},${z}`);
-    this.dirty.push(base);
-    this.stale = true;
   }
 
   private begin(light: THREE.Vector3): void {

@@ -7,7 +7,6 @@ import {
   cameraPosition,
   cameraWorldMatrix,
   positionGeometry,
-  positionLocal,
   transformNormalToView,
   dFdx,
   dFdy,
@@ -33,8 +32,8 @@ import { MatteNodeMaterial } from "./matte";
 import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
 import { MeshoptDecoder } from "three/addons/libs/meshopt_decoder.module.js";
 import { mergeGeometries } from "three/addons/utils/BufferGeometryUtils.js";
-import { Surface, type Landscape, type LandSample } from "./world/landscape";
 import { hash2 } from "./world/noise";
+import { STRIDE } from "./world/plants";
 
 /**
  * Trees and bushes generated with EZ-Tree (MIT), rocks from Quaternius'
@@ -49,7 +48,6 @@ import { hash2 } from "./world/noise";
  * culled.
  */
 
-const STRIDE = 6;
 /**
  * Trees and bushes are full 3D up close and billboards beyond, cross-faded with a dither
  * between these distances (m); billboards fade out again towards the planting limit.
@@ -62,6 +60,15 @@ const TILE_HALF = 64;
 /** Pools hold at least this many instances: smaller ones would bake their matrices into the
  *  shader (a compile per size). */
 const MIN_CAPACITY = 1100;
+/** Near pools are made this large at load (a dense wood holds ~250 of a kind in range). */
+const NEAR_CAPACITY = 2048;
+/**
+ * Floats per billboard instance: quad base x, y, z and height | atlas row, yaw, width |
+ * tint rgb | crown centre x, y, z and horizontal radius | vertical radius.
+ */
+const FAR_STRIDE = 15;
+/** Billboard blocks rebuilt per frame at most. */
+const BLOCKS_PER_FRAME = 2;
 /** Refill near pools after the focus moves this far (m). */
 const REFILL = 10;
 
@@ -89,10 +96,6 @@ const KINDS: Kind[] = [
 ];
 /** Farthest any kind reaches. */
 const MAX_RANGE = Math.max(...KINDS.map((k) => k.ranges.at(-1)!));
-const K = Object.fromEntries(KINDS.map((k, i) => [k.model, i]));
-const BROADLEAF = [0, 1, 2, 3, 4];
-const PINE = [5, 6, 7];
-const BUSHES = [8, 9, 10];
 /** Far stand-in model per family, and how its height compares to each kind's (by index). */
 /** Billboard atlas: one cell (px) per tree kind, in a grid of columns x rows. */
 /**
@@ -125,12 +128,21 @@ const TINTS: Record<string, THREE.ColorRepresentation> = {
   bark: 0xd2cac2,
 };
 
-const sample: LandSample = {
-  height: 0,
-  surface: Surface.Grass,
-  roadDistance: Infinity,
-};
-const normal = new THREE.Vector3();
+/** A block's billboards (see `fillBlock`). */
+interface FarBlock {
+  mesh: THREE.Mesh<THREE.InstancedBufferGeometry>;
+  capacity: number;
+}
+
+/** One tile's billboard instances, and its extent. */
+interface TileBillboards {
+  data: Float32Array;
+  count: number;
+  minY: number;
+  maxY: number;
+  min: THREE.Vector2;
+  max: THREE.Vector2;
+}
 
 interface Pool {
   mesh: THREE.InstancedMesh;
@@ -162,17 +174,21 @@ export class Vegetation {
   /** Tiles per far block. */
   private readonly byBlock = new Map<string, Set<TileItems>>();
   private readonly near = new Map<string, Pool>();
-  private readonly far = new Map<string, Pool>();
+  private readonly far = new Map<string, FarBlock>();
+  /** Billboard instance data per tile (FAR_STRIDE floats each), built once per tile. */
+  private readonly billboardsOf = new WeakMap<TileItems, TileBillboards>();
   private readonly dirtyBlocks = new Set<string>();
   private nearDirty = true;
   private readonly lastFill = new THREE.Vector3(Infinity, 0, Infinity);
 
+  /** Resolves once the models are in and every pool exists (see `load`). */
+  readonly ready: Promise<void>;
+
   constructor(
-    private readonly land: Landscape,
     url: string,
     private readonly renderer: THREE.WebGPURenderer,
   ) {
-    void this.load(url);
+    this.ready = this.load(url);
   }
 
   private async load(url: string): Promise<void> {
@@ -207,6 +223,19 @@ export class Vegetation {
       k.ranges.map((_, lod) => geometry(`${k.model}_lod${lod}`)),
     );
     this.crowns = this.geometries.map((levels) => crownOf(levels[0]!));
+    // Every near pool up front, at a capacity no drive outgrows: an InstancedMesh compiles
+    // its own shaders (~10 ms), so none may be created mid-drive.
+    this.geometries.forEach((levels, k) =>
+      levels.forEach((geometry, lod) => {
+        const p = this.pool(
+          this.near,
+          String(k * 3 + lod),
+          geometry,
+          NEAR_CAPACITY,
+        );
+        if (this.crowns[k]) crownAttributes(p);
+      }),
+    );
     this.billboards();
     this.nearDirty = true;
     for (const block of this.byBlock.keys()) this.dirtyBlocks.add(block);
@@ -247,89 +276,6 @@ export class Vegetation {
     this.dirtyBlocks.add(t.block);
   }
 
-  /**
-   * Scatters a tile's vegetation: trees in clumpy forests, bushes at their edges and in the
-   * meadows, and rocks (more on slopes). `far` tiles get only the trees: they are only
-   * ever seen as billboards.
-   */
-  *scatter(
-    tx: number,
-    tz: number,
-    size: number,
-    far: boolean,
-  ): Generator<void, Float32Array> {
-    const out: number[] = [];
-    const land = this.land;
-    const edge = land.road.edge;
-    const x0 = tx * size;
-    const z0 = tz * size;
-    const put = (
-      x: number,
-      y: number,
-      z: number,
-      yaw: number,
-      s: number,
-      kind: number,
-    ) => out.push(x, y, z, yaw, s, kind);
-    // Trees and bushes on a 5 m grid; far tiles the same trees, so nothing changes when a
-    // tile turns from near to far.
-    const step = PLANT_STEP;
-    for (let j = 0; j < size / step; j++) {
-      for (let i = 0; i < size / step; i++) {
-        const gx = Math.floor(x0 / step) + i;
-        const gz = Math.floor(z0 / step) + j;
-        if (!plantAt(land, gx, gz, far, plant)) continue;
-        // Far, sunk a little: the coarse terrain there is up to a metre off.
-        const sink = plant.tree ? (far ? 0.8 : 0.15) : 0.1;
-        put(
-          plant.x,
-          plant.y - sink,
-          plant.z,
-          plant.yaw,
-          plant.scale,
-          plant.kind,
-        );
-      }
-      yield;
-    }
-    if (far) return new Float32Array(out);
-    // Rocks on a 24 m grid, more on slopes.
-    for (let j = 0; j < size / 24; j++)
-      for (let i = 0; i < size / 24; i++) {
-        const gx = Math.floor(x0 / 24) + i;
-        const gz = Math.floor(z0 / 24) + j;
-        const x = (gx + hash2(gx, gz, 21)) * 24;
-        const z = (gz + hash2(gx, gz, 22)) * 24;
-        const slope = 1 - land.normal(x, z, normal).y;
-        if (hash2(gx, gz, 23) > 0.22 + slope * 4) continue;
-        land.sample(x, z, sample);
-        if (sample.roadDistance < edge + 2) continue;
-        // A group of one big, partly buried rock and a few smaller ones around it.
-        const s = 0.6 + hash2(gx, gz, 24) ** 2 * 1.6;
-        const kind = K.Rock_Medium_1! + Math.floor(hash2(gx, gz, 25) * 3);
-        put(x, sample.height - 0.35 * s, z, hash2(gx, gz, 26) * 6.283, s, kind);
-        const extra = Math.floor(hash2(gx, gz, 27) * 4);
-        for (let e = 0; e < extra; e++) {
-          const a = hash2(gx, gz, 30 + e) * 6.283;
-          const r = s * (1.6 + hash2(gx, gz, 40 + e) * 1.6);
-          const ex = x + Math.cos(a) * r;
-          const ez = z + Math.sin(a) * r;
-          const es = s * (0.25 + hash2(gx, gz, 50 + e) * 0.35);
-          land.sample(ex, ez, sample);
-          if (sample.roadDistance < edge + 2) continue;
-          put(
-            ex,
-            sample.height - 0.3 * es,
-            ez,
-            a * 3.1,
-            es,
-            K.Rock_Medium_1! + ((kind + e) % 3),
-          );
-        }
-      }
-    return new Float32Array(out);
-  }
-
   /** Camera position, for the near/far cross-fade. */
   setViewer(position: THREE.Vector3): void {
     viewer.value.copy(position);
@@ -345,8 +291,11 @@ export class Vegetation {
     sunLight.value.copy(light.color).multiplyScalar(light.intensity);
   }
 
-  /** Refills pools for the focus position. */
-  update(focus: THREE.Vector3): void {
+  /**
+   * Refills the near pools for the focus position (every REFILL m), and rebuilds the
+   * billboard blocks whose tiles changed (a few per frame: each a copy and an upload).
+   */
+  update(focus: THREE.Vector3, blocks = BLOCKS_PER_FRAME): void {
     if (!this.geometries) return;
     const moved = Math.hypot(
       focus.x - this.lastFill.x,
@@ -356,14 +305,18 @@ export class Vegetation {
       this.lastFill.copy(focus);
       this.nearDirty = false;
       this.fillNear(focus);
-      // Blocks near the focus hand trees to and from the near pools.
-      // Blocks across the near/far boundary hand trees over.
-      const handover = KINDS[0]!.ranges.at(-1)! + 2 * REFILL;
-      for (const block of this.byBlock.keys())
-        if (blockDistance(block, focus) < handover) this.dirtyBlocks.add(block);
     }
-    for (const block of this.dirtyBlocks) this.fillFar(block, this.lastFill);
-    this.dirtyBlocks.clear();
+    let n = 0;
+    for (const block of this.dirtyBlocks) {
+      if (n++ >= blocks) break;
+      this.dirtyBlocks.delete(block);
+      this.fillBlock(block);
+    }
+  }
+
+  /** Brings everything up to date at once (start-up). */
+  flush(focus: THREE.Vector3): void {
+    this.update(focus, Infinity);
   }
 
   /**
@@ -414,7 +367,6 @@ export class Vegetation {
     const pools: (Pool | undefined)[] = [];
     for (const [key, pool] of this.near) {
       pool.count = 0;
-      pool.mesh.count = 0;
       pools[Number(key)] = pool;
     }
     counts.forEach((n, key) => {
@@ -444,76 +396,153 @@ export class Vegetation {
       if (crown) writeCrown(p, crown, r[i]!, r[i + 1]!, r[i + 2]!, s);
       write(p, r[i]!, r[i + 1]!, r[i + 2]!, r[i + 3]!, s);
     }
-    counts.forEach((n, key) => {
-      if (n) finish(pools[key]!, false);
-    });
+    for (const pool of this.near.values()) finish(pool);
   }
 
-  /** Far stand-ins for the trees of one block that are beyond the near pools. */
-  private fillFar(block: string, focus: THREE.Vector3): void {
-    const start = NEAR_START;
-    const tiles = this.byBlock.get(block);
-    const visit = (fn: (r: Float32Array, i: number) => void) => {
-      for (const t of tiles ?? []) {
-        const r = t.records;
-        for (let i = 0; i < r.length; i += STRIDE) {
-          if (KINDS[r[i + 5]!]!.family === undefined) continue;
-          const ex = r[i]! - focus.x;
-          const ez = r[i + 2]! - focus.z;
-          if (ex * ex + ez * ez <= start * start) continue;
-          fn(r, i);
-        }
-      }
-    };
-    let n = 0;
-    visit(() => n++);
-    if (n === 0) {
-      const p = this.far.get(block);
-      if (p) {
-        this.group.remove(p.mesh);
-        p.mesh.dispose();
+  /**
+   * A block's billboards: every tree of its tiles, near ones included (the shader drops
+   * those the 3D trees stand for), so a block only changes when its tiles do. One plain
+   * mesh per block over instanced geometry: unlike an InstancedMesh, it shares the
+   * billboard shader with every other block.
+   */
+  private fillBlock(block: string): void {
+    const tiles = [...(this.byBlock.get(block) ?? [])].map((t) =>
+      this.tileBillboards(t),
+    );
+    const count = tiles.reduce((n, t) => n + t.count, 0);
+    let b = this.far.get(block);
+    if (count === 0) {
+      if (b) {
+        this.group.remove(b.mesh);
+        b.mesh.geometry.dispose();
         this.far.delete(block);
       }
       return;
     }
-    const p = this.pool(this.far, block, this.farGeometry!, n, [
-      this.farMaterial!,
-    ]);
-    // Own copy of the quad per pool, for its per-instance atlas rows and yaws.
-    let cells = p.mesh.geometry.getAttribute("cell") as
-      THREE.InstancedBufferAttribute | undefined;
-    if (!cells || cells.count < p.mesh.instanceMatrix.count) {
-      p.mesh.geometry = this.farGeometry!.clone();
-      cells = new THREE.InstancedBufferAttribute(
-        new Float32Array(p.mesh.instanceMatrix.count * 3),
-        3,
+    if (!b || b.capacity < count) {
+      let capacity = 1024;
+      while (capacity < count) capacity *= 2;
+      const geo = new THREE.InstancedBufferGeometry();
+      geo.index = this.farGeometry!.index;
+      for (const name of ["position", "uv"])
+        geo.setAttribute(name, this.farGeometry!.getAttribute(name));
+      const buf = new THREE.InstancedInterleavedBuffer(
+        new Float32Array(capacity * FAR_STRIDE),
+        FAR_STRIDE,
       );
-      p.mesh.geometry.setAttribute("cell", cells);
+      geo.setAttribute("inst", new THREE.InterleavedBufferAttribute(buf, 4, 0));
+      geo.setAttribute("cell", new THREE.InterleavedBufferAttribute(buf, 3, 4));
+      geo.setAttribute("tint", new THREE.InterleavedBufferAttribute(buf, 3, 7));
+      geo.setAttribute(
+        "crownA",
+        new THREE.InterleavedBufferAttribute(buf, 4, 10),
+      );
+      geo.setAttribute(
+        "crownB",
+        new THREE.InterleavedBufferAttribute(buf, 1, 14),
+      );
+      if (b) {
+        b.mesh.geometry.dispose();
+        b.mesh.geometry = geo;
+      } else {
+        const mesh = new THREE.Mesh(geo, this.farMaterial!);
+        mesh.matrixAutoUpdate = false;
+        this.group.add(mesh);
+        b = { mesh, capacity };
+        this.far.set(block, b);
+      }
+      b.capacity = capacity;
     }
-    const cellArray = cells.array as Float32Array;
-    crownAttributes(p);
-    visit((r, i) => {
+    const geo = b.mesh.geometry;
+    const buf = (geo.getAttribute("inst") as THREE.InterleavedBufferAttribute)
+      .data as THREE.InstancedInterleavedBuffer;
+    const array = buf.array as Float32Array;
+    let at = 0;
+    let lo = Infinity;
+    let hi = -Infinity;
+    const from = new THREE.Vector2(Infinity, Infinity);
+    const to = new THREE.Vector2(-Infinity, -Infinity);
+    for (const t of tiles) {
+      array.set(t.data, at);
+      at += t.data.length;
+      lo = Math.min(lo, t.minY);
+      hi = Math.max(hi, t.maxY);
+      from.min(t.min);
+      to.max(t.max);
+    }
+    buf.clearUpdateRanges();
+    buf.addUpdateRange(0, at);
+    buf.needsUpdate = true;
+    geo.instanceCount = count;
+    const centre = new THREE.Vector3(
+      (from.x + to.x) / 2,
+      (lo + hi) / 2,
+      (from.y + to.y) / 2,
+    );
+    geo.boundingSphere = new THREE.Sphere(
+      centre,
+      Math.hypot(to.x - from.x, hi - lo, to.y - from.y) / 2,
+    );
+  }
+
+  /** A tile's billboard instances (built once, on first use, from its records). */
+  private tileBillboards(t: TileItems): TileBillboards {
+    let b = this.billboardsOf.get(t);
+    if (b) return b;
+    const r = t.records;
+    let count = 0;
+    for (let i = 0; i < r.length; i += STRIDE)
+      if (KINDS[r[i + 5]!]!.family !== undefined) count++;
+    const data = new Float32Array(count * FAR_STRIDE);
+    let minY = Infinity;
+    let maxY = -Infinity;
+    let o = 0;
+    for (let i = 0; i < r.length; i += STRIDE) {
       const kind = r[i + 5]!;
+      if (KINDS[kind]!.family === undefined) continue;
       const box = this.farBoxes[kind]!;
+      const crown = this.crowns[kind]!;
       const s = r[i + 4]!;
-      writeCrown(p, this.crowns[kind]!, r[i]!, r[i + 1]!, r[i + 2]!, s);
-      cellArray[p.count * 3] = this.cellOf[kind]!;
-      cellArray[p.count * 3 + 1] = r[i + 3]!;
-      cellArray[p.count * 3 + 2] = box.width * s;
-      // A unit quad stretched to the kind's width and height, standing on its base; it
-      // turns to face the camera in the shader, so the matrix has no rotation.
-      writeScaled(
-        p,
-        r[i]!,
-        r[i + 1]! + box.bottom * s,
-        r[i + 2]!,
-        0,
-        box.width * s,
-        (box.top - box.bottom) * s,
+      const x = r[i]!;
+      const y = r[i + 1]!;
+      const z = r[i + 2]!;
+      // Per-plant tint, as the near trees' (see `tint`).
+      const bright = 0.82 + 0.3 * hash2(x, z, 41);
+      const hue = hash2(x, z, 42) * 2 - 1;
+      data.set(
+        [
+          x,
+          y + box.bottom * s,
+          z,
+          (box.top - box.bottom) * s,
+          this.cellOf[kind]!,
+          r[i + 3]!,
+          box.width * s,
+          bright * (1 + 0.07 * hue),
+          bright,
+          bright * (1 - 0.12 * hue),
+          x,
+          y + crown[0] * s,
+          z,
+          crown[1] * s,
+          crown[2] * s,
+        ],
+        o,
       );
-    });
-    cells.needsUpdate = true;
-    finish(p, true);
+      o += FAR_STRIDE;
+      minY = Math.min(minY, y);
+      maxY = Math.max(maxY, y + box.top * s);
+    }
+    b = {
+      data,
+      count,
+      minY,
+      maxY,
+      min: new THREE.Vector2(t.cx - TILE_HALF, t.cz - TILE_HALF),
+      max: new THREE.Vector2(t.cx + TILE_HALF, t.cz + TILE_HALF),
+    };
+    this.billboardsOf.set(t, b);
+    return b;
   }
 
   /**
@@ -594,18 +623,30 @@ export class Vegetation {
       metalness: 0,
       side: THREE.DoubleSide,
     });
-    // Per instance: atlas row (kind), yaw and width.
+    // Per instance: quad base and height; atlas row (kind), yaw and width; tint.
+    const inst = attribute<"vec4">("inst", "vec4");
     const cell = attribute<"vec3">("cell", "vec3");
+    const tintOf = attribute<"vec3">("tint", "vec3");
     // The quad faces the camera (turning about the vertical only): its right-hand side is
     // perpendicular to the camera's backward axis.
     const back = cameraWorldMatrix.mul(vec4(0, 0, 1, 0)).xyz;
     const back2 = vec2(back.x, back.z).normalize();
     const right = vec3(back2.y, 0, back2.x.negate());
-    // The instance matrix (position and size, no rotation) has already placed the quad
-    // facing +Z; swing its sides round to `right`.
-    const side = positionGeometry.x.mul(cell.z);
-    m.positionNode = positionLocal.add(
-      vec3(side.mul(right.x.sub(1)), 0, side.mul(right.z)),
+    // The quad (x -0.5..0.5, y 0..1) stood on its base, its sides along `right`. Quads
+    // wholly within NEAR_START of the viewer collapse to a point: the 3D trees stand for
+    // them, and they'd only be discarded fragment by fragment.
+    const size = vec2(cell.z, inst.w);
+    const centre = inst.xyz.add(vec3(0, inst.w.mul(0.5), 0));
+    const near = centre
+      .distance(viewer)
+      .add(size.length().mul(0.5))
+      .lessThan(NEAR_START);
+    const scale = near.select(float(0), float(1));
+    m.positionNode = inst.xyz.add(
+      right
+        .mul(positionGeometry.x.mul(cell.z))
+        .add(vec3(0, positionGeometry.y.mul(inst.w), 0))
+        .mul(scale),
     );
     // The captured view nearest the direction the tree is seen from, two neighbours mixed
     // with a dither in between, so the outline matches the 3D tree's from any side.
@@ -637,7 +678,7 @@ export class Vegetation {
     );
     // Darker than the capture: a 3D crown shades itself (its inner and far-side leaves are
     // in shadow), which a flat card can't; matched to the 3D trees at the hand-over.
-    m.colorNode = tex.rgb.mul(BILLBOARD_SHADE);
+    m.colorNode = tex.rgb.mul(BILLBOARD_SHADE).mul(tintOf);
     const t = uv().mul(CELL);
     const lod = log2(max(max(dFdx(t).length(), dFdy(t).length()), 1));
     m.maskNode = tex.a.mul(lod.mul(0.3).add(1)).greaterThan(0.45).and(showFar);
@@ -674,7 +715,10 @@ export class Vegetation {
     this.farMaterial = m;
   }
 
-  /** The pool for `key`, with room for `n` instances (recreated larger if needed). */
+  /**
+   * The near pool for `key`, with room for `n` instances (recreated larger if needed,
+   * which costs a shader compile: see NEAR_CAPACITY).
+   */
   private pool(
     pools: Map<string, Pool>,
     key: string,
@@ -701,9 +745,10 @@ export class Vegetation {
         3,
       );
       // No vegetation casts into the shadow map (it holds only the car): trees' shadows
-      // come from the SunField, which plants the same crowns (see plantAt).
+      // come from the SunField, which plants the same crowns (world/plants.ts).
       mesh.receiveShadow = true;
-      mesh.frustumCulled = pools === this.far;
+      // Refilled around the focus; always partly in view.
+      mesh.frustumCulled = false;
       this.group.add(mesh);
       p = { mesh, count: 0 };
       pools.set(key, p);
@@ -711,109 +756,6 @@ export class Vegetation {
     p.count = 0;
     return p;
   }
-}
-
-/** Spacing of the grid trees and bushes are planted on (m). */
-export const PLANT_STEP = 5;
-
-/** A tree or bush planted at a grid cell (see `plantAt`). */
-export interface Plant {
-  x: number;
-  y: number;
-  z: number;
-  yaw: number;
-  scale: number;
-  kind: number;
-  tree: boolean;
-}
-
-const plant: Plant = {
-  x: 0,
-  y: 0,
-  z: 0,
-  yaw: 0,
-  scale: 1,
-  kind: 0,
-  tree: true,
-};
-
-/**
- * What grows in grid cell (gx, gz), if anything: the one place trees are decided, so
- * everything that depends on them (the meshes, their shadows) agrees. `treesOnly` skips
- * the bushes (as far tiles do).
- */
-export function plantAt(
-  land: Landscape,
-  gx: number,
-  gz: number,
-  treesOnly: boolean,
-  out: Plant,
-): boolean {
-  const step = PLANT_STEP;
-  const x = (gx + hash2(gx, gz, 11)) * step;
-  const z = (gz + hash2(gx, gz, 12)) * step;
-  const d = forest(x, z);
-  const roll = hash2(gx, gz, 13);
-  // Dense woods, plus lone trees in the meadows.
-  const isTree = roll < d * 0.92 + 0.02;
-  const isBush =
-    !treesOnly && !isTree && roll < d * 0.96 + 0.03 + 0.08 * edgeOf(d);
-  if (!isTree && !isBush) return false;
-  land.sample(x, z, sample);
-  // Woods stop a varying distance from the road, not in a straight wall.
-  const clear = isTree ? 5 + 10 * hash2(gx, gz, 18) ** 2 : 3;
-  if (sample.roadDistance < land.road.edge + clear) return false;
-  const y = sample.height;
-  if (land.normal(x, z, normal).y < 0.8) return false;
-  out.x = x;
-  out.y = y;
-  out.z = z;
-  out.yaw = hash2(gx, gz, 15) * Math.PI * 2;
-  out.tree = isTree;
-  if (isTree) {
-    // Pines on the higher ground, broadleaf below, mixed in between.
-    const pine =
-      hash2(gx, gz, 16) < 0.2 + 0.7 * THREE.MathUtils.smoothstep(y, 5, 35);
-    const kinds = pine ? PINE : BROADLEAF;
-    out.kind = kinds[Math.floor(hash2(gx, gz, 17) * kinds.length)]!;
-    out.scale = 0.7 + hash2(gx, gz, 14) ** 1.3 * 1.1;
-  } else {
-    out.kind = BUSHES[Math.floor(hash2(gx, gz, 17) * BUSHES.length)]!;
-    out.scale = 0.7 + hash2(gx, gz, 14) * 0.7;
-  }
-  return true;
-}
-
-/**
- * Forest density (0..1): groves and woods with open meadows between them, from a large
- * field broken up by a smaller one.
- */
-export function forest(x: number, z: number): number {
-  const large =
-    0.5 +
-    0.5 *
-      Math.sin(x * 0.006 + 1.3) *
-      Math.sin(z * 0.0047 + Math.sin(x * 0.002) * 2);
-  const small =
-    0.5 +
-    0.5 *
-      Math.sin(x * 0.021 + Math.sin(z * 0.017) * 1.7) *
-      Math.sin(z * 0.019 + 0.7);
-  return THREE.MathUtils.smoothstep(large * 0.7 + small * 0.45, 0.35, 0.65);
-}
-
-/** Highest at a forest's edge (density around 0.1-0.4), for bushes. */
-function edgeOf(d: number): number {
-  return Math.max(0, 1 - Math.abs(d - 0.25) / 0.2);
-}
-
-/** Distance from a point to a block's 512 m square (block key "bx,bz"). */
-function blockDistance(block: string, p: THREE.Vector3): number {
-  const [bx, bz] = block.split(",").map(Number) as [number, number];
-  const span = 512;
-  const dx = Math.max(bx * span - p.x, 0, p.x - (bx + 1) * span);
-  const dz = Math.max(bz * span - p.z, 0, p.z - (bz + 1) * span);
-  return Math.hypot(dx, dz);
 }
 
 function writeScaled(
@@ -914,16 +856,23 @@ function writeCrown(
   b[p.count] = crown[2] * s;
 }
 
-function finish(p: Pool, bounds: boolean): void {
-  p.mesh.count = p.count;
-  p.mesh.instanceMatrix.needsUpdate = true;
-  p.mesh.instanceColor!.needsUpdate = true;
-  const a = p.mesh.geometry.getAttribute("crownA");
-  if (a) {
+function finish(p: Pool): void {
+  const used = p.count;
+  p.mesh.count = used;
+  // Only the instances in use go to the GPU (pools are sized for the densest woods);
+  // nothing at all for an empty pool.
+  if (used === 0) return;
+  const upload = (a: THREE.BufferAttribute | undefined) => {
+    if (!a) return;
+    a.clearUpdateRanges();
+    a.addUpdateRange(0, used * a.itemSize);
     a.needsUpdate = true;
-    p.mesh.geometry.getAttribute("crownB")!.needsUpdate = true;
-  }
-  if (bounds && p.count) p.mesh.computeBoundingSphere();
+  };
+  upload(p.mesh.instanceMatrix);
+  upload(p.mesh.instanceColor!);
+  const geo = p.mesh.geometry;
+  upload(geo.getAttribute("crownA") as THREE.BufferAttribute | undefined);
+  upload(geo.getAttribute("crownB") as THREE.BufferAttribute | undefined);
 }
 
 /** A mesh's geometry in plain floats, with its node transform applied (quantized input). */
