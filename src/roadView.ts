@@ -1,4 +1,6 @@
 import * as THREE from "three/webgpu";
+import { normalMap, uv as meshUv, vec3 } from "three/tsl";
+import { HexTiling } from "./hexTile";
 import { loadLayer } from "./terrainMaterial";
 import type { Landscape } from "./world/landscape";
 
@@ -227,7 +229,11 @@ export class RoadView {
   }
 }
 
-function asphaltMaterial(): THREE.MeshStandardMaterial {
+/**
+ * The carriageway: ambientCG Asphalt015 (CC0), hex-tiled (see hexTile.ts) so its 2.5 m tile
+ * doesn't show as a repeating pattern.
+ */
+function asphaltMaterial(): THREE.MeshStandardNodeMaterial {
   const loader = new THREE.TextureLoader();
   const load = (name: string, srgb: boolean) => {
     const t = loader.load(`${import.meta.env.BASE_URL}textures/${name}`);
@@ -237,23 +243,34 @@ function asphaltMaterial(): THREE.MeshStandardMaterial {
     if (srgb) t.colorSpace = THREE.SRGBColorSpace;
     return t;
   };
-  return new THREE.MeshStandardMaterial({
-    map: load("asphalt015_color.webp", true),
-    normalMap: load("asphalt015_normal.webp", false),
-    roughnessMap: load("asphalt015_roughness.webp", false),
-    roughness: 1,
-    // Slightly lighter and warmer: the scan reads cool and dark next to sunlit asphalt.
-    color: new THREE.Color().setRGB(1.1, 1.06, 1.0),
-  });
+  const hex = new HexTiling(meshUv());
+  const color = hex.sample(load("asphalt015_color.webp", true));
+  const w = hex.weights(color);
+  const m = new THREE.MeshStandardNodeMaterial({ metalness: 0 });
+  // Slightly lighter and warmer: the scan reads cool and dark next to sunlit asphalt.
+  m.colorNode = hex.blend(color, w).rgb.mul(vec3(1.1, 1.06, 1.0));
+  m.roughnessNode = hex.blend(
+    hex.sample(load("asphalt015_roughness.webp", false)),
+    w,
+  ).g;
+  m.normalNode = normalMap(
+    hex.normal(load("asphalt015_normal.webp", false), w).mul(0.5).add(0.5),
+  );
+  return m;
 }
 
-function gravelMaterial(): THREE.MeshStandardMaterial {
+/** Shoulders: ambientCG Gravel040 (CC0), hex-tiled like the asphalt. */
+function gravelMaterial(): THREE.MeshStandardNodeMaterial {
   const layer = loadLayer("gravel040");
-  return new THREE.MeshStandardMaterial({
-    map: layer.color,
-    normalMap: layer.normal,
+  const hex = new HexTiling(meshUv());
+  const color = hex.sample(layer.color);
+  const w = hex.weights(color);
+  const m = new THREE.MeshStandardNodeMaterial({
     roughness: 0.85,
-    // Lighter than the scan, so the shoulder reads as dusty gravel next to the asphalt.
-    color: new THREE.Color().setRGB(1.35, 1.3, 1.2),
+    metalness: 0,
   });
+  // Lighter than the scan, so the shoulder reads as dusty gravel next to the asphalt.
+  m.colorNode = hex.blend(color, w).rgb.mul(vec3(1.35, 1.3, 1.2));
+  m.normalNode = normalMap(hex.normal(layer.normal, w).mul(0.5).add(0.5));
+  return m;
 }

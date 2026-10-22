@@ -16,6 +16,7 @@ import {
   vec2,
   vec3,
 } from "three/tsl";
+import { HexTiling } from "./hexTile";
 
 type Vec2 = THREE.Node<"vec2">;
 
@@ -106,6 +107,10 @@ export function terrainMaterial(
   const grassUv = uvTop.div(3.2);
   const dirtUv = uvTop.div(3.5);
   const gravelUv = uvTop.div(2.5);
+  // Dirt and gravel (verges, cuttings, forest floor) hex-tiled, so their tiles don't
+  // repeat visibly along the road.
+  const dirtHex = new HexTiling(dirtUv);
+  const gravelHex = new HexTiling(gravelUv);
 
   const variation = attribute("variation", "float");
   // Forest density: shaded, leaf-littered floor under the woods, which also marks them out
@@ -159,7 +164,8 @@ export function terrainMaterial(
   const color = Fn(() => {
     const c = meadowColor(uvTop, variation, forest).toVar();
     If(hasDirt, () => {
-      c.assign(mix(c, texture(dirt.color, dirtUv).rgb, dirtW));
+      const d = dirtHex.sample(dirt.color);
+      c.assign(mix(c, dirtHex.blend(d, dirtHex.weights(d)).rgb, dirtW));
     });
     If(hasRock, () => {
       const rockColor = texture(rock.color, rx)
@@ -199,10 +205,18 @@ export function terrainMaterial(
     If(detail.greaterThan(0), () => {
       const t = decode(grass.normal, grassUv, 0.9).toVar();
       If(hasDirt, () => {
-        t.assign(mix(t, decode(dirt.normal, dirtUv, 1), dirtW));
+        t.assign(
+          mix(t, dirtHex.normal(dirt.normal, dirtHex.plainWeights()), dirtW),
+        );
       });
       If(hasGravel, () => {
-        t.assign(mix(t, decode(gravel.normal, gravelUv, 1), gravelW));
+        t.assign(
+          mix(
+            t,
+            gravelHex.normal(gravel.normal, gravelHex.plainWeights()),
+            gravelW,
+          ),
+        );
       });
       t.mulAssign(vec3(detail, detail, 1));
       // UDN on the top projection: tangent x -> world x, tangent y -> world z.
