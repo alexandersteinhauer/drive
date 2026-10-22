@@ -6,6 +6,8 @@
     "dev": "vite",
     "build": "tsc && vite build",
     "preview": "vite preview",
+    "preview:cf": "vite build && wrangler dev",
+    "deploy": "tsc && vite build && wrangler deploy",
     "typecheck": "tsc",
     "lint": "oxlint",
     "format": "prettier --write .",
@@ -28,6 +30,7 @@
     "oxlint": "^1.88.0",
     "prettier": "^3.9.10",
     "typescript": "7",
-    "vite": "^8.3.4"
+    "vite": "^8.3.4",
+    "wrangler": "^4.152.0"
   }
 }

@@ -1,0 +1,10 @@
+// Cloudflare Workers config: serves the Vite build (dist/) as static assets.
+// Deploy with `bun run deploy` (builds first). See README.md.
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "drive",
+  "compatibility_date": "2026-10-01",
+  "assets": {
+    "directory": "./dist",
+  },
+}
