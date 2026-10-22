@@ -51,6 +51,7 @@ export class WorldWorkers {
     kind: "grass";
     cx: number;
     cz: number;
+    maxRank: number;
   }): Promise<GrassResult | null>;
   run(job: {
     kind: "sun";

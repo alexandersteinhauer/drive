@@ -8,7 +8,7 @@ import { Landscape } from "./landscape";
  */
 export type Job =
   | ({ kind: "terrain" } & TerrainRequest)
-  | { kind: "grass"; cx: number; cz: number }
+  | { kind: "grass"; cx: number; cz: number; maxRank: number }
   | { kind: "sun"; tiles: number[]; size: number; texel: number };
 
 export interface Request {
@@ -34,7 +34,7 @@ self.addEventListener("message", (e: MessageEvent<Request>) => {
     for (const [, items] of r.trees) keep(items);
     result = r;
   } else if (job.kind === "grass") {
-    const r = grassChunk(land, job.cx, job.cz);
+    const r = grassChunk(land, job.cx, job.cz, job.maxRank);
     if (r) keep(r.root, r.info, r.ground);
     result = r;
   } else {

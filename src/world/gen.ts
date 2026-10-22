@@ -195,12 +195,14 @@ export interface GrassResult {
 /**
  * A chunk of grass clumps on a jittered grid: dense in the open, mown short along the
  * verge, thin in the woods and gone on rock and steep cuttings. Clumps sit exactly on the
- * terrain's triangles. Null if nothing grows there.
+ * terrain's triangles. Only clumps of rank up to `maxRank` (a distant chunk draws just its
+ * lowest ranks). Null if none grow there.
  */
 export function grassChunk(
   land: Landscape,
   cx: number,
   cz: number,
+  maxRank = 1,
 ): GrassResult | null {
   const CHUNK = GRASS_CHUNK;
   const CELL = GRASS_CELL;
@@ -279,6 +281,8 @@ export function grassChunk(
       const x = (gx + hash2(gx, gz, 41)) * SPACING;
       const z = (gz + hash2(gx, gz, 42)) * SPACING;
       if (x < x0 || x >= x0 + CHUNK || z < z0 || z >= z0 + CHUNK) continue;
+      const rank = hash2(gx, gz, 46);
+      if (rank > maxRank) continue;
       interpolate(x, z);
       const r = p[4]! - edge;
       if (r < 0.7) continue;
@@ -308,7 +312,7 @@ export function grassChunk(
         z,
         hash2(gx, gz, 45) * Math.PI * 2,
         height,
-        hash2(gx, gz, 46),
+        rank,
         p[5]!,
         woods,
         p[1]!,
