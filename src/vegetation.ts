@@ -562,8 +562,10 @@ export class Vegetation {
     const prevColor = r.getClearColor(new THREE.Color());
     const prevAlpha = r.getClearAlpha();
     const prevAuto = r.autoClear;
-    // Leaf-coloured but transparent background, so mipmaps don't bleed dark edges in.
-    r.setClearColor(new THREE.Color(0.16, 0.22, 0.08), 0);
+    // Transparent black (the backend premultiplies the clear colour anyway): filtered and
+    // mipmapped texels are then colour times coverage, which the billboard shader divides
+    // back out (see `colour`).
+    r.setClearColor(new THREE.Color(0, 0, 0), 0);
     r.setRenderTarget(target);
     r.clear();
     r.autoClear = false;
@@ -676,9 +678,13 @@ export class Vegetation {
       dFdx(inCell),
       dFdy(inCell),
     );
+    // The crown's own colour up to its outline: texels the filter or the mipmaps mix with
+    // the transparent background are darkened by its black, by their coverage (alpha).
+    // Kept fragments have alpha above ~0.13 (see maskNode), so this stays well-conditioned.
+    const colour = tex.rgb.div(max(tex.a, 1 / 64));
     // Darker than the capture: a 3D crown shades itself (its inner and far-side leaves are
     // in shadow), which a flat card can't; matched to the 3D trees at the hand-over.
-    m.colorNode = tex.rgb.mul(BILLBOARD_SHADE).mul(tintOf);
+    m.colorNode = colour.mul(BILLBOARD_SHADE).mul(tintOf);
     const t = uv().mul(CELL);
     const lod = log2(max(max(dFdx(t).length(), dFdy(t).length()), 1));
     m.maskNode = tex.a.mul(lod.mul(0.3).add(1)).greaterThan(0.45).and(showFar);
@@ -711,7 +717,7 @@ export class Vegetation {
     (
       m as unknown as { receivedShadowNode: (s: Node<"float">) => Node }
     ).receivedShadowNode = (shadow) => shadow.mul(sun);
-    m.emissiveNode = translucency(tex.rgb.mul(BILLBOARD_SHADE));
+    m.emissiveNode = translucency(colour.mul(BILLBOARD_SHADE));
     this.farMaterial = m;
   }
 

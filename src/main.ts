@@ -193,7 +193,7 @@ let shownSpeed = -1;
 function frame(now: number): void {
   if (!pausedEl.hidden) return;
   stats.begin();
-  const dt = Math.min(0.1, (now - last) / 1000);
+  const dt = Math.min(0.1, Math.max(0, (now - last) / 1000));
   last = now;
   const controls = input.update(dt);
   if (input.take("KeyR"))
