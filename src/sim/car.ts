@@ -62,6 +62,17 @@ export class Wheel {
   }
 }
 
+/**
+ * Stability control level, as on a real car's DSC/ESP button: fully on, a sport setting
+ * that allows more slip before intervening, or off.
+ */
+export type EscMode = "on" | "sport" | "off";
+
+/** Sport stability control: how much more body slip, yaw error and wheelspin it tolerates. */
+const ESC_SPORT_SLIP = 2.5;
+const ESC_SPORT_DEADBAND = 2;
+const TCS_SPORT_SLIP = 2.5;
+
 /** Traction control: slip allowance as a multiple of the tires' peak slip, and at least TCS_MIN_SLIP m/s. */
 const TCS_SLIP = 1.3;
 const TCS_MIN_SLIP = 1;
@@ -121,6 +132,10 @@ export class Car {
   private regenScale = 1;
   /** True while stability control is intervening. */
   escActive = false;
+  /** Driver switch for ABS; only acts if the car has ABS. */
+  absEnabled = true;
+  /** Stability and traction control level; "off" disables both. */
+  escMode: EscMode = "on";
   private throttle = 0;
   /** Service brake pedal after reverse handling, 0..1 (for the brake lights). */
   brake = 0;
@@ -377,7 +392,8 @@ export class Car {
 
   private updateDrivetrain(dt: number, throttle: number): void {
     const driven = this.wheels.filter((w) => w.axle.driven);
-    if (this.cfg.tcs) throttle *= this.updateTraction(driven, dt);
+    if (this.cfg.tcs && this.escMode !== "off")
+      throttle *= this.updateTraction(driven, dt);
     else for (const w of driven) w.tcsTorque = 0;
     if (this.escCut < 1) {
       throttle *= this.escCut;
@@ -416,7 +432,8 @@ export class Car {
     const slip = Math.min(
       ...driven.map((w) => wheelSpeed(w) - (w.contact ? w.vx : this.speed)),
     );
-    const allowed = Math.max(TCS_SLIP * peak * v, TCS_MIN_SLIP);
+    const sport = this.escMode === "sport" ? TCS_SPORT_SLIP : 1;
+    const allowed = Math.max(TCS_SLIP * sport * peak * v, TCS_MIN_SLIP * sport);
     const error = (slip - allowed) / allowed;
     this.tcsFactor = clamp(
       this.tcsFactor -
@@ -601,7 +618,7 @@ export class Car {
     const regenTarget = rearSlip ? 0 : clamp(1 - (ay - 0.15) / 0.35, 0, 1);
     this.regenScale += (regenTarget - this.regenScale) * Math.min(1, dt * 15);
 
-    if (!esc.enabled || v < 5) {
+    if (!esc.enabled || this.escMode === "off" || v < 5) {
       this.yawReference = yaw;
       this.escCut = 1;
       this.escActive = false;
@@ -625,12 +642,15 @@ export class Car {
     r.set(0, 0, this.cfg.rear.z).applyQuaternion(this.orientation);
     vc.crossVectors(this.angularVelocity, r).add(this.velocity);
     const beta = Math.atan2(vc.dot(right), Math.max(vc.dot(fwd), 1));
-    const excessBeta =
-      beta - clamp(beta, -esc.slipAngleLimit, esc.slipAngleLimit);
+    const sport = this.escMode === "sport";
+    const slipLimit = esc.slipAngleLimit * (sport ? ESC_SPORT_SLIP : 1);
+    const excessBeta = beta - clamp(beta, -slipLimit, slipLimit);
     error -= esc.slipAngleGain * excessBeta;
 
     const excess =
-      Math.abs(error) - (esc.deadband + esc.deadbandRatio * Math.abs(target));
+      Math.abs(error) -
+      (esc.deadband + esc.deadbandRatio * Math.abs(target)) *
+        (sport ? ESC_SPORT_DEADBAND : 1);
     if (excess <= 0) {
       this.escCut = Math.min(1, this.escCut + dt * 4);
       this.escActive = false;
@@ -658,6 +678,7 @@ export class Car {
   private updateAbs(w: Wheel, dt: number, brake: number): void {
     if (
       !this.cfg.abs ||
+      !this.absEnabled ||
       (brake <= 0 && w.escTorque <= 0) ||
       !w.contact ||
       Math.abs(w.vx) < 1.5

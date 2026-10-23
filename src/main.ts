@@ -16,13 +16,14 @@ import { Atmosphere, skyGain, skySaturation } from "./atmosphere";
 import { createPipeline } from "./post";
 import { CarView } from "./carView";
 import { Input } from "./input";
-import { Car } from "./sim/car";
+import { Car, type EscMode } from "./sim/car";
 import { bmwI4, sportsCoupe } from "./sim/config";
 import { RoadView } from "./roadView";
 import { TerrainView } from "./terrainView";
 import { Vegetation } from "./vegetation";
 import { Grass } from "./grass";
 import { Landscape } from "./world/landscape";
+import { Hud, type AssistMode } from "./hud";
 import { Stats } from "./stats";
 import { SunField } from "./sunField";
 import { WorldWorkers } from "./worldWorkers";
@@ -102,13 +103,29 @@ const models = [
   { config: sportsCoupe, paint: 0xd2552d, model: undefined },
 ];
 let model = 0;
+// Driver assists, kept across car switches and reloads.
+const assists: Record<"abs" | "esc", AssistMode> = {
+  abs: localStorage.getItem("abs") === "off" ? "off" : "on",
+  esc:
+    (["on", "sport", "off"] as const).find(
+      (m) => m === localStorage.getItem("esc"),
+    ) ?? "on",
+};
+function applyAssists(target: Car): void {
+  target.absEnabled = assists.abs !== "off";
+  target.escMode = assists.esc as EscMode;
+}
 let car = new Car(models[0]!.config, land);
+applyAssists(car);
 placeOnRoad(15);
 let view = makeView(0);
 scene.add(view.group);
 const input = new Input(window);
-const speedEl = document.getElementById("speed")!;
 const stats = new Stats(renderer);
+const hud = new Hud(land.road, assists, (assist, mode) => {
+  applyAssists(car);
+  localStorage.setItem(assist, mode);
+});
 if (import.meta.env.DEV)
   Object.assign(window, {
     car,
@@ -167,6 +184,7 @@ function switchCar(): void {
   model = (model + 1) % models.length;
   const { config } = models[model]!;
   const next = new Car(config, land);
+  applyAssists(next);
   next.reset(car.position, heading());
   scene.remove(view.group);
   car = next;
@@ -188,7 +206,6 @@ addEventListener("keydown", (e: KeyboardEvent) => {
 });
 let last = performance.now();
 let accumulator = 0;
-let shownSpeed = -1;
 
 function frame(now: number): void {
   if (!pausedEl.hidden) return;
@@ -200,6 +217,7 @@ function frame(now: number): void {
     placeOnRoad(land.road.nearestIndex(car.position.x, car.position.z));
   if (input.take("KeyC")) switchCar();
   if (input.take("KeyF")) stats.visible = !stats.visible;
+  if (input.take("KeyM")) hud.minimap.visible = !hud.minimap.visible;
   // Hold [ / ] to turn time back / forward, two hours per second.
   const timeStep =
     (input.held("BracketRight") ? 1 : 0) - (input.held("BracketLeft") ? 1 : 0);
@@ -266,8 +284,8 @@ function frame(now: number): void {
     THREE.MathUtils.lerp(scene.environmentIntensity, CAR_REFLECTIONS, carSun),
   );
 
-  const kmh = Math.round(Math.abs(car.speed) * 3.6);
-  if (kmh !== shownSpeed) speedEl.textContent = String((shownSpeed = kmh));
+  hud.minimap.update(pos.x, pos.z, camDir.x, camDir.z, car.speed, dt);
+  hud.setSpeed(car.speed);
 
   pipeline.render();
   stats.end();
