@@ -2,6 +2,7 @@ import * as THREE from "three/webgpu";
 import { normalMap, uv as meshUv, vec3 } from "three/tsl";
 import { HexTiling } from "./hexTile";
 import { loadLayer } from "./terrainMaterial";
+import { BatchPool } from "./batchPool";
 import type { Landscape } from "./world/landscape";
 
 /** Samples per road chunk mesh (2 m each). */
@@ -18,21 +19,40 @@ const POST_WHITE = new THREE.Color(0xe8e6df);
 const POST_BLACK = new THREE.Color(0x1a1a1a);
 const REFLECTOR = new THREE.Color(0xd9781c);
 
-/** Builds road surface and markings in chunks along the road, around a focus point. */
+/**
+ * Builds road surface and markings in chunks along the road, around a focus point. Each
+ * part (carriageway, shoulders, markings and posts) is one batched object across all chunks.
+ */
 export class RoadView {
   readonly group = new THREE.Group();
-  private readonly chunks = new Map<number, THREE.Mesh>();
-  /** Markings: plain vertex colours. */
-  private readonly material = new THREE.MeshStandardMaterial({
-    vertexColors: true,
-    roughness: 0.9,
-  });
-  /** The carriageway: ambientCG Asphalt015 (CC0). */
-  private readonly asphalt = asphaltMaterial();
-  /** Shoulders: ambientCG Gravel040 (CC0). */
-  private readonly gravel = gravelMaterial();
+  /** Per chunk, its piece in each part's batch. */
+  private readonly chunks = new Map<number, number[]>();
+  private readonly parts: BatchPool[];
 
-  constructor(private readonly land: Landscape) {}
+  constructor(private readonly land: Landscape) {
+    const pool = (material: THREE.Material, name: string) => {
+      const p = new BatchPool(material, {
+        vertices: 65536,
+        indices: 160_000,
+        instances: 96,
+      });
+      p.mesh.name = name;
+      p.mesh.receiveShadow = true;
+      this.group.add(p.mesh);
+      return p;
+    };
+    this.parts = [
+      // The carriageway: ambientCG Asphalt015 (CC0).
+      pool(asphaltMaterial(), "asphalt"),
+      // Shoulders: ambientCG Gravel040 (CC0).
+      pool(gravelMaterial(), "gravel"),
+      // Markings and posts: plain vertex colours.
+      pool(
+        new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.9 }),
+        "markings",
+      ),
+    ];
+  }
 
   update(focus: THREE.Vector3): void {
     const road = this.land.road;
@@ -53,10 +73,9 @@ export class RoadView {
       );
       if (d < RADIUS) near.add(c);
     }
-    for (const [c, mesh] of this.chunks)
+    for (const [c, pieces] of this.chunks)
       if (!near.has(c)) {
-        this.group.remove(mesh);
-        mesh.geometry.dispose();
+        pieces.forEach((piece, k) => this.parts[k]!.remove(piece));
         this.chunks.delete(c);
       }
     for (const c of near) if (!this.chunks.has(c)) this.build(c);
@@ -108,10 +127,10 @@ export class RoadView {
     };
 
     strip(-halfWidth, halfWidth, first, end, PAINT, 0);
-    const asphaltIndices = index.length;
+    const asphaltEnd = [pos.length / 3, index.length] as const;
     strip(-edge, -halfWidth, first, end, PAINT, 0);
     strip(halfWidth, edge, first, end, PAINT, 0);
-    const gravelIndices = index.length;
+    const gravelEnd = [pos.length / 3, index.length] as const;
     strip(-halfWidth + 0.15, -halfWidth + 0.3, first, end, PAINT, 0.012);
     strip(halfWidth - 0.3, halfWidth - 0.15, first, end, PAINT, 0.012);
     for (let i = first; i < end; i++)
@@ -214,19 +233,46 @@ export class RoadView {
     geo.setAttribute("uv", new THREE.Float32BufferAttribute(uv, 2));
     geo.setIndex(index);
     geo.computeVertexNormals();
-    // The carriageway uses the asphalt material, everything else the vertex-colour one.
-    geo.addGroup(0, asphaltIndices, 0);
-    geo.addGroup(asphaltIndices, gravelIndices - asphaltIndices, 1);
-    geo.addGroup(gravelIndices, index.length - gravelIndices, 2);
-    const mesh = new THREE.Mesh(geo, [
-      this.asphalt,
-      this.gravel,
-      this.material,
-    ]);
-    mesh.receiveShadow = true;
-    this.group.add(mesh);
-    this.chunks.set(c, mesh);
+    // Split into the parts, each vertices and indices in a range of their own. A slot fits
+    // a full chunk's carriageway or shoulders; markings vary, so their slots come in
+    // power-of-two sizes.
+    const full = [(CHUNK + 1) * 2, CHUNK * 6];
+    const ends = [
+      [0, 0],
+      asphaltEnd,
+      gravelEnd,
+      [pos.length / 3, index.length],
+    ];
+    const pieces = this.parts.map((part, k) => {
+      const [v0, i0] = ends[k]!;
+      const [v1, i1] = ends[k + 1]!;
+      const piece = new THREE.BufferGeometry();
+      for (const name of ["position", "normal", "color", "uv"]) {
+        const a = geo.getAttribute(name) as THREE.BufferAttribute;
+        piece.setAttribute(
+          name,
+          new THREE.BufferAttribute(
+            a.array.slice(v0! * a.itemSize, v1! * a.itemSize),
+            a.itemSize,
+          ),
+        );
+      }
+      piece.setIndex(index.slice(i0, i1).map((i) => i - v0!));
+      piece.computeBoundingSphere();
+      const room =
+        k < 2
+          ? [full[0]! * (k + 1), full[1]! * (k + 1)]
+          : [pow2(v1! - v0!), pow2(i1! - i0!)];
+      return part.add(piece, room[0], room[1]);
+    });
+    geo.dispose();
+    this.chunks.set(c, pieces);
   }
+}
+
+/** The smallest power of two of at least `n` (and 64). */
+function pow2(n: number): number {
+  return Math.max(64, 2 ** Math.ceil(Math.log2(n)));
 }
 
 /**

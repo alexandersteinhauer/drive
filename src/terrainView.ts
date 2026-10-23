@@ -2,6 +2,7 @@ import * as THREE from "three/webgpu";
 import type { Landscape } from "./world/landscape";
 import type { TerrainResult } from "./world/gen";
 import { terrainMaterial } from "./terrainMaterial";
+import { BatchPool } from "./batchPool";
 import type { Vegetation } from "./vegetation";
 import type { WorldWorkers } from "./worldWorkers";
 
@@ -33,7 +34,8 @@ interface Tile {
   key: string;
   /** What it was built as; rebuilt when the wanted one differs. */
   sig: string;
-  mesh: THREE.Mesh;
+  /** Its piece in the batch. */
+  piece: number;
   /** Vegetation it scattered, per 128 m tile key, and whether as far (trees only). */
   trees: [string, Float32Array, boolean][];
 }
@@ -58,14 +60,25 @@ interface Wanted {
 export class TerrainView {
   readonly group = new THREE.Group();
   private readonly tiles = new Map<string, Tile>();
-  private readonly material: THREE.Material;
+  /** All terrain is one batched object: one draw per visible tile, without per-mesh overhead. */
+  private readonly batch: BatchPool;
 
   constructor(
     private readonly land: Landscape,
     private readonly vegetation: Vegetation,
     private readonly workers: WorldWorkers,
   ) {
-    this.material = terrainMaterial(land.road.edge);
+    // Sized for the peak while driving: ~410k vertices in view, plus tiles kept until their
+    // replacements are in and free slots of other levels of detail.
+    this.batch = new BatchPool(terrainMaterial(land.road.edge), {
+      vertices: 900_000,
+      indices: 4_800_000,
+      instances: 1024,
+    });
+    this.batch.mesh.name = "terrain";
+    // Receives the car's shadow; its own come from the SunField.
+    this.batch.mesh.receiveShadow = true;
+    this.group.add(this.batch.mesh);
   }
 
   /** Squares wanted around the last focus tile, nearest first, and how many are done. */
@@ -233,8 +246,7 @@ export class TerrainView {
   }
 
   private drop(key: string, tile: Tile, kept?: Set<Float32Array>): void {
-    this.group.remove(tile.mesh);
-    tile.mesh.geometry.dispose();
+    this.batch.remove(tile.piece);
     // Only its own trees: a replacement may have planted the same tile already, or
     // taken these over (`kept`).
     for (const [t, trees] of tile.trees)
@@ -259,11 +271,7 @@ export class TerrainView {
       new THREE.Vector3(cx, cy, cz),
       radius,
     );
-    const mesh = new THREE.Mesh(geo, this.material);
-    // Receives the car's shadow; its own come from the SunField.
-    mesh.receiveShadow = true;
-    mesh.matrixAutoUpdate = false;
-    this.group.add(mesh);
+    const piece = this.batch.add(geo);
     // A tile's trees only depend on whether it's near or far: across other level-of-detail
     // changes the old tile's are kept as they are (re-registering them would rebuild the
     // billboard blocks for nothing).
@@ -290,7 +298,7 @@ export class TerrainView {
       );
     }
     if (old) this.drop(key, old, kept);
-    const tile: Tile = { key, sig: w.sig, mesh, trees };
+    const tile: Tile = { key, sig: w.sig, piece, trees };
     this.tiles.set(key, tile);
   }
 }
