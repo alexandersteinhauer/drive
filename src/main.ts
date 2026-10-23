@@ -28,6 +28,12 @@ import { Stats } from "./stats";
 import { SunField } from "./sunField";
 import { WorldWorkers } from "./worldWorkers";
 
+/** ?bench: GPU benchmark instead of the game (see bench.ts). */
+const bench = new URL(location.href).searchParams.has("bench")
+  ? await import("./bench")
+  : null;
+bench?.instrument();
+
 const DT = 1 / 480;
 /** How far ahead (along -Z) the road is generated beyond the car; must exceed the view radius. */
 const ROAD_AHEAD = 2600;
@@ -324,4 +330,47 @@ await Promise.all([
 vegetation.flush(car.position);
 roadView.update(car.position);
 await renderer.compileAsync(scene, camera);
-renderer.setAnimationLoop(frame);
+if (bench) {
+  paused = true;
+  stats.visible = false;
+  const result = await bench.run(
+    {
+      renderer,
+      scene,
+      frame,
+      goTo: async (i) => {
+        placeOnRoad(i);
+        land.road.ensure(-car.position.z + ROAD_AHEAD);
+        view.update(1);
+        await Promise.all([
+          terrain.prime(car.position),
+          sunField.prime(car.position, atmosphere.lightDirection),
+          grass.prime(car.position),
+        ]);
+        vegetation.flush(car.position);
+        roadView.update(car.position);
+        await renderer.compileAsync(scene, camera);
+      },
+      setPost,
+      setTime: (hours) => atmosphere.setTime(hours),
+      compile: () => renderer.compileAsync(scene, camera),
+      toggles: {},
+      parts: {
+        terrain: [terrain.group],
+        road: [roadView.group],
+        "near trees": vegetation.group.children.filter(
+          (o) => (o as THREE.InstancedMesh).isInstancedMesh,
+        ),
+        "far trees": vegetation.group.children.filter(
+          (o) => !(o as THREE.InstancedMesh).isInstancedMesh,
+        ),
+        grass: [grass.group],
+        car: [view.group],
+        sky: [atmosphere.sky],
+      },
+    },
+    new URL(location.href).searchParams.get("bench") ?? "",
+  );
+  console.log(result);
+  Object.assign(window, { benchResult: result });
+} else renderer.setAnimationLoop(frame);
