@@ -37,7 +37,10 @@ export class Landscape implements Ground {
   readonly road: Road;
   private readonly noise: Simplex;
 
-  constructor(seed = 1, roadConfig: RoadConfig = defaultRoad) {
+  constructor(
+    readonly seed = 1,
+    roadConfig: RoadConfig = defaultRoad,
+  ) {
     this.noise = new Simplex(seed);
     this.road = new Road(
       { ...roadConfig, seed: roadConfig.seed + seed },

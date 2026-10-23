@@ -68,7 +68,20 @@ function setPost(skip: Parameters<typeof createPipeline>[3]): void {
   pipeline = createPipeline(renderer, scene, camera, skip);
 }
 
-const land = new Landscape();
+/**
+ * The world seed comes from the URL (?seed=123), so a world can be shared or revisited;
+ * without one a random seed is picked and written into the URL.
+ */
+function worldSeed(): number {
+  const url = new URL(location.href);
+  const given = Number(url.searchParams.get("seed"));
+  if (url.searchParams.has("seed") && Number.isSafeInteger(given)) return given;
+  const seed = 1 + Math.floor(Math.random() * 999_999);
+  url.searchParams.set("seed", String(seed));
+  history.replaceState(history.state, "", url);
+  return seed;
+}
+const land = new Landscape(worldSeed());
 land.road.ensure(ROAD_AHEAD);
 // Terrain, vegetation, grass and the sun field's tiles are generated off the main thread.
 const workers = new WorldWorkers(land);

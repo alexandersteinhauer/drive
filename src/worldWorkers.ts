@@ -26,6 +26,8 @@ export class WorldWorkers {
     for (let i = 0; i < n; i++) {
       const worker = new Worker(new URL("./world/worker.ts", import.meta.url), {
         type: "module",
+        // The worker builds its own copy of the landscape from this seed.
+        name: String(land.seed),
       });
       const slot = { worker, busy: 0 };
       worker.addEventListener(

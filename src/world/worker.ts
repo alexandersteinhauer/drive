@@ -18,7 +18,7 @@ export interface Request {
   job: Job;
 }
 
-const land = new Landscape();
+const land = new Landscape(Number(self.name));
 
 self.addEventListener("message", (e: MessageEvent<Request>) => {
   const { id, progress, job } = e.data;
