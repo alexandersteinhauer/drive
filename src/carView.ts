@@ -15,6 +15,7 @@ import {
 import type { Node, UniformNode } from "three/webgpu";
 import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
 import { MeshoptDecoder } from "three/addons/libs/meshopt_decoder.module.js";
+import { mergeGeometries } from "three/addons/utils/BufferGeometryUtils.js";
 import type { Car } from "./sim/car";
 
 /** Reflected land below the horizon, relative to the sky light there. */
@@ -41,6 +42,8 @@ interface Lamps {
 }
 
 const CORNERS = ["fl", "fr", "rl", "rr"] as const;
+/** Model parts that cast into the shadow map; the small ones (badges, lamps, rotors) don't. */
+const SHADOW_CASTERS = /^plain|Tires|White|Paint|_Windows$/;
 const normal = new THREE.Vector3();
 const forward = new THREE.Vector3();
 const side = new THREE.Vector3();
@@ -259,6 +262,117 @@ export class CarView {
         parent.add(holder);
       }
     });
+    this.mergeParts(body);
+  }
+
+  /**
+   * Fewer draw calls (the model's ~50 meshes cost more CPU than the rest of the car): parts
+   * sharing a material become one skinned mesh across the body and all four wheels, each part
+   * bound rigidly to a bone (the body, its wheel's spin or, for calipers, steering group).
+   * Plain parts, untextured and differing only in colour, share one material with the
+   * colour per vertex.
+   */
+  private mergeParts(body: THREE.Object3D): void {
+    const root = this.root;
+    root.updateMatrixWorld(true);
+    const bones = [body, ...this.wheels.flatMap((w) => [w.spin, w.steer])];
+    const boneOf = (o: THREE.Object3D) => {
+      for (let p: THREE.Object3D | null = o; p; p = p.parent) {
+        const i = bones.indexOf(p);
+        if (i >= 0) return i;
+      }
+      throw new Error("car part outside the body and wheels");
+    };
+    const groups = new Map<string, THREE.Mesh[]>();
+    const keyOf = new Map<THREE.Material, string>();
+    root.traverse((o) => {
+      if (!(o instanceof THREE.Mesh)) return;
+      const m = o.material as THREE.MeshStandardMaterial;
+      const plain =
+        m.type === "MeshStandardMaterial" &&
+        !m.transparent &&
+        !m.map &&
+        !m.normalMap &&
+        !m.emissiveMap &&
+        m.emissive.getHex() === 0;
+      let key = keyOf.get(m);
+      if (!key) {
+        key = plain
+          ? `plain ${m.roughness} ${m.metalness} ${m.side}`
+          : `${m.name} ${m.uuid}`;
+        keyOf.set(m, key);
+      }
+      const list = groups.get(key);
+      if (list) list.push(o);
+      else groups.set(key, [o]);
+    });
+    const skeleton = new THREE.Skeleton(bones as THREE.Bone[]);
+    const toRoot = new THREE.Matrix4();
+    const rootInverse = root.matrixWorld.clone().invert();
+    for (const [key, meshes] of groups) {
+      if (meshes.length < 2) continue;
+      const plain = key.startsWith("plain");
+      const geos = meshes.map((mesh) => {
+        const g = floatGeometry(mesh.geometry);
+        g.applyMatrix4(toRoot.multiplyMatrices(rootInverse, mesh.matrixWorld));
+        const n = g.getAttribute("position").count;
+        const index = new Uint16Array(n * 4);
+        const weight = new Float32Array(n * 4);
+        const bone = boneOf(mesh);
+        for (let i = 0; i < n; i++) {
+          index[i * 4] = bone;
+          weight[i * 4] = 1;
+        }
+        g.setAttribute("skinIndex", new THREE.BufferAttribute(index, 4));
+        g.setAttribute("skinWeight", new THREE.BufferAttribute(weight, 4));
+        if (plain) {
+          const c = (mesh.material as THREE.MeshStandardMaterial).color;
+          const color = new Float32Array(n * 3);
+          for (let i = 0; i < n; i++) c.toArray(color, i * 3);
+          g.setAttribute("color", new THREE.BufferAttribute(color, 3));
+        }
+        return g;
+      });
+      // Only attributes every part has (some plain parts carry unused UVs).
+      const names = Object.keys(geos[0]!.attributes).filter((a) =>
+        geos.every((g) => g.hasAttribute(a)),
+      );
+      for (const g of geos)
+        for (const a of Object.keys(g.attributes))
+          if (!names.includes(a)) g.deleteAttribute(a);
+      const source = meshes[0]!.material as THREE.MeshStandardMaterial;
+      let material: THREE.Material = source;
+      if (plain) {
+        const m = new THREE.MeshStandardMaterial({
+          name: "plain",
+          vertexColors: true,
+          roughness: source.roughness,
+          metalness: source.metalness,
+          side: source.side,
+          envMap: source.envMap,
+          envMapIntensity: source.envMapIntensity,
+        });
+        if (m.envMap) this.envMaterials.push(m);
+        material = m;
+      }
+      const merged = new THREE.SkinnedMesh(mergeGeometries(geos)!, material);
+      merged.name = plain ? "plain" : source.name;
+      // It always contains the car, which the camera always looks at.
+      merged.frustumCulled = false;
+      root.add(merged);
+      merged.updateMatrixWorld(true);
+      merged.bind(skeleton, merged.matrixWorld);
+      for (const mesh of meshes) {
+        mesh.removeFromParent();
+        mesh.geometry.dispose();
+      }
+      for (const g of geos) g.dispose();
+    }
+    root.traverse((o) => {
+      if (!(o instanceof THREE.Mesh)) return;
+      o.castShadow = SHADOW_CASTERS.test((o.material as THREE.Material).name);
+      o.receiveShadow = true;
+    });
   }
 
   /** Headlights and lamp glow for how dark it is (0 day .. 1 night). */
@@ -332,6 +446,27 @@ function mark(
       i * size,
     );
   mesh.geometry.setAttribute(name, new THREE.BufferAttribute(out, size));
+}
+
+/** A copy of the geometry with float attributes (the model's are quantized) and an index. */
+function floatGeometry(src: THREE.BufferGeometry): THREE.BufferGeometry {
+  const g = new THREE.BufferGeometry();
+  let count = 0;
+  for (const [name, a] of Object.entries(src.attributes)) {
+    const size = a.itemSize;
+    const get = [a.getX, a.getY, a.getZ, a.getW].slice(0, size);
+    const out = new Float32Array(a.count * size);
+    for (let i = 0; i < a.count; i++)
+      for (let c = 0; c < size; c++) out[i * size + c] = get[c]!.call(a, i);
+    g.setAttribute(name, new THREE.BufferAttribute(out, size));
+    count = a.count;
+  }
+  g.setIndex(
+    src.index
+      ? Array.from(src.index.array)
+      : Array.from({ length: count }, (_, i) => i),
+  );
+  return g;
 }
 
 /** Emissive version of a lamp material, glowing `color` times `level`. */
