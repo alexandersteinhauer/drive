@@ -189,8 +189,8 @@ export interface BenchContext {
   parts: Record<string, THREE.Object3D[]>;
 }
 
-/** Road samples (2 m apart) to look from: open meadow, woods, hills (seed 1). */
-const VIEWS = [40, 900, 2200];
+/** Road samples (2 m apart) to look from: open meadow, woods, dense woods, hills (seed 1). */
+const VIEWS = [40, 900, 1400, 2200];
 const WARM = 10;
 const FRAMES = 90;
 /** Variants are measured in rounds alternating with the baseline, ROUND_FRAMES each. */
@@ -312,32 +312,43 @@ export async function run(ctx: BenchContext, suite = ""): Promise<string> {
   const pixelRatio = ctx.renderer.getPixelRatio();
   const census: string[] = [];
   const variants: Variant[] =
-    suite === "trees"
-      ? treeVariants(ctx)
-      : [
-          { name: "all", apply: () => {}, undo: () => {} },
-          ...Object.keys(ctx.parts).map(hide),
-          {
-            name: "no bloom",
-            apply: () => ctx.setPost({ bloom: true }),
-            undo: () => ctx.setPost({}),
-          },
-          {
-            name: "no SMAA",
-            apply: () => ctx.setPost({ aa: true }),
-            undo: () => ctx.setPost({}),
-          },
-          {
-            name: `pixel ratio ${pixelRatio * 0.75}`,
-            apply: () => ctx.renderer.setPixelRatio(pixelRatio * 0.75),
-            undo: () => ctx.renderer.setPixelRatio(pixelRatio),
-          },
-          {
-            name: `pixel ratio ${pixelRatio / 2} (half)`,
-            apply: () => ctx.renderer.setPixelRatio(pixelRatio / 2),
-            undo: () => ctx.renderer.setPixelRatio(pixelRatio),
-          },
-        ];
+    suite === "quick"
+      ? [{ name: "all", apply: () => {}, undo: () => {} }]
+      : suite === "toggles"
+        ? [
+            { name: "all", apply: () => {}, undo: () => {} },
+            ...Object.entries(ctx.toggles).map(([name, set]) => ({
+              name: `without ${name}`,
+              apply: () => set(false),
+              undo: () => set(true),
+            })),
+          ]
+        : suite === "trees"
+          ? treeVariants(ctx)
+          : [
+              { name: "all", apply: () => {}, undo: () => {} },
+              ...Object.keys(ctx.parts).map(hide),
+              {
+                name: "no bloom",
+                apply: () => ctx.setPost({ bloom: true }),
+                undo: () => ctx.setPost({}),
+              },
+              {
+                name: "no SMAA",
+                apply: () => ctx.setPost({ aa: true }),
+                undo: () => ctx.setPost({}),
+              },
+              {
+                name: `pixel ratio ${pixelRatio * 0.75}`,
+                apply: () => ctx.renderer.setPixelRatio(pixelRatio * 0.75),
+                undo: () => ctx.renderer.setPixelRatio(pixelRatio),
+              },
+              {
+                name: `pixel ratio ${pixelRatio / 2} (half)`,
+                apply: () => ctx.renderer.setPixelRatio(pixelRatio / 2),
+                undo: () => ctx.renderer.setPixelRatio(pixelRatio),
+              },
+            ];
   // Per variant: frame totals; for "all", per-pass times too.
   const totals = new Map<string, number[]>();
   const savings = new Map<string, number[]>();
