@@ -34,7 +34,7 @@ export class Wheel {
   driveTorque = 0;
   /** Extra brake torque requested by stability control. */
   escTorque = 0;
-  /** Brake torque requested by traction control on a wheel that spins more than the other. */
+  /** Brake torque requested by traction control for excess drive slip relative to the other wheels. */
   tcsTorque = 0;
   /** ABS brake pressure multiplier, 0..1. */
   absPressure = 1;
@@ -56,6 +56,10 @@ export class Wheel {
     this.contact = false;
     this.length = this.axle.restLength;
     this.compression = this.load = this.omega = this.driveTorque = 0;
+    this.spin = this.steer = 0;
+    this.contactPoint.set(0, 0, 0);
+    this.normal.set(0, 1, 0);
+    this.grip = 1;
     this.absPressure = 1;
     this.escTorque = this.tcsTorque = 0;
     this.vx = 0;
@@ -76,7 +80,7 @@ const TCS_SPORT_SLIP = 2.5;
 /** Traction control: slip allowance as a multiple of the tires' peak slip, and at least TCS_MIN_SLIP m/s. */
 const TCS_SLIP = 1.3;
 const TCS_MIN_SLIP = 1;
-/** A wheel spinning this much (m/s, plus the peak slip) faster than the other is braked, by this gain (N m per m/s), capped. */
+/** Excess drive slip above the least-slipping wheel (m/s, plus peak slip) before differential braking. */
 const TCS_SPIN_MARGIN = 0.5;
 const TCS_BRAKE_GAIN = 800;
 const TCS_BRAKE_MAX = 2000;
@@ -121,6 +125,9 @@ export class Car {
   private readonly torque = new Vector3();
   private readonly corners: Vector3[];
   private readonly invInertia: Vector3;
+  /** Axle topology is fixed at construction, not rebuilt in the physics loop. */
+  private readonly drivenWheels: readonly Wheel[];
+  private readonly steeredWheels: readonly Wheel[];
   private shiftTimer = 0;
   private targetGear = 1;
   private reverseTimer = 0;
@@ -160,6 +167,8 @@ export class Car {
       new Wheel(cfg.rear, -1, ry),
       new Wheel(cfg.rear, 1, ry),
     ];
+    this.drivenWheels = this.wheels.filter((w) => w.axle.driven);
+    this.steeredWheels = this.wheels.filter((w) => w.axle.steered);
     this.curve = new TireCurve(cfg.tire.shapeC, cfg.tire.shapeE);
     this.invInertia = new Vector3(
       1 / cfg.inertia[0],
@@ -198,9 +207,21 @@ export class Car {
     this.angularVelocity.set(0, 0, 0);
     this.prevPosition.copy(this.position);
     this.prevOrientation.copy(this.orientation);
-    for (const w of this.wheels) w.reset();
+    this.force.set(0, 0, 0);
+    this.torque.set(0, 0, 0);
+    this.speed = this.throttle = this.brake = 0;
     this.gear = this.targetGear = 1;
-    this.shiftTimer = this.reverseTimer = 0;
+    this.shiftTimer = this.reverseTimer = this.sinceShift = 0;
+    this.reflectedInertia = this.yawReference = 0;
+    this.tcsFactor = this.escCut = this.regenScale = 1;
+    this.escActive = false;
+    up.set(0, 1, 0).applyQuaternion(this.orientation);
+    for (const w of this.wheels) {
+      w.reset();
+      this.updateSuspension(w);
+    }
+    this.antiRoll(this.wheels[0]!, this.wheels[1]!);
+    this.antiRoll(this.wheels[2]!, this.wheels[3]!);
     const pt = this.cfg.powertrain;
     this.engineOmega = pt.type === "combustion" ? pt.engine.idleRpm / RPM : 0;
   }
@@ -223,7 +244,7 @@ export class Car {
     this.force.set(0, -cfg.mass * GRAVITY, 0);
     this.torque.set(0, 0, 0);
 
-    for (const w of this.wheels) this.updateSuspension(w, dt);
+    for (const w of this.wheels) this.updateSuspension(w);
     this.antiRoll(this.wheels[0]!, this.wheels[1]!);
     this.antiRoll(this.wheels[2]!, this.wheels[3]!);
     for (const w of this.wheels) this.updateTire(w, dt);
@@ -301,11 +322,10 @@ export class Car {
     }
   }
 
-  private updateSuspension(w: Wheel, dt: number): void {
+  private updateSuspension(w: Wheel): void {
     const a = w.axle;
     p.copy(w.mount).applyQuaternion(this.orientation).add(this.position);
     down.copy(up).negate();
-    const prev = w.compression;
     w.contact = this.ground.raycast(p, down, a.restLength + a.wheelRadius, hit);
     if (!w.contact) {
       w.length = a.restLength;
@@ -318,13 +338,20 @@ export class Car {
     w.contactPoint.copy(p).addScaledVector(down, hit.distance);
     w.normal.copy(hit.normal);
     w.grip = hit.grip;
-    const rate = (w.compression - prev) / dt;
-    let load =
-      a.springRate * w.compression +
-      rate * (rate > 0 ? a.bumpDamping : a.reboundDamping);
+    r.subVectors(w.contactPoint, this.position);
+    vc.crossVectors(this.angularVelocity, r).add(this.velocity);
+    const normalSpeed = vc.dot(w.normal);
+    const alignment = up.dot(w.normal);
+    let spring = a.springRate * w.compression;
     if (w.compression > a.bumpStop)
-      load += 10 * a.springRate * (w.compression - a.bumpStop);
-    w.load = Math.max(0, load) * Math.max(0, up.dot(w.normal));
+      spring += 10 * a.springRate * (w.compression - a.bumpStop);
+    // Compression rate is -normalSpeed / alignment. Projecting the axial force
+    // onto the normal cancels the damping denominator, with no history to seed.
+    const damping = normalSpeed < 0 ? a.bumpDamping : a.reboundDamping;
+    w.load =
+      alignment > 0
+        ? Math.max(0, spring * alignment - damping * normalSpeed)
+        : 0;
   }
 
   private antiRoll(left: Wheel, rightWheel: Wheel): void {
@@ -391,10 +418,13 @@ export class Car {
   }
 
   private updateDrivetrain(dt: number, throttle: number): void {
-    const driven = this.wheels.filter((w) => w.axle.driven);
+    const driven = this.drivenWheels;
     if (this.cfg.tcs && this.escMode !== "off")
       throttle *= this.updateTraction(driven, dt);
-    else for (const w of driven) w.tcsTorque = 0;
+    else {
+      this.tcsFactor = 1;
+      for (const w of driven) w.tcsTorque = 0;
+    }
     if (this.escCut < 1) {
       throttle *= this.escCut;
     }
@@ -406,35 +436,43 @@ export class Car {
     this.splitDiff(driven, total, dt);
   }
 
-  /** Returns the total torque at the driven wheels. The motor is rigidly geared to them. */
   /**
-   * Traction control, in two parts like production systems. A driven wheel spinning faster
-   * than the other (an unloaded wheel on an open differential) is braked, which sends drive
-   * across the differential to the wheel with grip. Drive torque is only reduced when both
-   * wheels slip, regulating the lesser slip around the tires' peak; at low speed slip is
-   * judged in m/s, since the slip ratio is meaningless near standstill. Returns the drive
-   * torque factor.
+   * Traction control uses drive slip relative to each contact patch, in the selected
+   * direction of travel. Differential braking needs both excess slip and excess wheel
+   * rotation, so it neither brakes normal turns nor fights a locked differential.
+   * Torque is cut only when all driven wheels exceed their own slip allowance.
+   * Near standstill the allowance is in m/s, since slip ratios are ill-defined there.
    */
-  private updateTraction(driven: Wheel[], dt: number): number {
-    const v = Math.abs(this.speed);
+  private updateTraction(driven: readonly Wheel[], dt: number): number {
+    const direction = this.gear < 0 ? -1 : 1;
     const peak = this.cfg.tire.peakSlipX;
-    const wheelSpeed = (w: Wheel) => w.omega * w.axle.wheelRadius;
-    driven.forEach((w) => {
-      const other = Math.min(...driven.filter((o) => o !== w).map(wheelSpeed));
-      const excess =
-        wheelSpeed(w) - other - TCS_SPIN_MARGIN - peak * Math.max(v, other);
-      w.tcsTorque =
-        driven.length > 1
-          ? clamp(TCS_BRAKE_GAIN * excess, 0, TCS_BRAKE_MAX)
-          : 0;
-    });
-    // Slip speed of the wheel slipping least, against the allowance.
-    const slip = Math.min(
-      ...driven.map((w) => wheelSpeed(w) - (w.contact ? w.vx : this.speed)),
-    );
     const sport = this.escMode === "sport" ? TCS_SPORT_SLIP : 1;
-    const allowed = Math.max(TCS_SLIP * sport * peak * v, TCS_MIN_SLIP * sport);
-    const error = (slip - allowed) / allowed;
+    let leastSlip = Infinity;
+    let leastWheelSpeed = Infinity;
+    let error = Infinity;
+    for (const w of driven) {
+      const vx = w.contact ? w.vx : this.speed;
+      const wheelSpeed = direction * w.omega * w.axle.wheelRadius;
+      const slip = wheelSpeed - direction * vx;
+      const allowed =
+        sport * Math.max(TCS_SLIP * peak * Math.abs(vx), TCS_MIN_SLIP);
+      leastSlip = Math.min(leastSlip, slip);
+      leastWheelSpeed = Math.min(leastWheelSpeed, wheelSpeed);
+      error = Math.min(error, (slip - allowed) / allowed);
+    }
+    // A braking/underspinning wheel must not make a rolling wheel look like wheelspin.
+    leastSlip = Math.max(0, leastSlip);
+    for (const w of driven) {
+      const vx = w.contact ? w.vx : this.speed;
+      const wheelSpeed = direction * w.omega * w.axle.wheelRadius;
+      const slip = wheelSpeed - direction * vx;
+      const overspeed = wheelSpeed - leastWheelSpeed;
+      const excess =
+        Math.min(slip - leastSlip, overspeed) -
+        TCS_SPIN_MARGIN -
+        peak * Math.abs(vx);
+      w.tcsTorque = clamp(TCS_BRAKE_GAIN * excess, 0, TCS_BRAKE_MAX);
+    }
     this.tcsFactor = clamp(
       this.tcsFactor -
         dt * (error > 0 ? 5 * Math.min(error, 1.5) : 3 * Math.max(error, -1)),
@@ -444,7 +482,8 @@ export class Car {
     return this.tcsFactor;
   }
 
-  private electricTorque(driven: Wheel[], throttle: number): number {
+  /** Returns the total torque at the driven wheels. The motor is rigidly geared to them. */
+  private electricTorque(driven: readonly Wheel[], throttle: number): number {
     const m = this.cfg.powertrain as Extract<
       CarConfig["powertrain"],
       { type: "electric" }
@@ -493,7 +532,7 @@ export class Car {
    */
   private combustionTorque(
     pt: CombustionConfig,
-    driven: Wheel[],
+    driven: readonly Wheel[],
     dt: number,
     throttle: number,
   ): number {
@@ -552,12 +591,12 @@ export class Car {
     return clutch * ratio * eff;
   }
 
-  private splitDiff(driven: Wheel[], total: number, dt: number): void {
+  private splitDiff(driven: readonly Wheel[], total: number, dt: number): void {
     if (driven.length !== 2) {
       for (const w of driven) w.driveTorque = total / driven.length;
       return;
     }
-    const [l, rw] = driven as [Wheel, Wheel];
+    const [l, rw] = driven as readonly [Wheel, Wheel];
     const d = this.cfg.diff;
     const dOmega = l.omega - rw.omega;
     const powered = total * (this.gear < 0 ? -1 : 1) >= 0;
@@ -624,7 +663,7 @@ export class Car {
       this.escActive = false;
       return;
     }
-    const steered = this.wheels.filter((w) => w.axle.steered);
+    const steered = this.steeredWheels;
     const delta = steered.reduce((s, w) => s + w.steer, 0) / steered.length;
     const L = this.wheelbase;
     const limit = (0.9 * g) / v;
@@ -757,7 +796,7 @@ export class Car {
       return;
     }
     if (this.gear < 1 || this.sinceShift < 0.6) return;
-    const driven = this.wheels.filter((w) => w.axle.driven);
+    const driven = this.drivenWheels;
     const avgOmega = driven.reduce((s, w) => s + w.omega, 0) / driven.length;
     const rpmIn = (gear: number) => avgOmega * this.gearRatio(pt, gear) * RPM;
     const t = this.throttle;

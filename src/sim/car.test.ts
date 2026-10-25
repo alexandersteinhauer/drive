@@ -425,3 +425,213 @@ describe("bmw i4 edrive40", () => {
 function clamp01(v: number): number {
   return Math.min(1, Math.max(0, v));
 }
+
+/** Isolate TCS from stability control and differential locking. */
+function tcsCar(cfg: CarConfig = bmwI4, ground = new FlatGround()): Car {
+  const config = structuredClone(cfg);
+  config.esc.enabled = false;
+  config.diff = { preload: 0, powerRamp: 0, coastRamp: 0 };
+  return new Car(config, ground);
+}
+
+function tractionLaunchSlip(cfg: CarConfig, dir: -1 | 1, tcs: boolean): number {
+  const car = tcsCar(cfg, new SlipperyGround(0.2));
+  car.cfg.tcs = tcs;
+  car.gear = dir;
+  run(car, 1, () => ({ ...idle, [dir > 0 ? "throttle" : "brake"]: 1 }));
+  expect(dir * car.speed).toBeGreaterThan(0.5);
+  const driven = car.wheels.filter((w) => w.axle.driven);
+  for (const w of driven) expect(w.tcsTorque).toBe(0);
+  return Math.max(
+    ...driven.map((w) => dir * (w.omega * w.axle.wheelRadius - w.vx)),
+  );
+}
+
+describe("traction control direction and wheel-local slip", () => {
+  for (const dir of [1, -1] as const) {
+    test(`brakes the overspinning wheel, not the slower wheel, in ${dir > 0 ? "forward" : "reverse"}`, () => {
+      const car = tcsCar();
+      run(car, 1, () => idle);
+      car.gear = dir;
+      car.velocity.z = -3 * dir;
+      const [left, right] = car.wheels.slice(2);
+      left!.omega = (dir * 20) / left!.axle.wheelRadius;
+      right!.omega = (dir * 3) / right!.axle.wheelRadius;
+      car.step(DT, { ...idle, [dir > 0 ? "throttle" : "brake"]: 0.3 });
+      expect(left!.contact).toBe(true);
+      expect(right!.contact).toBe(true);
+      expect(left!.tcsTorque).toBeGreaterThan(500);
+      expect(right!.tcsTorque).toBe(0);
+    });
+  }
+
+  for (const dir of [1, -1] as const)
+    test(`does not brake against equal wheel speeds in a locked differential in ${dir > 0 ? "forward" : "reverse"}`, () => {
+      const car = makeCar(bmwI4);
+      car.gear = dir;
+      car.velocity.z = -3 * dir;
+      car.angularVelocity.y = -0.8 * dir;
+      for (const w of car.wheels) w.omega = (4 * dir) / w.axle.wheelRadius;
+      car.step(DT, { ...idle, [dir > 0 ? "throttle" : "brake"]: 0.3 });
+      const inner = car.wheels[3]!;
+      expect(
+        dir * (inner.omega * inner.axle.wheelRadius - inner.vx),
+      ).toBeGreaterThan(1);
+      for (const w of car.wheels) expect(w.tcsTorque).toBe(0);
+    });
+
+  for (const [name, cfg] of [
+    ["coupe", sportsCoupe],
+    ["i4", bmwI4],
+  ] as const)
+    for (const dir of [1, -1] as const)
+      test(`cuts ${name} torque when both wheels spin in ${dir > 0 ? "forward" : "reverse"}`, () => {
+        expect(tractionLaunchSlip(cfg, dir, true)).toBeLessThan(
+          tractionLaunchSlip(cfg, dir, false) * 0.25,
+        );
+      });
+
+  test("does not brake a rolling wheel just because the other wheel is locked by the service brake", () => {
+    const car = tcsCar();
+    run(car, 1, () => idle);
+    car.velocity.z = -3;
+    const [rolling, locked] = car.wheels.slice(2);
+    rolling!.omega = 3 / rolling!.axle.wheelRadius;
+    locked!.omega = 0;
+    car.step(DT, { ...idle, brake: 0.5 });
+    expect(rolling!.tcsTorque).toBe(0);
+    expect(locked!.tcsTorque).toBe(0);
+  });
+
+  for (const dir of [1, -1] as const)
+    for (const steer of [-1, 1] as const)
+      test(`does not brake normal wheel-speed differences in a ${dir > 0 ? "forward" : "reverse"} ${steer > 0 ? "right" : "left"} circle`, () => {
+        const car = makeCar({
+          ...structuredClone(bmwI4),
+          esc: { ...bmwI4.esc, enabled: false },
+        });
+        run(car, 1, () => idle);
+        car.gear = dir;
+        let samples = 0;
+        let maxUnwarrantedTorque = 0;
+        // A tight, steady ~3 m/s circle. Each wheel has a different *ground* speed;
+        // neither is spinning if its own circumference speed matches its local contact vx.
+        run(
+          car,
+          9,
+          () => {
+            const speed = dir * car.speed;
+            const drive = Math.max(0, Math.min(1, 0.1 + (3 - speed) * 0.35));
+            const service = Math.max(0, Math.min(1, (speed - 3) * 0.35));
+            return {
+              ...idle,
+              steer,
+              throttle: dir > 0 ? drive : service,
+              brake: dir > 0 ? service : drive,
+            };
+          },
+          (t) => {
+            if (t < 5) return false;
+            const driven = car.wheels.filter((w) => w.axle.driven);
+            const slips = driven.map(
+              (w) => dir * (w.omega * w.axle.wheelRadius - w.vx),
+            );
+            if (Math.max(...slips) < 0.3) {
+              samples++;
+              maxUnwarrantedTorque = Math.max(
+                maxUnwarrantedTorque,
+                ...driven.map((w) => w.tcsTorque),
+              );
+            }
+            return false;
+          },
+        );
+        expect(dir * car.speed).toBeGreaterThan(1.5);
+        expect(samples).toBeGreaterThan(500);
+        expect(maxUnwarrantedTorque).toBeLessThan(25);
+      });
+});
+
+describe("resting suspension and reset", () => {
+  for (const [name, cfg] of [
+    ["coupe", sportsCoupe],
+    ["i4", bmwI4],
+  ] as const)
+    test(`${name} starts in static equilibrium without a suspension hop`, () => {
+      const car = makeCar(cfg);
+      car.step(DT, idle);
+      // A car spawned at rest has no compression-rate impulse; one step must not
+      // generate tens of times its static corner load or launch it vertically.
+      expect(Math.abs(car.velocity.y)).toBeLessThan(1e-10);
+      for (const wheel of car.wheels) {
+        expect(wheel.contact).toBe(true);
+        expect(wheel.load).toBeLessThan((cfg.mass * 9.81) / 2);
+      }
+      let rise = car.position.y - cfg.cgHeight;
+      run(
+        car,
+        0.5,
+        () => idle,
+        () => {
+          rise = Math.max(rise, car.position.y - cfg.cgHeight);
+          return false;
+        },
+      );
+      expect(rise).toBeLessThan(1e-10);
+    });
+
+  for (const [name, cfg] of [
+    ["coupe", sportsCoupe],
+    ["i4", bmwI4],
+  ] as const)
+    for (const vy of [-0.5, 0.5])
+      test(`${name} suspension uses current ${vy < 0 ? "bump" : "rebound"} velocity, independent of timestep`, () => {
+        for (const dt of [1 / 240, 1 / 960]) {
+          const car = makeCar(cfg);
+          const frontShare = cfg.rear.z / car.wheelbase;
+          car.velocity.y = vy;
+          car.step(dt, idle);
+          for (const [i, w] of car.wheels.entries()) {
+            const damping = vy < 0 ? w.axle.bumpDamping : w.axle.reboundDamping;
+            const share = i < 2 ? frontShare : 1 - frontShare;
+            const staticLoad = (cfg.mass * 9.81 * share) / 2;
+            expect(w.load).toBeCloseTo(staticLoad - damping * vy, 8);
+          }
+        }
+      });
+
+  for (const [name, cfg] of [
+    ["coupe", sportsCoupe],
+    ["i4", bmwI4],
+  ] as const)
+    test(`${name} reset clears driving history but preserves assist switches`, () => {
+      const config = structuredClone(cfg);
+      const ground = new SlipperyGround(0.2);
+      const used = new Car(config, ground);
+      const fresh = new Car(structuredClone(cfg), new SlipperyGround(0.2));
+      used.escMode = fresh.escMode = "sport";
+      used.absEnabled = fresh.absEnabled = false;
+      run(used, 2, () => ({ ...idle, throttle: 1, steer: 0.7 }));
+      used.reset(new Vector3(0, 0, 0), 0);
+      expect(used.escMode).toBe("sport");
+      expect(used.absEnabled).toBe(false);
+      for (let i = 0; i < 480; i++) {
+        const drive = { ...idle, throttle: 1 };
+        used.step(DT, drive);
+        fresh.step(DT, drive);
+        if (i % 40 !== 0) continue;
+        expect(used.position.distanceTo(fresh.position)).toBeLessThan(1e-5);
+        expect(used.velocity.distanceTo(fresh.velocity)).toBeLessThan(1e-5);
+        expect(
+          used.angularVelocity.distanceTo(fresh.angularVelocity),
+        ).toBeLessThan(1e-5);
+        expect(Math.abs(used.engineOmega - fresh.engineOmega)).toBeLessThan(
+          1e-4,
+        );
+        for (let w = 0; w < 4; w++)
+          expect(
+            Math.abs(used.wheels[w]!.omega - fresh.wheels[w]!.omega),
+          ).toBeLessThan(1e-4);
+      }
+    });
+});
