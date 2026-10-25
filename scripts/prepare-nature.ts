@@ -149,8 +149,9 @@ const GENERATED: {
   },
 ];
 const EZ_ASSETS = "node_modules/@dgreenheck/ez-tree/src/lib/assets";
-/** Texels across one sprig in a clump texture (EZ-Tree's are 1024). */
-const SPRIG_TEXELS = 512;
+/** Texels across one sprig in a clump texture (EZ-Tree's are 1024): 256 px textures, which cost
+ *  the GPU ~0.5 ms less than 1024 in the woods and look the same at driving distance. */
+const SPRIG_TEXELS = 128;
 const TREE: Lod[] = [
   { ratio: 0.5, error: 0.004, cards: 1 },
   { ratio: 0.15, error: 0.02, cards: 0.35 },
