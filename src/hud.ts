@@ -34,7 +34,7 @@ const ICON: Record<Assist, string> = {
 };
 
 /**
- * Heads-up display along the bottom centre: speed on the left, the minimap in the middle,
+ * Heads-up display along the bottom centre: speed and distance driven on the left, the minimap in the middle,
  * and the ABS and stability control buttons on the right. Each button shows its mode by
  * colour (green on, blue sport, red off); clicking cycles through the modes.
  */
@@ -43,7 +43,9 @@ export class Hud {
   private readonly root = document.createElement("div");
   private readonly speed = document.createElement("div");
   private readonly buttons = {} as Record<Assist, HTMLButtonElement>;
+  private readonly odometer = document.createElement("div");
   private shownSpeed = -1;
+  private shownTenths = -1;
 
   constructor(
     road: Road,
@@ -53,6 +55,10 @@ export class Hud {
     this.root.id = "hud";
     this.speed.className = "speed";
     this.speed.innerHTML = `<span>0</span><small>km/h</small>`;
+    this.odometer.className = "odometer";
+    this.odometer.title = "Distance driven";
+    this.speed.append(this.odometer);
+    this.setDistance(0);
     this.root.append(this.speed);
     this.minimap = new Minimap(road, this.root);
     const assists = document.createElement("div");
@@ -91,5 +97,13 @@ export class Hud {
     if (kmh === this.shownSpeed) return;
     this.shownSpeed = kmh;
     this.speed.firstElementChild!.textContent = String(kmh);
+  }
+
+  /** Distance driven in metres, shown in km to one decimal (truncated, like an odometer). */
+  setDistance(metres: number): void {
+    const tenths = Math.floor(metres / 100);
+    if (tenths === this.shownTenths) return;
+    this.shownTenths = tenths;
+    this.odometer.textContent = `${(tenths / 10).toFixed(1)} km`;
   }
 }

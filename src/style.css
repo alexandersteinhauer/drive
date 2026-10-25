@@ -120,6 +120,13 @@ canvas {
   opacity: 0.8;
 }
 
+#hud .speed .odometer {
+  margin-top: 8px;
+  font-size: 16px;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+}
+
 #minimap {
   /* Fade out towards every edge (most at the far end) so the road dissolves rather than
      being cut off. */

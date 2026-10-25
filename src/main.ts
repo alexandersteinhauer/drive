@@ -215,6 +215,26 @@ function switchCar(): void {
 
 /** Dev hook: freeze physics (for reproducible captures). */
 let paused = false;
+/** Distance driven (m), for the HUD's odometer; teleports back onto the road don't count.
+ * Kept across visits: saved about once a second while driving, and when the page is left. */
+let distance = Number(localStorage.getItem("distance")) || 0;
+let savedDistance = distance;
+let distanceSavedAt = 0;
+/** Adds what was driven since the last save to the stored total, so tabs open at once
+ * don't overwrite each other's distance. */
+function saveDistance(): void {
+  if (distance === savedDistance) return;
+  const stored = Number(localStorage.getItem("distance")) || 0;
+  localStorage.setItem(
+    "distance",
+    (stored + distance - savedDistance).toFixed(1),
+  );
+  savedDistance = distance;
+}
+addEventListener("pagehide", saveDistance);
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) saveDistance();
+});
 /** Escape opens the pause menu: the last frame stays up, blurred, behind it. */
 const menu = new PauseMenu(
   renderer,
@@ -253,6 +273,7 @@ function frame(now: number): void {
   if (paused) accumulator = 0;
   while (accumulator >= DT) {
     car.step(DT, controls);
+    distance += Math.abs(car.speed) * DT;
     accumulator -= DT;
   }
   view.update(accumulator / DT);
@@ -308,6 +329,11 @@ function frame(now: number): void {
 
   hud.minimap.update(pos.x, pos.z, camDir.x, camDir.z, car.speed, dt);
   hud.setSpeed(car.speed);
+  hud.setDistance(distance);
+  if (now - distanceSavedAt > 1000) {
+    distanceSavedAt = now;
+    saveDistance();
+  }
 
   pipeline.render();
   stats.end();
