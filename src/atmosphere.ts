@@ -270,7 +270,15 @@ export class Atmosphere {
     const grade = THREE.MathUtils.smoothstep(elevation, 2, 20);
     skyGain.value = THREE.MathUtils.lerp(1, SKY_GAIN, grade);
     skySaturation.value = THREE.MathUtils.lerp(1, SKY_SATURATION, grade);
-    this.night.value = 1 - THREE.MathUtils.smoothstep(elevation, -12, 0);
+    const viewGrade = THREE.MathUtils.smoothstep(elevation, -2, 10);
+    skyViewGain.value = THREE.MathUtils.lerp(1, SKY_VIEW_GAIN, viewGrade);
+    skyViewSaturation.value = THREE.MathUtils.lerp(
+      1,
+      SKY_VIEW_SATURATION,
+      viewGrade,
+    );
+    // The sky model goes black soon after sunset, so the twilight sky takes over quickly.
+    this.night.value = 1 - THREE.MathUtils.smoothstep(elevation, -4, 1);
     this.twilight.value =
       THREE.MathUtils.smoothstep(elevation, -15, -5) *
       (1 - THREE.MathUtils.smoothstep(elevation, -2, 1));
@@ -286,7 +294,10 @@ export class Atmosphere {
 
   /** Re-renders the sky light after the time changed. Costs a cube render plus filtering. */
   private recapture(): void {
+    const view = [skyViewGain.value, skyViewSaturation.value];
+    skyViewGain.value = skyViewSaturation.value = 1;
     this.cubeCamera.update(this.renderer, this.capture);
+    [skyViewGain.value, skyViewSaturation.value] = view as [number, number];
     this.lastTarget = this.pmrem.fromCubemap(
       this.cube.texture,
       this.lastTarget ?? null,
@@ -353,6 +364,17 @@ export const skySaturation = uniform(1.3);
 export const skyGain = uniform(0.35);
 const SKY_SATURATION = 1.3;
 const SKY_GAIN = 0.35;
+/**
+ * The sky as seen, on top of the grade: darker and more saturated still, for a deep blue,
+ * and kept down to a low sun so the evening sky doesn't pale. The sky light is captured
+ * without it, so the land's lighting doesn't change.
+ */
+const SKY_VIEW_GAIN = 0.7;
+const SKY_VIEW_SATURATION = 1.3;
+/** A cool tint away from the sun, so the low-sun sky reads blue rather than lavender. */
+const SKY_VIEW_TINT = new THREE.Vector3(0.8, 0.95, 1.1);
+const skyViewGain = uniform(1);
+const skyViewSaturation = uniform(1);
 
 function configureSky(
   sky: SkyMesh,
@@ -379,7 +401,16 @@ function configureSky(
     .mul(exp(up.mul(-5)))
     .mul(twilight);
   const luma = day.rgb.dot(vec3(0.2126, 0.7152, 0.0722));
-  const graded = mix(vec3(luma), day.rgb, skySaturation).max(0).mul(skyGain);
+  const graded = mix(vec3(luma), day.rgb, skySaturation.mul(skyViewSaturation))
+    .max(0)
+    .mul(skyGain.mul(skyViewGain))
+    .mul(
+      mix(
+        vec3(1),
+        mix(vec3(SKY_VIEW_TINT), vec3(1), sunward.pow(4)),
+        skyViewSaturation.sub(1).div(SKY_VIEW_SATURATION - 1),
+      ),
+    );
   material.colorNode = vec4(
     mix(
       graded,

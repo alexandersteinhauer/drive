@@ -14,6 +14,7 @@ if (import.meta.env.DEV) {
 }
 import { Atmosphere, skyGain, skySaturation } from "./atmosphere";
 import { createPipeline } from "./post";
+import { hdrRendererOptions, setUpHdr } from "./tonemap";
 import { CarView } from "./carView";
 import { Input } from "./input";
 import { Car, type EscMode } from "./sim/car";
@@ -40,18 +41,21 @@ const DT = 1 / 480;
 const ROAD_AHEAD = 2600;
 
 // Anti-aliasing happens in post-processing (SMAA), so the canvas itself needs no MSAA.
-const renderer = new THREE.WebGPURenderer({ antialias: false });
+const renderer = new THREE.WebGPURenderer({
+  antialias: false,
+  ...hdrRendererOptions(),
+});
 renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
 renderer.setSize(innerWidth, innerHeight);
 renderer.shadowMap.enabled = true;
-// Khronos PBR Neutral keeps colours true (AgX/ACES desaturate this scene into a milky look).
-renderer.toneMapping = THREE.NeutralToneMapping;
+// Tone mapping (Khronos PBR Neutral) is done in post.ts; this exposure feeds it.
 const EXPOSURE = 0.65;
 /** Hours of game time per second while [ or ] is held. */
 const TIME_RATE = 2;
 renderer.toneMappingExposure = EXPOSURE;
 document.body.prepend(renderer.domElement);
 await renderer.init();
+setUpHdr(renderer);
 
 const scene = new THREE.Scene();
 const camera = new THREE.PerspectiveCamera(
