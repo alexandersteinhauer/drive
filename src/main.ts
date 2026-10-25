@@ -24,6 +24,7 @@ import { Vegetation } from "./vegetation";
 import { Grass } from "./grass";
 import { Landscape } from "./world/landscape";
 import { Hud, type AssistMode } from "./hud";
+import { PauseMenu } from "./pauseMenu";
 import { Stats } from "./stats";
 import { SunField } from "./sunField";
 import { WorldWorkers } from "./worldWorkers";
@@ -214,20 +215,22 @@ function switchCar(): void {
 
 /** Dev hook: freeze physics (for reproducible captures). */
 let paused = false;
-/** Escape pauses the game: the last frame stays up, blurred, until Escape again. */
-const pausedEl = document.getElementById("paused")!;
-addEventListener("keydown", (e: KeyboardEvent) => {
-  if (e.code !== "Escape" || e.repeat) return;
-  pausedEl.hidden = !pausedEl.hidden;
-  // Keys pressed while paused shouldn't act on resume; time restarts from now.
-  input.reset();
-  last = performance.now();
-});
+/** Escape opens the pause menu: the last frame stays up, blurred, behind it. */
+const menu = new PauseMenu(
+  renderer,
+  () => {
+    // Keys pressed while paused shouldn't act on resume; time restarts from now.
+    input.reset();
+    last = performance.now();
+  },
+  // Paused, no frames are drawn: redraw once to show a new setting.
+  () => pipeline.render(),
+);
 let last = performance.now();
 let accumulator = 0;
 
 function frame(now: number): void {
-  if (!pausedEl.hidden) return;
+  if (menu.open) return;
   stats.begin();
   const dt = Math.min(0.1, Math.max(0, (now - last) / 1000));
   last = now;
@@ -314,8 +317,9 @@ addEventListener("resize", () => {
   camera.aspect = innerWidth / innerHeight;
   camera.updateProjectionMatrix();
   renderer.setSize(innerWidth, innerHeight);
+  menu.apply();
   // Paused, no frames are drawn: redraw the resized canvas once.
-  if (!pausedEl.hidden) pipeline.render();
+  if (menu.open) pipeline.render();
 });
 
 // Build the surroundings up front (in the workers); after that they stream in a few

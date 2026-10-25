@@ -16,16 +16,67 @@ canvas {
   display: grid;
   place-items: center;
   backdrop-filter: blur(14px);
+  background: rgb(10 14 20 / 25%);
   font:
-    600 64px/1 ui-monospace,
-    monospace;
+    500 15px/1.4 ui-sans-serif,
+    system-ui,
+    sans-serif;
   color: #fff;
-  text-shadow: 0 1px 6px rgb(0 0 0 / 50%);
   user-select: none;
 }
 
 #paused[hidden] {
   display: none;
+}
+
+#paused .menu {
+  width: 340px;
+  padding: 28px 28px 24px;
+  border-radius: 16px;
+  background: rgb(18 24 32 / 72%);
+  box-shadow: 0 12px 40px rgb(0 0 0 / 35%);
+}
+
+#paused h1 {
+  margin: 0 0 24px;
+  font:
+    600 32px/1 ui-monospace,
+    monospace;
+  text-align: center;
+}
+
+#paused .setting {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  row-gap: 10px;
+  margin-bottom: 28px;
+}
+
+#paused .setting output {
+  font-family: ui-monospace, monospace;
+  opacity: 0.75;
+}
+
+#paused input[type="range"] {
+  grid-column: 1 / -1;
+  width: 100%;
+  accent-color: #fff;
+}
+
+#paused button {
+  width: 100%;
+  padding: 11px;
+  border: 0;
+  border-radius: 10px;
+  background: #fff;
+  color: #10161e;
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+#paused button:hover {
+  background: #e4e9ef;
 }
 
 #stats {
