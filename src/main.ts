@@ -29,6 +29,9 @@ import { PauseMenu } from "./pauseMenu";
 import { Stats } from "./stats";
 import { SunField } from "./sunField";
 import { WorldWorkers } from "./worldWorkers";
+import { LoadingScreen, filesLoaded } from "./loading";
+
+const loading = new LoadingScreen();
 
 /** ?bench: GPU benchmark instead of the game (see bench.ts). */
 const bench = new URL(location.href).searchParams.has("bench")
@@ -96,6 +99,7 @@ const land = new Landscape(worldSeed());
 land.road.ensure(ROAD_AHEAD);
 // Terrain, vegetation, grass and the sun field's tiles are generated off the main thread.
 const workers = new WorldWorkers(land);
+loading.enter("world", () => workers.pending);
 const sunField = new SunField(renderer, workers);
 atmosphere.useField(sunField);
 const vegetation = new Vegetation(
@@ -250,6 +254,7 @@ const menu = new PauseMenu(
   // Paused, no frames are drawn: redraw once to show a new setting.
   () => pipeline.render(),
 );
+menu.enabled = false;
 let last = performance.now();
 let accumulator = 0;
 
@@ -353,17 +358,25 @@ addEventListener("resize", () => {
 });
 
 // Build the surroundings up front (in the workers); after that they stream in a few
-// pieces per frame. Then compile every shader before the first frame, so none is built
-// mid-drive.
+// pieces per frame. Wait for the models and textures too, then compile every shader
+// before the first frame, so none is built mid-drive.
 await Promise.all([
   terrain.prime(car.position),
   sunField.prime(car.position, atmosphere.lightDirection),
   vegetation.ready,
+  view.ready,
   grass.prime(car.position),
 ]);
+await filesLoaded();
 vegetation.flush(car.position);
 roadView.update(car.position);
+loading.enter("shaders");
 await renderer.compileAsync(scene, camera);
+// Keys pressed while loading shouldn't act now; time starts from the first frame.
+input.reset();
+last = performance.now();
+menu.enabled = true;
+loading.finish();
 if (bench) {
   paused = true;
   stats.visible = false;

@@ -34,6 +34,7 @@ import { MeshoptDecoder } from "three/addons/libs/meshopt_decoder.module.js";
 import { mergeGeometries } from "three/addons/utils/BufferGeometryUtils.js";
 import { hash2 } from "./world/noise";
 import { STRIDE } from "./world/plants";
+import { trackDownload } from "./loading";
 
 /**
  * Trees and bushes generated with EZ-Tree (MIT), rocks from Quaternius'
@@ -193,7 +194,7 @@ export class Vegetation {
 
   private async load(url: string): Promise<void> {
     const loader = new GLTFLoader().setMeshoptDecoder(MeshoptDecoder);
-    const gltf = await loader.loadAsync(url);
+    const gltf = await loader.loadAsync(url, trackDownload(url));
     gltf.scene.updateMatrixWorld(true);
     const byName = new Map<string, THREE.Object3D>();
     gltf.scene.traverse((o) => byName.set(o.name, o));

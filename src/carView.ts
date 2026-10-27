@@ -17,6 +17,7 @@ import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
 import { MeshoptDecoder } from "three/addons/libs/meshopt_decoder.module.js";
 import { mergeGeometries } from "three/addons/utils/BufferGeometryUtils.js";
 import type { Car } from "./sim/car";
+import { trackDownload } from "./loading";
 
 /** Reflected land below the horizon, relative to the sky light there. */
 const GROUND_REFLECTION = vec3(0.1, 0.11, 0.09);
@@ -109,6 +110,8 @@ export class CarView {
   readonly group = new THREE.Group();
   /** The car itself, moved with the physics body. */
   readonly root = new THREE.Group();
+  /** Resolves once the model (if any) has replaced the placeholder. */
+  readonly ready: Promise<void>;
   /**
    * A soft dark patch on the ground under the car. Shadow maps are too coarse for the
    * contact shading right under the sills and tyres; without it the car looks like it floats.
@@ -207,7 +210,7 @@ export class CarView {
       this.root.add(steer);
       this.wheels.push({ steer, spin });
     }
-    if (model) void this.load(model.url, model.envMap);
+    this.ready = model ? this.load(model.url, model.envMap) : Promise.resolve();
   }
 
   /**
@@ -215,7 +218,7 @@ export class CarView {
    * wheel parts are centred on their wheel centres and scaled to the physics wheel radius.
    */
   private async load(url: string, envMap?: THREE.Texture): Promise<void> {
-    const gltf = await loader.loadAsync(url);
+    const gltf = await loader.loadAsync(url, trackDownload(url));
     const scene = gltf.scene;
     const info = scene.userData as {
       radius: number;

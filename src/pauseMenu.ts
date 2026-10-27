@@ -52,12 +52,15 @@ export class PauseMenu {
     document.body.append(this.root);
 
     window.addEventListener("keydown", (e) => {
-      if (e.code !== "Escape" || e.repeat) return;
+      if (e.code !== "Escape" || e.repeat || !this.enabled) return;
       if (this.open) this.close();
       else this.show();
     });
     this.apply(false);
   }
+
+  /** Off while loading: there's nothing to pause yet. */
+  enabled = true;
 
   get open(): boolean {
     return !this.root.hidden;

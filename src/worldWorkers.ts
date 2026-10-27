@@ -15,7 +15,7 @@ type Result<J extends Job> = J["kind"] extends "terrain"
  */
 export class WorldWorkers {
   private readonly workers: { worker: Worker; busy: number }[] = [];
-  private readonly pending = new Map<number, (result: unknown) => void>();
+  private readonly waiting = new Map<number, (result: unknown) => void>();
   private nextId = 1;
 
   constructor(private readonly land: Landscape) {
@@ -34,13 +34,18 @@ export class WorldWorkers {
         "message",
         (e: MessageEvent<{ id: number; result: unknown }>) => {
           slot.busy--;
-          const done = this.pending.get(e.data.id)!;
-          this.pending.delete(e.data.id);
+          const done = this.waiting.get(e.data.id)!;
+          this.waiting.delete(e.data.id);
           done(e.data.result);
         },
       );
       this.workers.push(slot);
     }
+  }
+
+  /** Jobs sent and not yet answered. */
+  get pending(): number {
+    return this.waiting.size;
   }
 
   /** Workers in the pool. */
@@ -71,7 +76,7 @@ export class WorldWorkers {
       job,
     };
     return new Promise((resolve) => {
-      this.pending.set(id, resolve as (r: unknown) => void);
+      this.waiting.set(id, resolve as (r: unknown) => void);
       slot.worker.postMessage(request);
     });
   }

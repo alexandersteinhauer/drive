@@ -7,6 +7,23 @@
     <link rel="stylesheet" href="/src/style.css" />
   </head>
   <body>
+    <!-- Shown until the first frame is drawn; src/loading.ts drives it. -->
+    <div id="loading">
+      <div class="panel">
+        <h1>drive</h1>
+        <div
+          class="bar"
+          role="progressbar"
+          aria-label="Loading"
+          aria-valuemin="0"
+          aria-valuemax="100"
+          aria-valuenow="0"
+        >
+          <div></div>
+        </div>
+        <p class="status">Loading</p>
+      </div>
+    </div>
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>
