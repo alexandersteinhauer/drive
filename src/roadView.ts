@@ -12,12 +12,33 @@ const RADIUS = 2300;
 const ASPHALT_TILE = 2.5;
 const PAINT = new THREE.Color(0xe9e6da);
 const DASH = 3; // samples on, then off, for the centre line
-/** Marker posts: every this many samples on both sides, just beyond the shoulder. */
+/**
+ * Guide posts (Leitpfosten, StVO signs 620-40 right and 620-41 left), every this many
+ * samples (50 m) on both sides, their road face this far out from the carriageway edge.
+ */
 const POST_EVERY = 25;
-const POST_OUT = 0.45;
-const POST_WHITE = new THREE.Color(0xe8e6df);
-const POST_BLACK = new THREE.Color(0x1a1a1a);
-const REFLECTOR = new THREE.Color(0xd9781c);
+const POST_OUT = 0.5;
+const POST_WHITE = new THREE.Color(0xf1f0ea); // RAL 9016 traffic white
+const POST_BLACK = new THREE.Color(0x1e1e1e); // RAL 9017 traffic black
+const REFLECTOR = new THREE.Color(0xf6f6f3); // white retroreflectors
+/**
+ * The post's cross-section, in metres: u along the road (positive on the face with the
+ * rectangular reflector), v outwards from the face towards the road. A blunted triangle,
+ * 120 mm deep across the road, narrowing away from it.
+ */
+const POST_SECTION: [number, number][] = [
+  [0.05, 0],
+  [0.0125, 0.12],
+  [-0.0125, 0.12],
+  [-0.05, 0],
+];
+const POST_DEPTH = 0.12;
+/** Heights above the ground at the road face (v = 0) and the outer side (v = depth). */
+const POST_TOP = [0.95, 1.0] as const;
+const BAND_BOTTOM = [0.5, 0.57] as const;
+const BAND_HEIGHT = 0.25;
+/** Buried below the ground, so it stands in slopes too. */
+const POST_FOOT = -0.3;
 
 /**
  * Builds road surface and markings in chunks along the road, around a focus point. Each
@@ -137,95 +158,161 @@ export class RoadView {
       if (i % (DASH * 3) === 0)
         strip(-0.07, 0.07, i, Math.min(i + DASH, end), PAINT, 0.012);
 
-    /** An oriented box: centre, half sizes along the road, up and across, and a colour. */
-    const box = (
-      cx: number,
-      cy: number,
-      cz: number,
-      along: number,
-      up: number,
-      across: number,
-      h: number,
+    /** A triangle or quad of one colour, wound to face along `out`. */
+    const face = (
+      corners: THREE.Vector3[],
+      out: THREE.Vector3,
       color: THREE.Color,
     ) => {
-      const f = [Math.sin(h), 0, -Math.cos(h)];
-      const r = [Math.cos(h), 0, Math.sin(h)];
-      const u = [0, 1, 0];
-      const corner = (a: number, b: number, c: number) =>
-        [0, 1, 2].map(
-          (k) =>
-            [cx, cy, cz][k]! +
-            f[k]! * a * along +
-            u[k]! * b * up +
-            r[k]! * c * across,
-        );
-      // Six faces, four corners each (own vertices, so normals stay flat).
-      const faces: [number, number, number][][] = [
-        [
-          [1, -1, -1],
-          [1, 1, -1],
-          [1, 1, 1],
-          [1, -1, 1],
-        ],
-        [
-          [-1, -1, 1],
-          [-1, 1, 1],
-          [-1, 1, -1],
-          [-1, -1, -1],
-        ],
-        [
-          [-1, 1, -1],
-          [-1, 1, 1],
-          [1, 1, 1],
-          [1, 1, -1],
-        ],
-        [
-          [-1, -1, 1],
-          [1, -1, 1],
-          [1, 1, 1],
-          [-1, 1, 1],
-        ],
-        [
-          [1, -1, -1],
-          [-1, -1, -1],
-          [-1, 1, -1],
-          [1, 1, -1],
-        ],
+      const [a, b, d] = corners as [
+        THREE.Vector3,
+        THREE.Vector3,
+        THREE.Vector3,
       ];
-      for (const face of faces) {
-        const start = pos.length / 3;
-        for (const [a, b, c] of face) {
-          pos.push(...corner(a, b, c));
-          col.push(color.r, color.g, color.b);
-          uv.push(0, 0);
-        }
-        index.push(start, start + 1, start + 2, start, start + 2, start + 3);
+      const n = new THREE.Vector3()
+        .subVectors(b, a)
+        .cross(new THREE.Vector3().subVectors(d, a));
+      const ordered = n.dot(out) < 0 ? corners.toReversed() : corners;
+      const start = pos.length / 3;
+      for (const p of ordered) {
+        pos.push(p.x, p.y, p.z);
+        col.push(color.r, color.g, color.b);
+        uv.push(0, 0);
       }
+      for (let k = 1; k < ordered.length - 1; k++)
+        index.push(start, start + k, start + k + 1);
     };
-    for (let i = first; i < end; i++) {
-      if (i % POST_EVERY !== 0) continue;
+    /** A disc of `radius` facing along `out`, centred at `at`, upright. */
+    const disc = (
+      at: THREE.Vector3,
+      out: THREE.Vector3,
+      radius: number,
+      color: THREE.Color,
+    ) => {
+      const side = new THREE.Vector3(-out.z, 0, out.x).normalize();
+      const corners = Array.from({ length: 12 }, (_, k) => {
+        const t = (k / 12) * Math.PI * 2;
+        return at
+          .clone()
+          .addScaledVector(side, Math.cos(t) * radius)
+          .add(new THREE.Vector3(0, Math.sin(t) * radius, 0));
+      });
+      face(corners, out, color);
+    };
+
+    /**
+     * A guide post at sample i on one side (1 right, -1 left of travel). Per StVO 620: 1 m
+     * high, its top sloping down towards the road, a 250 mm black band parallel to it.
+     * Facing approaching traffic on its own side, a 40 x 180 mm rectangular reflector
+     * (620-40); facing the other way, two 60 mm round ones (620-41).
+     */
+    const post = (i: number, side: number) => {
       const h = road.headings[i]!;
-      for (const side of [-1, 1]) {
-        const lat = side * (edge + POST_OUT);
-        const x = road.xs[i]! + Math.cos(h) * lat;
-        const z = road.zs[i]! + Math.sin(h) * lat;
-        const ground = this.land.height(x, z);
-        // A 1 m post with a black band near the top holding the reflectors.
-        box(x, ground + 0.45, z, 0.06, 0.55, 0.05, h, POST_WHITE);
-        box(x, ground + 0.86, z, 0.062, 0.1, 0.052, h, POST_BLACK);
-        for (const end of [-1, 1])
-          box(
-            x + Math.sin(h) * end * 0.064,
-            ground + 0.86,
-            z - Math.cos(h) * end * 0.064,
-            0.004,
-            0.05,
-            0.02,
-            h,
-            REFLECTOR,
+      const forward = new THREE.Vector3(Math.sin(h), 0, -Math.cos(h));
+      const right = new THREE.Vector3(Math.cos(h), 0, Math.sin(h));
+      // Traffic on this side approaches from behind (right) or from ahead (left).
+      const u = forward.clone().multiplyScalar(-side);
+      const v = right.clone().multiplyScalar(side);
+      const base = new THREE.Vector3(
+        road.xs[i]!,
+        0,
+        road.zs[i]!,
+      ).addScaledVector(v, halfWidth + POST_OUT);
+      const centre = base.clone().addScaledVector(v, POST_DEPTH / 2);
+      base.y = this.land.height(centre.x, centre.z);
+      const at = (pu: number, pv: number, y: number) =>
+        base
+          .clone()
+          .addScaledVector(u, pu)
+          .addScaledVector(v, pv)
+          .setY(base.y + y);
+      const lerp = (range: readonly [number, number], pv: number) =>
+        range[0] + ((range[1] - range[0]) * pv) / POST_DEPTH;
+      /** The post between two heights (functions of v), with a cap on top if asked. */
+      const slice = (
+        lo: (pv: number) => number,
+        hi: (pv: number) => number,
+        color: THREE.Color,
+        cap: boolean,
+      ) => {
+        POST_SECTION.forEach(([u0, v0], k) => {
+          const [u1, v1] = POST_SECTION[(k + 1) % POST_SECTION.length]!;
+          const out = u
+            .clone()
+            .multiplyScalar(v1 - v0)
+            .addScaledVector(v, -(u1 - u0));
+          // The section runs clockwise seen from above, so this points outwards; check.
+          const mid = at((u0 + u1) / 2, (v0 + v1) / 2, 0).sub(
+            at(0, POST_DEPTH / 2, 0),
           );
-      }
-    }
+          if (out.dot(mid) < 0) out.negate();
+          face(
+            [
+              at(u0, v0, lo(v0)),
+              at(u1, v1, lo(v1)),
+              at(u1, v1, hi(v1)),
+              at(u0, v0, hi(v0)),
+            ],
+            out,
+            color,
+          );
+        });
+        if (cap)
+          face(
+            POST_SECTION.map(([pu, pv]) => at(pu, pv, hi(pv))),
+            new THREE.Vector3(0, 1, 0),
+            color,
+          );
+      };
+      const bandLo = (pv: number) => lerp(BAND_BOTTOM, pv);
+      const bandHi = (pv: number) => bandLo(pv) + BAND_HEIGHT;
+      slice(() => POST_FOOT, bandLo, POST_WHITE, false);
+      slice(bandLo, bandHi, POST_BLACK, false);
+      slice(bandHi, (pv) => lerp(POST_TOP, pv), POST_WHITE, true);
+
+      // Reflectors, centred on the front and back faces, just proud of them.
+      const [[fu0, fv0], [fu1, fv1]] = [POST_SECTION[0]!, POST_SECTION[1]!];
+      const along = new THREE.Vector3()
+        .addScaledVector(u, fu1 - fu0)
+        .addScaledVector(v, fv1 - fv0)
+        .normalize();
+      const front = u
+        .clone()
+        .multiplyScalar(fv1 - fv0)
+        .addScaledVector(v, -(fu1 - fu0))
+        .normalize();
+      if (front.dot(u) < 0) front.negate();
+      const mid = (fu0 + fu1) / 2;
+      const midV = (fv0 + fv1) / 2;
+      const lift = 0.002;
+      const rect = at(mid, midV, 0).addScaledVector(front, lift);
+      const corner = (a: number, y: number) =>
+        rect
+          .clone()
+          .addScaledVector(along, a)
+          .setY(base.y + y);
+      face(
+        [
+          corner(-0.02, 0.568),
+          corner(0.02, 0.568),
+          corner(0.02, 0.748),
+          corner(-0.02, 0.748),
+        ],
+        front,
+        REFLECTOR,
+      );
+      // The back face mirrors the front across u = 0.
+      const back = front.clone().addScaledVector(u, -2 * front.dot(u));
+      for (const y of [0.58, 0.74])
+        disc(
+          at(-mid, midV, y).addScaledVector(back, lift),
+          back,
+          0.03,
+          REFLECTOR,
+        );
+    };
+    for (let i = first; i < end; i++)
+      if (i % POST_EVERY === 0) for (const side of [-1, 1]) post(i, side);
 
     const geo = new THREE.BufferGeometry();
     geo.setAttribute("position", new THREE.Float32BufferAttribute(pos, 3));
