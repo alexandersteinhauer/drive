@@ -4,7 +4,7 @@ A relaxing endless drive through rolling hills and forests, right in your browse
 
 **Play at [drive.st1.io](https://drive.st1.io)**
 
-![Driving through the hills on a sunny afternoon](.github/screenshot.jpg)
+![Drifting through a corner in the hills on a sunny afternoon](.github/screenshot.jpg)
 
 Drive with WASD or the arrow keys, pause with Escape.
 
