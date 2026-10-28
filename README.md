@@ -45,5 +45,5 @@ The Worker name in the dashboard must match `name` in `web/wrangler.jsonc` (`dri
 
 ## License
 
-The code is licensed under the [MIT License](LICENSE). Third-party models and textures in
-`web/public/` keep their own licences; see the `CREDITS.md` files there.
+The code is licensed under the [MIT License](LICENSE). Third-party code, models and textures
+keep their own licences; see [CREDITS.md](CREDITS.md).

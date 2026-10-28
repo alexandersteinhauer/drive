@@ -38,7 +38,7 @@ import { trackDownload } from "./loading";
 
 /**
  * Trees and bushes generated with EZ-Tree (MIT), rocks from Quaternius'
- * Stylized Nature MegaKit (CC0); see public/models/CREDITS.md.
+ * Stylized Nature MegaKit (CC0); see CREDITS.md.
  *
  * Terrain tiles scatter items into packed records (x, y, z, yaw, scale, kind). Near the car
  * every kind is drawn from a shared instanced mesh per kind and level of detail, refilled as

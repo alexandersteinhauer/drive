@@ -148,6 +148,19 @@ canvas {
   background: #e4e9ef;
 }
 
+#paused .credits {
+  display: block;
+  margin-top: 16px;
+  color: inherit;
+  font-size: 13px;
+  text-align: center;
+  opacity: 0.6;
+}
+
+#paused .credits:hover {
+  opacity: 0.9;
+}
+
 #stats {
   position: fixed;
   top: 12px;

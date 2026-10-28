@@ -4,6 +4,9 @@ import type * as THREE from "three/webgpu";
 const MIN = 50;
 const MAX = 100;
 const STEP = 5;
+/** Third-party models, textures and code, with their licences. */
+const CREDITS_URL =
+  "https://github.com/alexandersteinhauer/drive/blob/main/CREDITS.md";
 
 /**
  * The pause menu (Escape): the last frame stays up, blurred, behind a panel with settings.
@@ -47,7 +50,13 @@ export class PauseMenu {
 
     this.resume.textContent = "Resume";
     this.resume.addEventListener("click", () => this.close());
-    panel.append(title, row, this.resume);
+    const credits = document.createElement("a");
+    credits.className = "credits";
+    credits.href = CREDITS_URL;
+    credits.target = "_blank";
+    credits.rel = "noopener";
+    credits.textContent = "Credits & licences";
+    panel.append(title, row, this.resume, credits);
     this.root.append(panel);
     document.body.append(this.root);
 
