@@ -3,7 +3,7 @@
 This project's own code is licensed under the [MIT License](LICENSE). The third-party code,
 models and textures it uses keep their own licences, listed below.
 
-## Models (`web/public/models/`)
+## Models (`public/models/`)
 
 ### bmw-i4.glb
 
@@ -13,7 +13,7 @@ Source: https://sketchfab.com/3d-models/2022-bmw-i4-1f23525ab55746899e3645e33529
 
 Changes: interior and licence plate removed; scaled, reoriented and re-centred; wheel geometry
 split per corner; meshes merged, simplified (387k to 259k triangles) and compressed; textures
-resized and converted to WebP. Generated with `web/scripts/prepare-car.ts`.
+resized and converted to WebP. Generated with `scripts/prepare-car.ts`.
 
 BMW and i4 are trademarks of BMW AG. This project is not affiliated with or endorsed by BMW.
 
@@ -32,10 +32,10 @@ Source: https://quaternius.com/packs/stylizednaturemegakit.html
 Changes: normalised to metres, leaf normals bent outwards from each crown, two levels of detail
 per tree (simplified, small branches dropped, leaf cards thinned out), generated trees cut to
 under ~1,000 triangles with their leaf textures rebuilt as clumps of sixteen sprigs (four for
-bushes) on few, large cards, textures resized and converted to WebP, meshes compressed. Generated with `web/scripts/prepare-nature.ts`. Distant trees
+bushes) on few, large cards, textures resized and converted to WebP, meshes compressed. Generated with `scripts/prepare-nature.ts`. Distant trees
 are billboards rendered from these models at load time.
 
-## Textures (`web/public/textures/`)
+## Textures (`public/textures/`)
 
 All textures are from ambientCG (https://ambientcg.com), licensed CC0 1.0, converted to WebP.
 
