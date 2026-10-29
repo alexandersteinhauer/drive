@@ -5,7 +5,8 @@
 use crate::function::Function;
 use crate::gas::{FlowParameters, GasSystem, Mix};
 use crate::rng::Rng;
-use crate::solver::{Body, Constraint, Kind, State, System};
+use crate::crank::Mechanism;
+use crate::solver::Body;
 use crate::spec::{CamSpec, EngineSpec, FuelSpec};
 use crate::units::{celcius, to_rpm, ATM, E, PI, ROOT_2};
 use std::collections::VecDeque;
@@ -14,7 +15,6 @@ const STATE_SAMPLES: usize = 256;
 const CRANKCASE_PRESSURE: f64 = ATM;
 
 struct Bank {
-    angle: f64,
     bore: f64,
     deck_height: f64,
     dx: f64,
@@ -250,8 +250,9 @@ struct Cylinder {
     bank: usize,
     /// Index within the bank (camshaft lobe, head port).
     index: usize,
-    piston_body: usize,
-    wall_constraint: usize,
+    /// The piston's position along the bore and speed (from the mechanism).
+    piston_s: f64,
+    piston_v: f64,
     compression_height: f64,
     displacement: f64,
     blowby_k: f64,
@@ -280,7 +281,6 @@ struct Cylinder {
 
 /// Inputs read by the cylinders during a step that live elsewhere in the engine.
 struct Context<'a> {
-    bodies: &'a [Body],
     banks: &'a [Bank],
     heads: &'a [Head],
     fuel: &'a Fuel,
@@ -293,17 +293,14 @@ impl Cylinder {
     fn volume(&self, ctx: &Context) -> f64 {
         let head = &ctx.heads[self.bank];
         let bank = &ctx.banks[self.bank];
-        let body = &ctx.bodies[self.piston_body];
         let area = bank.bore_surface_area();
-        let s = (body.p_x - bank.x) * bank.dx + (body.p_y - bank.y) * bank.dy;
+        let s = self.piston_s;
         let sweep = area * (bank.deck_height - s - self.compression_height);
         sweep + head.chamber_volume - self.displacement
     }
 
-    fn piston_speed(&self, ctx: &Context) -> f64 {
-        let bank = &ctx.banks[self.bank];
-        let body = &ctx.bodies[self.piston_body];
-        body.v_x * bank.dx + body.v_y * bank.dy
+    fn piston_speed(&self) -> f64 {
+        self.piston_v
     }
 
     fn mean_piston_speed(&self) -> f64 {
@@ -363,7 +360,7 @@ impl Cylinder {
             crank_angle = 0.0;
         }
         let i = ((crank_angle / (4.0 * PI)) * (STATE_SAMPLES as f64 - 1.0)).round() as usize;
-        self.piston_speed_history[i] = self.piston_speed(ctx).abs();
+        self.piston_speed_history[i] = self.piston_speed().abs();
         self.pressure_history[i] = self.system.pressure();
 
         let head = &ctx.heads[self.bank];
@@ -508,7 +505,7 @@ struct Ignition {
 
 /// The engine and everything it drives, stepped at the simulation frequency.
 pub struct Engine {
-    pub system: System,
+    pub mech: Mechanism,
     banks: Vec<Bank>,
     heads: Vec<Head>,
     cylinders: Vec<Cylinder>,
@@ -518,13 +515,7 @@ pub struct Engine {
     turbulence: Function,
     ignition: Ignition,
     rng: Rng,
-    crank_body: usize,
     crank_tdc: f64,
-    load_body: usize,
-    clutch: usize,
-    drag: usize,
-    dyno: usize,
-    starter: usize,
     throttle_gamma: f64,
     throttle_position: f64,
     speed_control: f64,
@@ -551,42 +542,24 @@ pub struct Engine {
 }
 
 impl Engine {
+    /// With the crank mechanism in reduced coordinates (crank.rs).
     pub fn new(spec: &EngineSpec) -> Engine {
-        let mut system = System::default();
+        Engine::with_mechanism(spec, true)
+    }
+
+    /// With engine-sim's constrained rigid bodies, as engine-sim computes it.
+    pub fn constrained(spec: &EngineSpec) -> Engine {
+        Engine::with_mechanism(spec, false)
+    }
+
+    fn with_mechanism(spec: &EngineSpec, reduced: bool) -> Engine {
         let cs = &spec.crankshaft;
-
-        // Crankshaft: fixed in place, with bearing friction.
-        let crank_body = system.add_body(Body {
-            p_x: cs.x,
-            p_y: cs.y,
-            m: cs.mass + cs.flywheel_mass,
-            i: cs.moment_of_inertia,
-            ..Body::default()
-        });
-        system.add_constraint(Constraint::new(
-            Kind::FixedPosition { local_x: 0.0, local_y: 0.0, world_x: cs.x, world_y: cs.y },
-            &[crank_body],
-        ));
-        system.add_constraint(Constraint::new(
-            Kind::RotationFriction { min_torque: -cs.friction_torque, max_torque: cs.friction_torque },
-            &[crank_body],
-        ));
-
-        // What the engine drives, through the clutch: one rotating body.
-        let load_body = 1;
-        let clutch = system.add_constraint(Constraint::new(
-            Kind::Clutch { min_torque: 0.0, max_torque: 0.0 },
-            &[crank_body, load_body],
-        ));
-        let drag = system.add_constraint(Constraint::new(Kind::Drag { max_torque: 0.0 }, &[load_body]));
-        let lb = system.add_body(Body { m: 1.0, i: 1.0, ..Body::default() });
-        debug_assert_eq!(lb, load_body);
+        let mech = Mechanism::new(spec, reduced);
 
         let banks: Vec<Bank> = spec
             .banks
             .iter()
             .map(|b| Bank {
-                angle: b.angle,
                 bore: b.bore,
                 deck_height: b.deck_height,
                 dx: (b.angle + PI / 2.0).cos(),
@@ -704,8 +677,8 @@ impl Engine {
                 cylinders.push(Cylinder {
                     bank: bank_index,
                     index,
-                    piston_body: 0,
-                    wall_constraint: 0,
+                    piston_s: 0.0,
+                    piston_v: 0.0,
                     compression_height: c.piston.compression_height,
                     displacement: c.piston.displacement,
                     blowby_k: c.piston.blowby,
@@ -733,93 +706,6 @@ impl Engine {
             }
         }
 
-        // Pistons and rods.
-        let mut i = 0;
-        for (bank_index, b) in spec.banks.iter().enumerate() {
-            let bank = &banks[bank_index];
-            for c in &b.cylinders {
-                let wrist_pin = c.piston.wrist_pin_position;
-                let little_end = (c.rod.length / 2.0) - c.rod.center_of_mass;
-                let big_end = -(c.rod.length / 2.0) + c.rod.center_of_mass;
-                let journal_angle = cs.journals[c.journal];
-                let (journal_x, journal_y) = (journal_angle.cos() * cs.throw, journal_angle.sin() * cs.throw);
-
-                let wall = Kind::Line {
-                    local_x: 0.0,
-                    local_y: wrist_pin,
-                    p0_x: bank.x,
-                    p0_y: bank.y,
-                    dx: (bank.angle + PI / 2.0).cos(),
-                    dy: (bank.angle + PI / 2.0).sin(),
-                };
-                let piston_body = system.add_body(Body { m: c.piston.mass, i: 1.0, ..Body::default() });
-                let rod_body = system.add_body(Body {
-                    m: c.rod.mass,
-                    i: c.rod.moment_of_inertia,
-                    ..Body::default()
-                });
-                system.add_constraint(Constraint::new(
-                    Kind::Link { local_x_1: 0.0, local_y_1: little_end, local_x_2: 0.0, local_y_2: wrist_pin },
-                    &[rod_body, piston_body],
-                ));
-                system.add_constraint(Constraint::new(
-                    Kind::Link { local_x_1: 0.0, local_y_1: big_end, local_x_2: journal_x, local_y_2: journal_y },
-                    &[rod_body, crank_body],
-                ));
-                let wall_constraint = system.add_constraint(Constraint::new(wall, &[piston_body]));
-                cylinders[i].piston_body = piston_body;
-                cylinders[i].wall_constraint = wall_constraint;
-
-                // placeCylinder
-                let crank = system.bodies[crank_body];
-                let (p_x, p_y) = (journal_x + crank.p_x, journal_y + crank.p_y);
-                let a = bank.dx * bank.dx + bank.dy * bank.dy;
-                let bb = -2.0 * bank.dx * (p_x - bank.x) - 2.0 * bank.dy * (p_y - bank.y);
-                let cc = (p_x - bank.x) * (p_x - bank.x) + (p_y - bank.y) * (p_y - bank.y)
-                    - c.rod.length * c.rod.length;
-                let det = bb * bb - 4.0 * a * cc;
-                if det >= 0.0 {
-                    let sqrt_det = det.sqrt();
-                    let s0 = (-bb + sqrt_det) / (2.0 * a);
-                    let s1 = (-bb - sqrt_det) / (2.0 * a);
-                    let s = s0.max(s1);
-                    if s >= 0.0 {
-                        let e_x = s * bank.dx + bank.x;
-                        let e_y = s * bank.dy + bank.y;
-                        let theta = if (e_y - p_y) > 0.0 {
-                            ((e_x - p_x) / c.rod.length).acos()
-                        } else {
-                            2.0 * PI - ((e_x - p_x) / c.rod.length).acos()
-                        };
-                        let rod = &mut system.bodies[rod_body];
-                        rod.theta = theta - PI / 2.0;
-                        let (cl_x, cl_y) = rod.local_to_world(0.0, big_end);
-                        rod.p_x += p_x - cl_x;
-                        rod.p_y += p_y - cl_y;
-                        let piston = &mut system.bodies[piston_body];
-                        piston.p_x = e_x;
-                        piston.p_y = e_y;
-                        piston.theta = bank.angle + PI;
-                    }
-                }
-                i += 1;
-            }
-        }
-
-        let dyno = system.add_constraint(Constraint::new(
-            Kind::Dynamometer {
-                speed: 0.0,
-                max_torque: 10000.0 * crate::units::FT_LB,
-                hold: false,
-                enabled: false,
-            },
-            &[crank_body],
-        ));
-        let starter = system.add_constraint(Constraint::new(
-            Kind::Starter { speed: -spec.starter_speed, max_torque: spec.starter_torque, enabled: false },
-            &[crank_body],
-        ));
-
         let mut turbulence = Function::new(1.0);
         for i in 0..30 {
             let s = i as f64;
@@ -827,7 +713,7 @@ impl Engine {
         }
 
         let mut engine = Engine {
-            system,
+            mech,
             banks,
             heads,
             cylinders,
@@ -844,13 +730,7 @@ impl Engine {
                 enabled: false,
             },
             rng: Rng::new(1),
-            crank_body,
             crank_tdc: cs.tdc,
-            load_body,
-            clutch,
-            drag,
-            dyno,
-            starter,
             throttle_gamma: spec.throttle_gamma,
             throttle_position: 1.0,
             speed_control: 0.0,
@@ -881,6 +761,7 @@ impl Engine {
         };
 
         // Chambers filled with air at the placed pistons.
+        engine.update_pistons();
         for i in 0..engine.cylinders.len() {
             let v = {
                 let ctx = engine.context();
@@ -894,7 +775,6 @@ impl Engine {
 
     fn context(&self) -> Context<'_> {
         Context {
-            bodies: &self.system.bodies,
             banks: &self.banks,
             heads: &self.heads,
             fuel: &self.fuel,
@@ -904,8 +784,19 @@ impl Engine {
         }
     }
 
+    fn update_pistons(&mut self) {
+        for (i, c) in self.cylinders.iter_mut().enumerate() {
+            (c.piston_s, c.piston_v) = self.mech.piston(i);
+        }
+    }
+
     fn crank_angle(&self) -> f64 {
-        self.system.bodies[self.crank_body].theta - self.crank_tdc
+        self.mech.theta() - self.crank_tdc
+    }
+
+    /// The crank's angle (engine-sim's crank body's).
+    pub fn crank_theta(&self) -> f64 {
+        self.mech.theta()
     }
 
     /// Position in the four-stroke cycle, 0..4 pi.
@@ -920,11 +811,12 @@ impl Engine {
 
     /// Crank speed (rad/s; engine-sim's engines turn negative).
     pub fn crank_speed(&self) -> f64 {
-        self.system.bodies[self.crank_body].v_theta
+        self.mech.omega()
     }
 
     pub fn set_crank_speed(&mut self, v: f64) {
-        self.system.bodies[self.crank_body].v_theta = v;
+        self.mech.set_omega(v);
+        self.update_pistons();
     }
 
     pub fn rpm(&self) -> f64 {
@@ -946,26 +838,21 @@ impl Engine {
     }
 
     pub fn set_dyno(&mut self, enabled: bool, hold: bool, speed: f64) {
-        if let Kind::Dynamometer { speed: s, hold: h, enabled: e, .. } = &mut self.system.constraints[self.dyno].kind {
-            *s = speed;
-            *h = hold;
-            *e = enabled;
-        }
+        let c = &mut self.mech.controls;
+        (c.dyno_enabled, c.dyno_hold, c.dyno_speed) = (enabled, hold, speed);
     }
 
     pub fn set_starter(&mut self, enabled: bool) {
-        if let Kind::Starter { enabled: e, .. } = &mut self.system.constraints[self.starter].kind {
-            *e = enabled;
-        }
+        self.mech.controls.starter_enabled = enabled;
     }
 
     /// Torque the dyno applies to the crank (from the last step).
     pub fn dyno_torque(&self) -> f64 {
-        let c = &self.system.constraints[self.dyno];
+        let t = self.mech.dyno_torque();
         if self.crank_speed() > 0.0 {
-            -c.f_t[0][0]
+            -t
         } else {
-            c.f_t[0][0]
+            t
         }
     }
 
@@ -978,7 +865,7 @@ impl Engine {
     /// speed and the torque on it (forwards positive), and the torque the clutch can pass.
     /// Starts a new average of the clutch torque.
     pub fn set_load(&mut self, inertia: f64, speed: f64, torque: f64, clutch_capacity: f64) {
-        let b = &mut self.system.bodies[self.load_body];
+        let b = self.mech.load_mut();
         b.i = inertia;
         b.m = 1.0;
         b.v_theta = -speed;
@@ -1000,24 +887,19 @@ impl Engine {
 
     /// The driven side's speed (forwards positive).
     pub fn load_speed(&self) -> f64 {
-        -self.system.bodies[self.load_body].v_theta
+        -self.mech.load().v_theta
     }
 
     pub fn load_body(&self) -> &Body {
-        &self.system.bodies[self.load_body]
+        self.mech.load()
     }
 
     pub fn set_clutch(&mut self, max_torque: f64) {
-        if let Kind::Clutch { min_torque, max_torque: m } = &mut self.system.constraints[self.clutch].kind {
-            *min_torque = -max_torque;
-            *m = max_torque;
-        }
+        self.mech.controls.clutch_capacity = max_torque;
     }
 
     pub fn set_drag(&mut self, max_torque: f64) {
-        if let Kind::Drag { max_torque: m } = &mut self.system.constraints[self.drag].kind {
-            *m = max_torque;
-        }
+        self.mech.controls.drag = max_torque;
     }
 
     pub fn timestep(&self) -> f64 {
@@ -1040,40 +922,26 @@ impl Engine {
     pub fn step(&mut self) {
         let dt = self.timestep;
 
-        // Rigid bodies, with the gas pressures as forces on the pistons.
-        {
-            // Wall reaction forces from the last solve, for the piston friction.
-            let wall_forces: Vec<f64> = self
-                .cylinders
-                .iter()
-                .map(|c| {
-                    let wall = &self.system.constraints[c.wall_constraint];
-                    (wall.f_x[0][0] * wall.f_x[0][0] + wall.f_y[0][0] * wall.f_y[0][0]).sqrt()
-                })
-                .collect();
-            let cylinders = &self.cylinders;
-            let banks = &self.banks;
-            let (load_body, load_torque) = (self.load_body, self.load_torque);
-            self.system.process(dt, |state: &mut State| {
-                state.t[load_body] += load_torque;
-                for (c, &wall_force) in cylinders.iter().zip(&wall_forces) {
-                    let bank = &banks[c.bank];
-                    let area = (bank.bore * bank.bore / 4.0) * PI;
-                    let b = c.piston_body;
-                    let v_s = state.v_x[b] * bank.dx + state.v_y[b] * bank.dy;
-                    let pressure_differential = c.system.pressure() - CRANKCASE_PRESSURE;
-                    let force = -area * pressure_differential;
-                    const LIMIT: f64 = 1e-3;
-                    let abs_v_s = v_s.abs().min(LIMIT);
-                    let attenuation = abs_v_s / LIMIT;
-                    let f = friction_force(v_s, wall_force) * attenuation;
-                    let f_fric = if v_s > 0.0 { -f } else { f };
-                    state.apply_force((force + f_fric) * bank.dx, (force + f_fric) * bank.dy, b);
-                }
-            });
+        // The mechanism, with the gas pressures and the wall friction as forces on the pistons.
+        let mut forces = [0.0; 16];
+        let forces = &mut forces[..self.cylinders.len()];
+        for (i, c) in self.cylinders.iter().enumerate() {
+            let bank = &self.banks[c.bank];
+            let area = (bank.bore * bank.bore / 4.0) * PI;
+            let v_s = c.piston_v;
+            let wall_force = self.mech.wall_force(i);
+            let pressure_differential = c.system.pressure() - CRANKCASE_PRESSURE;
+            let force = -area * pressure_differential;
+            const LIMIT: f64 = 1e-3;
+            let abs_v_s = v_s.abs().min(LIMIT);
+            let attenuation = abs_v_s / LIMIT;
+            let f = friction_force(v_s, wall_force) * attenuation;
+            let f_fric = if v_s > 0.0 { -f } else { f };
+            forces[i] = force + f_fric;
         }
+        self.mech.step(dt, forces, self.load_torque);
 
-        self.clutch_torque_sum += -self.system.constraints[self.clutch].f_t[0][1];
+        self.clutch_torque_sum += -self.mech.clutch_torque();
         self.clutch_steps += 1;
 
         // Engine::update: the throttle linkage.
@@ -1086,8 +954,8 @@ impl Engine {
         self.filtered_rpm = alpha * self.filtered_rpm + (1.0 - alpha) * self.rpm();
 
         // Keep the crank angle bounded.
-        let crank = &mut self.system.bodies[self.crank_body];
-        crank.theta %= 4.0 * PI;
+        self.mech.wrap_theta();
+        self.update_pistons();
 
         // Dyno torque over the cycle.
         let index = ((512.0 * self.cycle_angle() / (4.0 * PI)).floor() as usize).min(511);
@@ -1161,7 +1029,6 @@ impl Engine {
         {
             let (crank_angle, cycle_angle) = (self.crank_angle(), self.cycle_angle());
             let ctx = Context {
-                bodies: &self.system.bodies,
                 banks: &self.banks,
                 heads: &self.heads,
                 fuel: &self.fuel,
@@ -1187,7 +1054,6 @@ impl Engine {
                 i.process(fluid_dt);
             }
             let ctx = Context {
-                bodies: &self.system.bodies,
                 banks: &self.banks,
                 heads: &self.heads,
                 fuel: &self.fuel,

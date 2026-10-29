@@ -1,6 +1,7 @@
 //! Combustion engine simulation: a Rust port of engine-sim by Ange Yaghi
 //! (https://github.com/ange-yaghi/engine-sim, MIT).
 
+pub mod crank;
 pub mod engine;
 pub mod function;
 pub mod gas;

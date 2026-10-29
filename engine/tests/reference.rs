@@ -65,24 +65,12 @@ fn matches_engine_sim() {
     let fixture = std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/vw1200.json")).unwrap();
     assert_eq!(fixture.trim(), spec.trim(), "tests/vw1200.json is stale: copy reference/.build/beetle.json");
     let spec: EngineSpec = serde_json::from_str(&spec).unwrap();
-    let mut engine = Engine::new(&spec);
+    let mut engine = Engine::constrained(&spec);
     engine.set_crank_speed(-spec.starter_speed);
     engine.set_ignition(true);
     // engine-sim only limits the clutch from the transmission's update after the first
     // step: until then it is locked to the vehicle's (1 kg m^2) body.
     engine.set_clutch(f64::MAX);
-
-    if std::env::var("DUMP").is_ok() {
-        for (i, b) in engine.system.bodies.iter().enumerate() {
-            eprintln!(
-                "body {i} p=({:?}, {:?}) th={:?} v=({:?}, {:?}, {:?}) m={:?} I={:?}",
-                b.p_x, b.p_y, b.theta, b.v_x, b.v_y, b.v_theta, b.m, b.i
-            );
-        }
-        for i in 0..4 {
-            eprintln!("chamber {i} V={:?} P={:?}", engine.cylinder_volume(i), engine.cylinder_pressure(i));
-        }
-    }
     let mut synth = engine_sim::synth::Synthesizer::new(1, 10000.0, 44100.0, {
         let mut p = engine_sim::synth::AudioParameters::default();
         p.input_sample_noise = 0.0;
@@ -105,18 +93,9 @@ fn matches_engine_sim() {
         engine.set_drag(vehicle_drag(engine.load_body()));
         engine.step();
         engine.set_clutch(0.0); // in neutral
-        if std::env::var("DUMP").is_ok() && step == 0 {
-            for (i, b) in engine.system.bodies.iter().enumerate() {
-                eprintln!("after body {i} p=({:?}, {:?}) th={:?} v=({:?}, {:?}, {:?})", b.p_x, b.p_y, b.theta, b.v_x, b.v_y, b.v_theta);
-            }
-            let s = &engine.system;
-            for i in 0..s.lambda.len() {
-                eprintln!("lambda {i} {:?} right {:?} lim {:?} {:?}", s.lambda[i], s.right[i], s.limits[i][0], s.limits[i][1]);
-            }
-        }
         let ours = [
             engine.crank_speed(),
-            engine.system.bodies[0].theta,
+            engine.crank_theta(),
             engine.cylinder_pressure(0),
             engine.exhaust_runner_pressure(2),
             engine.staging()[0],

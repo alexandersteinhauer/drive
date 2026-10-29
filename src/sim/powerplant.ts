@@ -104,7 +104,7 @@ const CATCH_RPM = 600;
 
 /**
  * The simulated engine (engine/): stepped at its own rate against the load, with the clutch
- * solved inside its constraint solver. If it stalls, the driver turns the key: the starter
+ * solved with the crank at every engine step. If it stalls, the driver turns the key: the starter
  * cranks it until it runs.
  */
 export class SimulatedEngine implements Powerplant {

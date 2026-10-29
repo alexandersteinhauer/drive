@@ -7,7 +7,8 @@ use std::time::Instant;
 fn main() {
     let spec: EngineSpec =
         serde_json::from_str(include_str!("../tests/vw1200.json")).unwrap();
-    let mut e = Engine::new(&spec);
+    // CONSTRAINED=1: engine-sim's constrained bodies instead of the reduced crank.
+    let mut e = if std::env::var("CONSTRAINED").is_ok() { Engine::constrained(&spec) } else { Engine::new(&spec) };
     e.set_crank_speed(-spec.starter_speed);
     e.set_ignition(true);
     let mut total = 0.0;
@@ -26,5 +27,4 @@ fn main() {
         println!("{r} rpm, throttle {thr}: {:.1} % of real time, {:.1} Nm", s / 2.0 * 100.0, e.filtered_dyno_torque());
     }
     println!("total {:.2} s for 8 s", total);
-    println!("solver iterations per step: {:.1}", e.system.iterations as f64 / 80000.0);
 }
