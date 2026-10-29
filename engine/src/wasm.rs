@@ -114,10 +114,10 @@ engine_fns! {
     }
 }
 
-/// The synthesizer for an engine (JSON spec): with acoustics, one channel per cylinder with
-/// its computed impulse responses (by the exhaust's flow, which comes last; as the engine
-/// writes them, engine::audio_channels); without, one per exhaust system, whose recorded impulse
-/// responses are then loaded with synth_set_impulse_wav. Null if the spec doesn't parse.
+/// engine-sim's synthesizer for an engine (JSON spec) without a voice: one channel per
+/// exhaust system, whose recorded impulse responses are then loaded with
+/// synth_set_impulse_wav. Null if the spec doesn't parse or has computed acoustics (the
+/// voice's: voice_for_engine).
 ///
 /// # Safety
 /// `ptr`/`len` must be a valid byte range.
@@ -133,47 +133,13 @@ pub unsafe extern "C" fn synth_for_engine(ptr: *const u8, len: usize) -> *mut Sy
         input_sample_noise: a.jitter as f32,
         ..AudioParameters::default()
     };
-    let rate = spec.simulation_frequency as f32;
-    let synth = match &a.acoustics {
-        Some(acoustics) => {
-            // Per flow level, per cylinder; the last channel carries the flow.
-            let levels = crate::acoustics::FLOW_LEVELS;
-            let by_flow: Vec<Vec<Vec<f32>>> = levels
-                .iter()
-                .map(|&flow| crate::acoustics::impulse_responses(acoustics, 44100.0, IMPULSE_LENGTH, flow))
-                .collect();
-            let cylinders = by_flow[0].len();
-            let mut s = Synthesizer::new(cylinders + 1, rate, 44100.0, params);
-            for i in 0..cylinders {
-                let sets: Vec<Vec<f32>> = by_flow.iter().map(|r| r[i].clone()).collect();
-                s.set_flow_responses(i, &levels, &sets);
-            }
-            s
-        }
-        None => Synthesizer::new(spec.exhausts.len(), rate, 44100.0, params),
-    };
+    // Computed acoustics are the voice's (voice_for_engine): engine-sim's synthesizer takes
+    // the exhausts' recorded responses.
+    if a.acoustics.is_some() {
+        return std::ptr::null_mut();
+    }
+    let synth = Synthesizer::new(spec.exhausts.len(), spec.simulation_frequency as f32, 44100.0, params);
     Box::into_raw(Box::new(synth))
-}
-
-/// Length of the computed impulse responses (samples at 44.1 kHz): the muffler's ring.
-const IMPULSE_LENGTH: usize = 4096;
-
-/// The computed impulse responses of an engine's exhaust (JSON spec), cylinder after
-/// cylinder, IMPULSE_LENGTH samples each; null without acoustics. Free with dealloc
-/// (cylinders * IMPULSE_LENGTH * 4 bytes).
-///
-/// # Safety
-/// `ptr`/`len` must be a valid byte range.
-#[no_mangle]
-pub unsafe extern "C" fn acoustic_impulses(ptr: *const u8, len: usize) -> *mut f32 {
-    let Ok(spec) = serde_json::from_slice::<EngineSpec>(bytes(ptr, len)) else {
-        return std::ptr::null_mut();
-    };
-    let Some(acoustics) = &spec.audio.acoustics else {
-        return std::ptr::null_mut();
-    };
-    let all = crate::acoustics::impulse_responses(acoustics, 44100.0, IMPULSE_LENGTH, 0.0).concat().into_boxed_slice();
-    Box::into_raw(all) as *mut f32
 }
 
 /// A synthesizer for `channels` exhaust systems fed at `input_rate` steps per second.

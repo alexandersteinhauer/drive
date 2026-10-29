@@ -230,8 +230,10 @@ struct Group {
 /// makes, the more the larger (Selamet et al., SAE 880082; the brassiness of loud
 /// trombones: Msallam et al., Acustica 86, 2000). Solved in slices of pipe, as Pestorius's
 /// algorithm does (JASA 1973), each one warping the wave's time a little and resolving its
-/// shocks by the equal-area rule (Slice). So a wave saturates however loud: beyond a few
-/// shock-forming distances, a sawtooth whose amplitude no longer grows with the source's.
+/// shocks by the equal-area rule (Slice). So a wave saturates: beyond a few shock-forming
+/// distances, a sawtooth whose amplitude no longer grows with the source's, up to arrivals
+/// MAX_EARLY early per slice (an exhaust's pulses, ~1e5 Pa, ~9 samples in its primaries; the
+/// weakly nonlinear theory holds no further anyway).
 struct Steepener {
     slices: Vec<Slice>,
     /// Takes out the mean and the infrasound first: the back-pressure the mean flow keeps
@@ -308,13 +310,15 @@ impl Steepener {
         let c = (GAMMA_EXHAUST * R_EXHAUST * temperature).sqrt();
         let rho = crate::units::ATM / (R_EXHAUST * temperature);
         let kappa = length * (GAMMA_EXHAUST + 1.0) / 2.0 / (rho * c * c * c) * RATE;
+        // Room for the most either holds, so the audio thread doesn't allocate.
+        let room = 4 * SLICE_DELAY as usize;
         let slice = || Slice {
             kappa: kappa / SLICES as f64,
             last: (SLICE_DELAY - 1.0, 0.0),
             time: 0.0,
             next: 0,
-            bins: VecDeque::new(),
-            out: VecDeque::new(),
+            bins: VecDeque::with_capacity(room),
+            out: VecDeque::with_capacity(room),
         };
         Steepener {
             slices: (0..SLICES).map(|_| slice()).collect(),
@@ -457,8 +461,16 @@ pub struct Voice {
 impl Voice {
     /// The voice for `spec` (None without `audio.voice`); with acoustics, computes their
     /// responses (~0.1 s).
+    /// None, too, for valves or wastegates without `nonlinear.nodes`, which blending by
+    /// them needs (they would do nothing).
     pub fn new(spec: &EngineSpec) -> Option<Voice> {
         let v = spec.audio.voice.clone()?;
+        if let Some(a) = &spec.audio.acoustics {
+            let split = a.nonlinear.as_ref().is_some_and(|n| !n.nodes.is_empty());
+            if !split && (a.valves.is_some() || !a.wastegate.is_empty()) {
+                return None;
+            }
+        }
         let port_exhaust: Vec<usize> = spec.banks.iter().flat_map(|b| b.cylinders.iter().map(|c| c.exhaust)).collect();
         let cylinders = port_exhaust.len();
         let group = |sets: &[Vec<f32>]| Group {
@@ -629,7 +641,8 @@ impl Voice {
         let mut groups = groups;
         if !ports.is_empty() {
             for g in &mut groups {
-                g.noise_delay = std::iter::repeat_n(0.0, Steepener::delay()).collect();
+                g.noise_delay = VecDeque::with_capacity(Steepener::delay() + 1);
+                g.noise_delay.extend(std::iter::repeat_n(0.0, Steepener::delay()));
             }
         }
         let group_exhaust: Vec<usize> = (0..groups.len())
@@ -669,7 +682,8 @@ impl Voice {
             frame: usize::MAX,
             strength: vec![1.0; cylinders],
             noise: Noise(0x2545_f491),
-            pending: Vec::new(),
+            // Two valves and an injector per cylinder at most, a few times over.
+            pending: Vec::with_capacity(16 * cylinders),
             clock: 0.0,
             valve_ring: [Biquad::band_pass(2600.0, 6.0), Biquad::band_pass(5400.0, 8.0)],
             injector_ring: [Biquad::band_pass(7200.0, 10.0), Biquad::band_pass(11500.0, 10.0)],
@@ -682,14 +696,22 @@ impl Voice {
             filled: 0,
             controls: [0.0; GLOBALS],
             direct: vec![0.0; BLOCK],
-            direct_delay: std::iter::repeat_n(0.0, delay).collect(),
+            direct_delay: {
+                let mut d = VecDeque::with_capacity(delay + BLOCK);
+                d.extend(std::iter::repeat_n(0.0, delay));
+                d
+            },
             exhaust: vec![0.0; BLOCK],
             bay: vec![0.0; BLOCK],
             tmp: vec![0.0; BLOCK],
             hearing: HighPass::new(4, 20.0, RATE),
             fade: 0.0,
             // The output runs a block behind the input (the convolution's).
-            out: std::iter::repeat_n(0.0, BLOCK).collect(),
+            out: {
+                let mut o = VecDeque::with_capacity(4 * BLOCK);
+                o.extend(std::iter::repeat_n(0.0, BLOCK));
+                o
+            },
             spec: v,
         })
     }

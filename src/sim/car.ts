@@ -635,9 +635,11 @@ export class Car {
     const engine = this.powerplant!;
     const simulated = engine instanceof SimulatedEngine ? engine : null;
     if (simulated) {
-      // Variable torque management: the ECU's boost cap for the gear.
+      // Variable torque management: the ECU's boost cap for the gear (reverse: first's).
       const caps =
-        e.type === "simulated" ? e.boostByGear?.[this.gear - 1] : undefined;
+        e.type === "simulated"
+          ? e.boostByGear?.[Math.max(this.gear, 1) - 1]
+          : undefined;
       simulated.boostLimit = caps
         ? interpolate(caps, engine.omega * RPM) * 1e5
         : Infinity;

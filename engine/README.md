@@ -63,9 +63,9 @@ rest directly:
   by its pressure and takes each sample as the mean of the folded wave over its interval,
   counting the stretches running backwards negative: Whitham's equal-area rule, which puts
   the shocks where the fold's lobes cancel, keeps the mean, and takes the steepened excess
-  away, so a wave saturates however loud. Loud pulses gain the high harmonics no linear pipe
-  makes, and only loud ones (Selamet et al., SAE 880082): an exhaust's rasp, and its
-  brightening with load.
+  away, so a wave saturates (up to far beyond an exhaust's pulses). Loud pulses gain the
+  high harmonics no linear pipe makes, and only loud ones (Selamet et al., SAE 880082): an
+  exhaust's rasp, and its brightening with load.
 - Turbulence: the valve jets', carried through the acoustics, and the tailpipe jets'
   (Lighthill's U^8), pulsing with their flow, both near their physical estimates.
 - The engine bay (the manifolds' shells radiating the pressure inside, through the walls'
@@ -107,8 +107,7 @@ theory, valid below a Strouhal number of ~1: Durrieu, Hirschberg, Peters et al.,
 m' / A^2, which takes ~4 M of a wave's energy per reflection as measured for open pipes with
 flow (Peters et al., J. Fluid Mech. 256, 1993); pipes add turbulent wall friction. A test
 checks a pipe's damped mode against the sum of these losses. The voice computes its responses
-at one flow (`voice.acousticFlow`, the engine working hard); engine-sim's synthesizer blended
-responses at six flows by the engine's.
+at one flow (`voice.acousticFlow`, the engine working hard).
 
 ## Physics beyond engine-sim's
 

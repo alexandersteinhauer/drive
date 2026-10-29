@@ -11,9 +11,8 @@
 //! - outlets: tailpipe ends radiating into the open (unflanged pipe radiation load), heard as
 //!   monopoles at `listener_distance`.
 //!
-//! The source is each exhaust valve's volume velocity (AudioSource::Flow), so these
-//! responses are what the synthesizer should convolve its input with unchanged: without its
-//! derivative path ("hf gain" 0), which would differentiate the radiation a second time.
+//! The source is each exhaust valve's volume velocity, which the voice (voice.rs) convolves
+//! with these responses: they include the tailpipes' radiation.
 //!
 //! The exhaust's mean flow damps it, the more the more flows (the quasi-steady theory, valid
 //! below a Strouhal number of about one, where an exhaust's low modes are: Durrieu,
@@ -28,12 +27,13 @@
 //! - pipes: turbulent wall friction (Blasius), an attenuation of xi M / (2 D).
 //!
 //! The flow divides between parallel paths by their areas (a steady estimate, exact for the
-//! single paths most exhausts are). impulse_responses takes the exhaust's mass flow; the
-//! synthesizer blends responses computed at FLOW_LEVELS by the engine's.
+//! single paths most exhausts are). impulse_responses takes the exhaust's mass flow (the
+//! voice one fixed flow: voice.acousticFlow).
 //!
 //! Solved per frequency for the pressure at every junction (nodal admittance), then turned
-//! into impulse responses at the audio rate, up to MAX_FREQUENCY (the synthesizer's input
-//! has nothing above its 1.9 kHz filter's tail).
+//! into impulse responses at the audio rate, up to a bandwidth (impulse_responses_to;
+//! impulse_responses: MAX_FREQUENCY). split_responses splits them at junctions, for the
+//! voice's nonlinear stretch and blending between valve and wastegate states.
 
 use crate::spec::AcousticsSpec;
 use std::collections::HashMap;
@@ -162,9 +162,6 @@ const PRANDTL: f64 = 0.7;
 const AMBIENT: f64 = 293.15;
 /// Samples ahead of the first arrival.
 const PRE_DELAY: f64 = 128.0;
-/// The exhaust mass flows (kg/s) responses are computed at, for the synthesizer to blend:
-/// from none (an engine stopped, or off the throttle at idle) to a big turbo engine's.
-pub const FLOW_LEVELS: [f64; 6] = [0.0, 0.01, 0.03, 0.08, 0.2, 0.6];
 /// Responses are computed up to here, tapering from TAPER_FROM (Hz).
 const MAX_FREQUENCY: f64 = 8000.0;
 const TAPER_FROM: f64 = 6000.0;

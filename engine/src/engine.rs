@@ -626,9 +626,6 @@ pub struct Engine {
     /// while `collect_audio` is set.
     pub audio: Vec<Vec<f32>>,
     pub collect_audio: bool,
-    /// One audio channel per cylinder (its pulse at the valve, for acoustics.rs) instead of
-    /// one per exhaust system (engine-sim's delayed, distance-scaled mix).
-    per_cylinder_audio: bool,
     /// The sound's source is the exhaust valves' volume velocity (AudioSource::Flow).
     audio_flow: bool,
     /// The audio is voice.rs's control stream (voice_channels).
@@ -645,7 +642,7 @@ pub struct Engine {
     clutch_steps: u32,
     staging: Vec<f64>,
     /// Moles out of the exhausts' outlets over the step, and that flow (kg/s) averaged over
-    /// MEAN_FLOW_TIME: the computed acoustics' last channel, the flow their damping follows.
+    /// MEAN_FLOW_TIME (for the voice).
     exhaust_moles: f64,
     exhaust_mass_flow: f64,
     dyno_torque_samples: Vec<f64>,
@@ -875,7 +872,6 @@ impl Engine {
             filtered_rpm: 0.0,
             audio: vec![Vec::new(); audio_channels(spec)],
             collect_audio: true,
-            per_cylinder_audio: spec.audio.acoustics.is_some(),
             audio_flow: spec.audio.source == crate::spec::AudioSource::Flow,
             voice: spec.audio.voice.is_some(),
             back_temperature: vec![celcius(25.0); spec.exhausts.len()],
@@ -1200,7 +1196,7 @@ impl Engine {
             let four_pi = 4.0 * PI;
             let mut advance = ign.timing.sample_triangle(-v_theta);
             if let Some(full) = &ign.full_load {
-                let load = ((ign.map - ATM) / (full.pressure - ATM)).clamp(0.0, 1.0);
+                let load = ((ign.map - ATM) / (full.pressure - ATM).max(1.0)).clamp(0.0, 1.0);
                 advance += load * (full.timing.sample_triangle(-v_theta) - advance);
             }
             advance -= ign.retard;
@@ -1351,7 +1347,7 @@ impl Engine {
         let attenuation_3 = attenuation * attenuation * attenuation;
         let count = self.cylinders.len() as f64;
         let dt = self.timestep;
-        for (i, c) in self.cylinders.iter_mut().enumerate() {
+        for c in self.cylinders.iter_mut() {
             c.exhaust_moles = 0.0;
             let exhaust = &self.exhausts[c.exhaust];
             let exhaust_length = c.primary_length + exhaust.length;
@@ -1366,21 +1362,10 @@ impl Engine {
                         + 0.1 * runner.dynamic_pressure(-1.0, 0.0))
             };
             c.exhaust_wave = 0.0;
-            if self.per_cylinder_audio {
-                // The pulse as it leaves the valve: the exhaust's acoustics do the rest.
-                self.staging[i] = c.sound_attenuation * (exhaust.audio_volume * exhaust_flow / count);
-                continue;
-            }
             let delayed = c.delay.f(exhaust_flow);
             self.staging[c.exhaust] += c.sound_attenuation
                 * (exhaust.audio_volume * delayed / count)
                 * (1.0 / (exhaust_length * exhaust_length));
-        }
-        if self.per_cylinder_audio {
-            let flow = self.exhaust_moles * AIR_MOLECULAR_MASS / dt;
-            self.exhaust_mass_flow += (flow - self.exhaust_mass_flow) * (dt / MEAN_FLOW_TIME).min(1.0);
-            let last = self.staging.len() - 1;
-            self.staging[last] = self.exhaust_mass_flow;
         }
         self.exhaust_moles = 0.0;
         if self.collect_audio {
@@ -1446,18 +1431,15 @@ impl Engine {
     }
 }
 
-/// Averaging time of the exhaust's mean flow for its acoustics' damping: a few engine cycles.
+/// Averaging time of the voice's mean flows and temperature: a few engine cycles.
 const MEAN_FLOW_TIME: f64 = 0.03;
 
 /// The engine's audio channels: with a voice, its control stream (each cylinder's exhaust
-/// valve flow, then crate::voice::GLOBALS of state); with computed acoustics, one per
-/// cylinder (the pulse at its valve) and last the exhaust's mean mass flow (kg/s); else one
-/// per exhaust system.
+/// valve flow, then crate::voice::GLOBALS of state); else engine-sim's, one per exhaust
+/// system.
 pub fn audio_channels(spec: &EngineSpec) -> usize {
     if spec.audio.voice.is_some() {
         spec.banks.iter().map(|b| b.cylinders.len()).sum::<usize>() + crate::voice::GLOBALS
-    } else if spec.audio.acoustics.is_some() {
-        spec.banks.iter().map(|b| b.cylinders.len()).sum::<usize>() + 1
     } else {
         spec.exhausts.len()
     }

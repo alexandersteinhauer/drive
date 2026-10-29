@@ -261,8 +261,8 @@ pub struct AudioSpec {
     /// What the exhaust's sound is driven by.
     #[serde(default)]
     pub source: AudioSource,
-    /// The exhaust's acoustics (acoustics.rs). Without them, engine-sim's sound: each
-    /// exhaust system's pulses through its recorded impulse response.
+    /// The exhaust's acoustics (acoustics.rs), for the voice (which they need). Without
+    /// them, each exhaust system's pulses through its recorded impulse response.
     #[serde(default)]
     pub acoustics: Option<AcousticsSpec>,
     /// The sound as voice.rs makes it, in place of engine-sim's synthesizer: the engine then

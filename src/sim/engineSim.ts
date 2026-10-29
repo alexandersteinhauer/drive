@@ -54,7 +54,6 @@ interface Exports {
     jitter: number,
   ): number;
   synth_for_engine(ptr: number, len: number): number;
-  acoustic_impulses(ptr: number, len: number): number;
   synth_free(s: number): void;
   synth_set_impulse_wav(
     s: number,

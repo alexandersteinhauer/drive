@@ -138,8 +138,8 @@ export interface EngineSpec {
      */
     source?: "pressure" | "flow";
     /**
-     * The exhaust's acoustics, computed from its geometry (engine/src/acoustics.rs): one
-     * impulse response per cylinder in place of the exhausts' recorded ones.
+     * The exhaust's acoustics, computed from its geometry (engine/src/acoustics.rs), in
+     * place of the exhausts' recorded responses. The voice's: needs `voice`.
      */
     acoustics?: Acoustics;
     /**
@@ -376,16 +376,12 @@ export const VOICE_GLOBALS = 10;
 
 /**
  * The engine's audio channels (engine/src/engine.rs audio_channels): with a voice, its
- * control stream (each cylinder's exhaust valve flow, then VOICE_GLOBALS of state); with
- * computed acoustics, one per cylinder and last the exhaust's mean mass flow, which their
- * damping follows; else one per exhaust system.
+ * control stream (each cylinder's exhaust valve flow, then VOICE_GLOBALS of state); else
+ * engine-sim's, one per exhaust system.
  */
 export function audioChannels(spec: EngineSpec): number {
-  const cylinders = spec.banks.reduce((n, b) => n + b.cylinders.length, 0);
-  if (spec.audio.voice) return cylinders + VOICE_GLOBALS;
-  return spec.audio.acoustics
-    ? spec.banks.reduce((n, b) => n + b.cylinders.length, 0) + 1
-    : spec.exhausts.length;
+  if (!spec.audio.voice) return spec.exhausts.length;
+  return spec.banks.reduce((n, b) => n + b.cylinders.length, 0) + VOICE_GLOBALS;
 }
 
 export function kCarb(cfm: number): number {

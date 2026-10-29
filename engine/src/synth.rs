@@ -3,7 +3,6 @@
 //! synthesizer.cpp and its filters). Single-threaded: write input, then render.
 
 use crate::rng::{Rng, RAND_MAX};
-use std::collections::VecDeque;
 
 
 const PI_F32: f32 = crate::units::PI as f32;
@@ -554,9 +553,6 @@ impl Default for AudioParameters {
 }
 
 struct Channel {
-    /// When set, the channel's impulse response is applied block by block (see render).
-    partitioned: Option<Partitioned>,
-    block_in: Vec<f32>,
     data: Ring<f32>,
     transfer: Vec<f32>,
     last_input_sample: f64,
@@ -570,15 +566,6 @@ struct Channel {
 
 pub struct Synthesizer {
     channels: Vec<Channel>,
-    /// With responses by flow (set_flow_responses): the flows (kg/s) they are for, and the
-    /// last channel then carries the flow rather than sound.
-    flow_levels: Vec<f64>,
-    flow_sum: f64,
-    /// Where the flow was among flow_levels at the end of the last block.
-    flow_position: f64,
-    /// Below hearing (and a car's speakers): the exhaust's flow changes radiate infrasound
-    /// that would only take the leveler's headroom.
-    hearing: HighPass,
     antialiasing: Butterworth<f32>,
     leveling: Leveling,
     pub params: AudioParameters,
@@ -586,10 +573,6 @@ pub struct Synthesizer {
     input_write_offset: f64,
     last_input_sample_offset: f64,
     audio: Ring<i16>,
-    /// Block mode: rendered samples waiting to be read (starts a block of silence ahead).
-    block_out: VecDeque<f32>,
-    block_mix: Vec<f32>,
-    block_tmp: Vec<f32>,
     input_sample_rate: f32,
     audio_sample_rate: f32,
     rng: Rng,
@@ -609,8 +592,6 @@ impl Synthesizer {
                 let mut antialiasing = Butterworth::new();
                 antialiasing.set_cutoff_frequency(1900.0f32 as f64, audio_sample_rate as f64);
                 Channel {
-                    partitioned: None,
-                    block_in: Vec::with_capacity(BLOCK),
                     data: Ring::new(input_buffer_size),
                     transfer: vec![0.0; input_buffer_size],
                     last_input_sample: 0.0,
@@ -627,10 +608,6 @@ impl Synthesizer {
         antialiasing.set_cutoff_frequency(audio_sample_rate * 0.45f32, audio_sample_rate);
         Synthesizer {
             channels,
-            flow_levels: Vec::new(),
-            flow_sum: 0.0,
-            flow_position: 0.0,
-            hearing: HighPass::new(4, 20.0, audio_sample_rate as f64),
             antialiasing,
             leveling: Leveling {
                 peak: 30000.0,
@@ -644,9 +621,6 @@ impl Synthesizer {
             input_write_offset: 0.0,
             last_input_sample_offset: 0.0,
             audio: Ring::new(audio_buffer_size),
-            block_out: std::iter::repeat_n(0.0, BLOCK).collect(),
-            block_mix: vec![0.0; BLOCK],
-            block_tmp: vec![0.0; BLOCK],
             input_sample_rate,
             audio_sample_rate,
             rng: Rng::new(1),
@@ -666,40 +640,6 @@ impl Synthesizer {
         c.shift = vec![0.0; count];
         c.impulse = samples[..count].iter().map(|&s| volume * s as f32 / i16::MAX as f32).collect();
         c.offset = 0;
-    }
-
-    /// An impulse response at the audio rate for channel `index`, applied by partitioned
-    /// convolution (for long ones, as acoustics.rs computes). The whole synthesizer then
-    /// renders in blocks of BLOCK samples, BLOCK samples late.
-    pub fn set_impulse_response_f32(&mut self, index: usize, impulse: &[f32]) {
-        self.channels[index].partitioned = Some(Partitioned::new(impulse));
-    }
-
-    /// Impulse responses at the audio rate for channel `index` at each of `levels` of the
-    /// exhaust's mass flow (kg/s, ascending), blended by the flow the last channel carries.
-    pub fn set_flow_responses(&mut self, index: usize, levels: &[f64], impulses: &[Vec<f32>]) {
-        assert_eq!(levels.len(), impulses.len());
-        self.flow_levels = levels.to_vec();
-        self.channels[index].partitioned = Some(Partitioned::blending(impulses));
-    }
-
-    /// Channels that carry sound (all but the flow's, if there is one).
-    fn sound_channels(&self) -> usize {
-        self.channels.len() - usize::from(!self.flow_levels.is_empty())
-    }
-
-    /// Where `flow` falls among flow_levels, as Partitioned::blend takes it.
-    fn flow_position(&self, flow: f64) -> f64 {
-        let l = &self.flow_levels;
-        if flow <= l[0] {
-            return 0.0;
-        }
-        for i in 1..l.len() {
-            if flow <= l[i] {
-                return (i - 1) as f64 + (flow - l[i - 1]) / (l[i] - l[i - 1]);
-            }
-        }
-        (l.len() - 1) as f64
     }
 
     pub fn set_input_sample_rate(&mut self, rate: f32) {
@@ -772,9 +712,6 @@ impl Synthesizer {
         if self.channels.is_empty() {
             return 0;
         }
-        if self.channels.iter().any(|c| c.partitioned.is_some()) {
-            return self.render_blocks(out);
-        }
         let n = out.len().min(self.channels[0].data.size());
         if n == 0 {
             return 0;
@@ -795,85 +732,6 @@ impl Synthesizer {
         n
     }
 
-    /// render, with the impulse responses applied a block at a time.
-    fn render_blocks(&mut self, out: &mut [f32]) -> usize {
-        let n = out.len().min(self.channels[0].data.size());
-        if n > 0 {
-            self.leveling.min_level = self.params.leveler_min_gain;
-            self.leveling.max_level = self.params.leveler_max_gain;
-            for ch in &mut self.channels {
-                let (data, transfer) = (&ch.data, &mut ch.transfer[..n]);
-                data.read_into(transfer);
-                ch.data.remove_beginning(n);
-                ch.air_noise_low_pass
-                    .set_cutoff_frequency(self.params.air_noise_frequency_cutoff, self.audio_sample_rate);
-                ch.jitter.scale = self.params.input_sample_noise;
-            }
-        }
-        let p = self.params;
-        let sound = self.sound_channels();
-        for i in 0..n {
-            for c in 0..sound {
-                let v_in = self.channel_input(c, i);
-                self.channels[c].block_in.push(v_in);
-            }
-            if sound < self.channels.len() {
-                self.flow_sum += self.channels[sound].transfer[i] as f64;
-            }
-            if self.channels[0].block_in.len() == BLOCK {
-                let x0 = self.flow_position;
-                if sound < self.channels.len() {
-                    self.flow_position = self.flow_position(self.flow_sum / BLOCK as f64);
-                    self.flow_sum = 0.0;
-                }
-                let x1 = self.flow_position;
-                self.block_mix.iter_mut().for_each(|v| *v = 0.0);
-                for ch in &mut self.channels[..sound] {
-                    match &mut ch.partitioned {
-                        Some(conv) => {
-                            self.flow_position = conv.process_blended(&ch.block_in, &mut self.block_tmp, x0, x1);
-                        }
-                        None => self.block_tmp.copy_from_slice(&ch.block_in),
-                    }
-                    for (m, (&y, &x)) in self.block_mix.iter_mut().zip(self.block_tmp.iter().zip(&ch.block_in)) {
-                        *m += p.convolution * y + (1.0 - p.convolution) * x;
-                    }
-                    ch.block_in.clear();
-                }
-                for k in 0..BLOCK {
-                    let signal = self.hearing.f(self.antialiasing.f(self.block_mix[k]));
-                    self.leveling.target = p.leveler_target;
-                    let v = self.leveling.f(signal) * p.volume;
-                    self.block_out.push_back(v.clamp(i16::MIN as f32, i16::MAX as f32) / 32768.0);
-                }
-            }
-        }
-        for o in out[..n].iter_mut() {
-            *o = self.block_out.pop_front().unwrap_or(0.0);
-        }
-        n
-    }
-
-    /// One channel's signal ahead of its impulse response (render_sample's first half).
-    fn channel_input(&mut self, c: usize, input: usize) -> f32 {
-        let p = self.params;
-        let _r_0 = self.rng.next();
-        let ch = &mut self.channels[c];
-        let f_in = ch.jitter.f(ch.transfer[input]);
-        let f_dc = ch.input_dc.f(f_in);
-        let f = f_in - f_dc;
-        let f_p = ch.derivative.f(f_in);
-        let noise = (2.0 * (self.rng.next() as f64 / RAND_MAX as f64) - 1.0) as f32;
-        let r = self.channels[0].air_noise_low_pass.f(noise);
-        let r_mixed = p.air_noise * r + (1.0 - p.air_noise);
-        let v_in = f_p * p.df_f_mix + f * r_mixed * (1.0 - p.df_f_mix);
-        if v_in.is_subnormal() {
-            0.0
-        } else {
-            v_in
-        }
-    }
-
     /// Drops buffered input beyond `keep` samples (when the simulation ran ahead).
     pub fn drop_input(&mut self, keep: usize) {
         for ch in &mut self.channels {
@@ -887,7 +745,7 @@ impl Synthesizer {
     fn render_sample(&mut self, input: usize) -> i16 {
         let p = self.params;
         let mut signal = 0.0f32;
-        for c in 0..self.sound_channels() {
+        for c in 0..self.channels.len() {
             let _r_0 = (2.0 * (self.rng.next() as f64 / RAND_MAX as f64) - 1.0) as f32;
             let ch = &mut self.channels[c];
             let jittered = ch.jitter.f(ch.transfer[input]);
