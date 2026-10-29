@@ -35,6 +35,14 @@ export interface TireConfig {
 }
 
 const MAX_NORMALIZED_SLIP = 25;
+/**
+ * Cap on the slip states at standstill, in units of peak slip. Near standstill the states
+ * integrate contact displacement, so the cap bounds the tread's deflection to what it takes
+ * to break away (peak slip * relaxation length, a few cm); past that it slides. Without it
+ * a tire dragged sideways at the end of a slide stores a metre of wind-up and pulls the car
+ * back the way it came. The cap opens up to MAX_NORMALIZED_SLIP by lowSpeedThreshold.
+ */
+const STANDSTILL_NORMALIZED_SLIP = 1;
 
 export class TireCurve {
   readonly b: number;
@@ -113,14 +121,17 @@ export class TireState {
       this.kx += (slipX * dt) / cfg.relaxX;
       this.ky -= (vy * dt) / cfg.relaxY;
     }
+    const blend = Math.max(0, 1 - Math.hypot(vx, vy) / cfg.lowSpeedThreshold);
+    const limit =
+      STANDSTILL_NORMALIZED_SLIP +
+      (MAX_NORMALIZED_SLIP - STANDSTILL_NORMALIZED_SLIP) * (1 - blend) ** 2;
     const n = Math.hypot(this.kx / cfg.peakSlipX, this.ky / cfg.peakSlipY);
-    if (n > MAX_NORMALIZED_SLIP) {
-      const s = MAX_NORMALIZED_SLIP / n;
+    if (n > limit) {
+      const s = limit / n;
       this.kx *= s;
       this.ky *= s;
     }
 
-    const blend = Math.max(0, 1 - Math.hypot(vx, vy) / cfg.lowSpeedThreshold);
     const nx = (this.kx + blend * cfg.lowSpeedDampingX * slipX) / cfg.peakSlipX;
     const ny = (this.ky - blend * cfg.lowSpeedDampingY * vy) / cfg.peakSlipY;
     const rho = Math.hypot(nx, ny);

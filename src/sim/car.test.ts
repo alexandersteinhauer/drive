@@ -161,6 +161,51 @@ describe("car", () => {
     expect(Math.abs(car.speed)).toBeLessThan(1);
   });
 
+  for (const [name, cfg] of [
+    ["i4", bmwI4],
+    ["Beetle", vwBeetle],
+  ] as const)
+    for (const esc of ["on", "off"] as const)
+      for (const target of [30, 45])
+        test(`${name} handbrake turn from ${target} km/h, ESC ${esc}, stops without swinging back`, () => {
+          const car = makeCar(cfg);
+          car.escMode = esc;
+          accelerateTo(car, target);
+          // Unwrapped heading change, positive to the left.
+          let yaw = 0;
+          let last = 0;
+          const heading = () => {
+            const f = new Vector3(0, 0, -1).applyQuaternion(car.orientation);
+            const h = Math.atan2(-f.x, -f.z);
+            const d = h - last;
+            yaw += d - 2 * Math.PI * Math.round(d / (2 * Math.PI));
+            last = h;
+            return yaw;
+          };
+          last = heading();
+          yaw = 0;
+          let peak = 0;
+          let backswing = 0;
+          let travel = 0;
+          run(car, 6, (t) => {
+            const y = heading();
+            peak = Math.max(peak, y);
+            backswing = Math.max(backswing, peak - y);
+            if (t > 4)
+              travel += Math.hypot(car.velocity.x, car.velocity.z) * DT;
+            return { ...idle, steer: -1, handbrake: 1 };
+          });
+          const deg = 180 / Math.PI;
+          console.log(
+            `${name} ESC ${esc} handbrake turn from ${target}: ${(peak * deg).toFixed(0)}°, back ${(backswing * deg).toFixed(1)}°, creep ${(travel * 100).toFixed(1)} cm`,
+          );
+          expect(peak).toBeGreaterThan(Math.PI / 3);
+          // Tire wind-up used to pull the rear 10-35° back and rock the stopped car for seconds.
+          expect(backswing * deg).toBeLessThan(6);
+          expect(travel).toBeLessThan(0.1);
+          expect(car.angularVelocity.length()).toBeLessThan(0.01);
+        });
+
   test("power oversteer can be provoked from a corner", () => {
     const cfg = structuredClone(sportsCoupe);
     cfg.esc.enabled = false;
