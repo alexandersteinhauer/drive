@@ -10,3 +10,4 @@ pub mod spec;
 pub mod units;
 pub mod synth;
 pub mod wasm;
+pub mod acoustics;

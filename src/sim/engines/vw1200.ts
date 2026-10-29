@@ -8,6 +8,8 @@ import {
   rodInertia,
   sampled,
   u,
+  kArea,
+  type Acoustics,
   type CamSpec,
   type EngineSpec,
   type SampledFunction,
@@ -60,6 +62,7 @@ function cams(
 function head(
   bank: 0 | 1,
   lobe: SampledFunction,
+  exhaustRunnerArea: number,
 ): EngineSpec["banks"][number]["head"] {
   return {
     // 7.0:1 on 298 cc per cylinder.
@@ -67,7 +70,7 @@ function head(
     intakeRunnerVolume: 45.0 * u.cc,
     intakeRunnerArea: 5.3 * u.cm2,
     exhaustRunnerVolume: 35.0 * u.cc,
-    exhaustRunnerArea: 5.5 * u.cm2,
+    exhaustRunnerArea,
     // Small valves (about 30 mm).
     intakePortFlow: portFlow([
       [0, 0],
@@ -109,7 +112,7 @@ const rod = {
 const cylinder = (
   journal: number,
   blowby: number,
-  primaryInches: number,
+  primaryLength: number,
   soundAttenuation: number,
 ) => ({
   journal,
@@ -117,7 +120,7 @@ const cylinder = (
   rod,
   intake: 0,
   exhaust: 0,
-  primaryLength: primaryInches * u.inch,
+  primaryLength,
   soundAttenuation,
 });
 
@@ -136,12 +139,44 @@ export interface Vw1200Tuning {
   camDuration: number;
   /** Carburettor flow (cfm at 1.5 inHg): caps the top end. */
   carburettorCfm: number;
+  /** The exhaust as gas volumes and openings (engine-sim's model). */
+  exhaust: {
+    /** Cross-section of each cylinder's port and pipe to the muffler. */
+    runnerArea: number;
+    /** Pipe from each port to the muffler, in cylinder order (shared part below). */
+    primaryLengths: [number, number, number, number];
+    primaryTubeLength: number;
+    /** Opening from the pipes into the muffler. */
+    primaryFlowK: number;
+    /** The muffler as a volume: cross-section times length. */
+    collectorArea: number;
+    length: number;
+    /** The tailpipes' opening. */
+    outletFlowK: number;
+  };
+  /** Its acoustics (none: engine-sim's recorded impulse response). */
+  acoustics?: Acoustics;
 }
 
 export const REFERENCE_TUNING: Vw1200Tuning = {
   idleThrottlePlate: 0.9965,
   camDuration: 200 * u.deg,
   carburettorCfm: 70.0,
+  // engine-sim's Subaru example, scaled down.
+  exhaust: {
+    runnerArea: 5.5 * u.cm2,
+    primaryLengths: [
+      10.0 * u.inch,
+      13.0 * u.inch,
+      11.0 * u.inch,
+      14.0 * u.inch,
+    ],
+    primaryTubeLength: 30.0 * u.inch,
+    primaryFlowK: kCarb(150.0),
+    collectorArea: u.pi * (2.0 * u.inch) * (2.0 * u.inch),
+    length: 400 * u.mm,
+    outletFlowK: kCarb(250.0),
+  },
 };
 
 /** The engine with the given tuning. */
@@ -189,20 +224,20 @@ export function vw1200Engine(tuning: Vw1200Tuning): EngineSpec {
         angle: 90.0 * u.deg,
         bore,
         deckHeight: stroke / 2 + rodLength + compressionHeight,
-        head: head(0, lobe),
+        head: head(0, lobe, tuning.exhaust.runnerArea),
         cylinders: [
-          cylinder(0, 0.002, 10.0, 0.95),
-          cylinder(3, 0.003, 13.0, 1.0),
+          cylinder(0, 0.002, tuning.exhaust.primaryLengths[0], 0.95),
+          cylinder(3, 0.003, tuning.exhaust.primaryLengths[1], 1.0),
         ],
       },
       {
         angle: -90.0 * u.deg,
         bore,
         deckHeight: stroke / 2 + rodLength + compressionHeight,
-        head: head(1, lobe),
+        head: head(1, lobe, tuning.exhaust.runnerArea),
         cylinders: [
-          cylinder(1, 0.002, 11.0, 1.05),
-          cylinder(2, 0.003, 14.0, 0.95),
+          cylinder(1, 0.002, tuning.exhaust.primaryLengths[2], 1.05),
+          cylinder(2, 0.003, tuning.exhaust.primaryLengths[3], 0.95),
         ],
       },
     ],
@@ -223,11 +258,11 @@ export function vw1200Engine(tuning: Vw1200Tuning): EngineSpec {
     // Heat exchangers on both sides into one transverse muffler: near-equal lengths.
     exhausts: [
       {
-        length: 400 * u.mm,
-        collectorArea: u.pi * (2.0 * u.inch) * (2.0 * u.inch),
-        outletFlowK: kCarb(250.0),
-        primaryTubeLength: 30.0 * u.inch,
-        primaryFlowK: kCarb(150.0),
+        length: tuning.exhaust.length,
+        collectorArea: tuning.exhaust.collectorArea,
+        outletFlowK: tuning.exhaust.outletFlowK,
+        primaryTubeLength: tuning.exhaust.primaryTubeLength,
+        primaryFlowK: tuning.exhaust.primaryFlowK,
         velocityDecay: 1.0,
         audioVolume: 0.6 * 0.02,
         impulseResponse: "new/mild_exhaust.wav",
@@ -249,9 +284,119 @@ export function vw1200Engine(tuning: Vw1200Tuning): EngineSpec {
       // Firing order 1-4-3-2.
       firing: [0.0, 1.0, 2.0, 3.0].map((q) => (q / 4.0) * cycle),
     },
-    audio: { hfGain: 0.01, noise: 1.0, jitter: 0.6 },
+    audio: {
+      hfGain: 0.01,
+      noise: 1.0,
+      jitter: 0.6,
+      acoustics: tuning.acoustics,
+    },
   };
 }
+
+/**
+ * The 1963-65 exhaust (fresh-air heat exchangers, twin-tip muffler), as measured on stock
+ * parts by owners: the front cylinders (1, 3) blow through the heat exchangers' J-tubes
+ * (35 mm outside), entering the muffler through perforated cones at its ends; the rear ones
+ * (2, 4) enter it directly and cross over inside it in pipes capped at the far end, so all
+ * four have about the same length of pipe. One transverse box (~66 cm x 11 cm, ~6 L), two
+ * packed tailpipes 26.5 cm long (~26 mm inside), and the intake's heat riser joining the
+ * box's two ends. Temperatures are rough exhaust-gas figures. Cylinders in engine-sim's
+ * order: 1, 4, 3, 2 (the firing order).
+ */
+const BOX = { length: 0.66, diameter: 0.107, temperature: 550 };
+/** Junctions along the box, from the left end (m). */
+const box: [string, number][] = [
+  ["left end", 0],
+  ["left cone", 0.06],
+  ["left tail", 0.18],
+  ["middle", 0.33],
+  ["right tail", 0.48],
+  ["right cone", 0.6],
+  ["right end", 0.66],
+];
+const jTube = (cyl: string) => [
+  { a: cyl, b: `${cyl} cone`, length: 0.55, diameter: 0.032, temperature: 650 },
+];
+const crossPipe = (cyl: string) => [
+  { a: cyl, b: `${cyl} cap`, length: 0.47, diameter: 0.029, temperature: 650 },
+];
+const tailpipe = (side: string) => ({
+  a: `${side} tail`,
+  b: `${side} tip`,
+  length: 0.265,
+  diameter: 0.026,
+  temperature: 500,
+  // Perforated inner tube in fibre packing: an absorptive silencer, ~13 dB at 1.5 kHz
+  // over its length.
+  absorption: 4,
+});
+const STOCK_ACOUSTICS: Acoustics = {
+  pipes: [
+    ...jTube("cylinder 1"),
+    ...jTube("cylinder 3"),
+    ...crossPipe("cylinder 2"),
+    ...crossPipe("cylinder 4"),
+    ...box.slice(1).map(([b, x], i) => ({
+      a: box[i]![0],
+      b,
+      length: x - box[i]![1],
+      diameter: BOX.diameter,
+      temperature: BOX.temperature,
+    })),
+    tailpipe("left"),
+    tailpipe("right"),
+    // The heat riser: from both ends of the box up to the intake manifold and back.
+    {
+      a: "left end",
+      b: "right end",
+      length: 0.9,
+      diameter: 0.02,
+      temperature: 450,
+    },
+  ],
+  orifices: [
+    // Perforated cones from the heat exchangers.
+    ...[
+      ["cylinder 1 cone", "right cone"],
+      ["cylinder 3 cone", "left cone"],
+    ].map(([a, b]) => ({
+      a: a!,
+      b: b!,
+      area: 6e-4,
+      length: 0.03,
+      resistance: 0.5,
+      temperature: 600,
+    })),
+    // Capped, perforated ends of the cross-over pipes: each vents by the far tailpipe.
+    ...[
+      ["cylinder 2 cap", "left tail"],
+      ["cylinder 4 cap", "right tail"],
+    ].map(([a, b]) => ({
+      a: a!,
+      b: b!,
+      area: 5e-4,
+      length: 0.02,
+      resistance: 0.5,
+      temperature: 600,
+    })),
+  ],
+  // The cylinder behind its open exhaust valve.
+  volumes: ["cylinder 1", "cylinder 2", "cylinder 3", "cylinder 4"].map(
+    (node) => ({
+      node,
+      volume: 0.2 * u.L,
+      temperature: 900,
+    }),
+  ),
+  ports: ["cylinder 1", "cylinder 4", "cylinder 3", "cylinder 2"],
+  outlets: [
+    { node: "left tip", diameter: 0.026 },
+    { node: "right tip", diameter: 0.026 },
+  ],
+  // The chase camera.
+  listenerDistance: 5,
+  gain: 1e-5,
+};
 
 /**
  * Tuned for the game against the published figures: 82 Nm at 2000 rpm, 34 PS at 3600 rpm
@@ -259,7 +404,21 @@ export function vw1200Engine(tuning: Vw1200Tuning): EngineSpec {
  */
 export const vw1200: EngineSpec = vw1200Engine({
   // Idles at ~850 rpm against its friction (and the fan's), unloaded.
-  idleThrottlePlate: 0.984,
-  camDuration: 190 * u.deg,
-  carburettorCfm: 60.0,
+  idleThrottlePlate: 0.9865,
+  camDuration: 195 * u.deg,
+  carburettorCfm: 70.0,
+  exhaust: {
+    // The ports and J-tubes, ~30 mm.
+    runnerArea: u.pi * 0.015 * 0.015,
+    // Heat exchangers for 1 and 3, cross-over pipes for 4 and 2.
+    primaryLengths: [0.55, 0.47, 0.55, 0.47],
+    primaryTubeLength: 0,
+    // Through the perforated cones and caps.
+    primaryFlowK: kArea(5.5 * u.cm2),
+    collectorArea: u.pi * (BOX.diameter / 2) ** 2,
+    length: BOX.length,
+    // Two ~26 mm tailpipes.
+    outletFlowK: kArea(2 * u.pi * 0.013 * 0.013, 0.8),
+  },
+  acoustics: STOCK_ACOUSTICS,
 });

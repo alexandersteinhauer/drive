@@ -44,7 +44,7 @@ export class EngineSound {
     const [wasm, impulses] = await Promise.all([
       fetch(wasmUrl).then((r) => r.arrayBuffer()),
       Promise.all(
-        spec.exhausts.map(async (e) => ({
+        (spec.audio.acoustics ? [] : spec.exhausts).map(async (e) => ({
           wav: await (await fetch(base + e.impulseResponse)).arrayBuffer(),
           volume: e.impulseVolume,
         })),
@@ -53,9 +53,13 @@ export class EngineSound {
     ]);
     const processorOptions: EngineProcessorOptions = {
       wasm,
-      impulses,
+      spec: new TextEncoder().encode(JSON.stringify(spec))
+        .buffer as ArrayBuffer,
       frequency: spec.simulationFrequency,
-      ...spec.audio,
+      channels: spec.audio.acoustics
+        ? spec.banks.reduce((n, b) => n + b.cylinders.length, 0)
+        : spec.exhausts.length,
+      impulses,
     };
     const node = new AudioWorkletNode(context, "engine-sim", {
       numberOfInputs: 0,

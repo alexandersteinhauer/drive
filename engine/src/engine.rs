@@ -535,6 +535,9 @@ pub struct Engine {
     /// while `collect_audio` is set.
     pub audio: Vec<Vec<f32>>,
     pub collect_audio: bool,
+    /// One audio channel per cylinder (its pulse at the valve, for acoustics.rs) instead of
+    /// one per exhaust system (engine-sim's delayed, distance-scaled mix).
+    per_cylinder_audio: bool,
     /// Torque on the driven side (the load body), e.g. from the tyres.
     load_torque: f64,
     /// Sum of the clutch torque (forwards, on the load) over the steps since `set_load`.
@@ -854,12 +857,19 @@ impl Engine {
             timestep: 1.0 / spec.simulation_frequency,
             fluid_steps: spec.fluid_steps,
             filtered_rpm: 0.0,
-            audio: vec![Vec::new(); spec.exhausts.len()],
+            audio: vec![
+                Vec::new();
+                if spec.audio.acoustics.is_some() { spec.banks.iter().map(|b| b.cylinders.len()).sum() } else { spec.exhausts.len() }
+            ],
             collect_audio: true,
+            per_cylinder_audio: spec.audio.acoustics.is_some(),
             load_torque: 0.0,
             clutch_torque_sum: 0.0,
             clutch_steps: 0,
-            staging: vec![0.0; spec.exhausts.len()],
+            staging: vec![
+                0.0;
+                if spec.audio.acoustics.is_some() { spec.banks.iter().map(|b| b.cylinders.len()).sum() } else { spec.exhausts.len() }
+            ],
             dyno_torque_samples: vec![0.0; 512],
             last_dyno_torque_sample: 0,
             impulse_responses: spec
@@ -1204,7 +1214,7 @@ impl Engine {
         let attenuation = self.filtered_rpm.abs().min(40.0) / 40.0;
         let attenuation_3 = attenuation * attenuation * attenuation;
         let count = self.cylinders.len() as f64;
-        for c in &mut self.cylinders {
+        for (i, c) in self.cylinders.iter_mut().enumerate() {
             let exhaust = &self.exhausts[c.exhaust];
             let exhaust_length = c.primary_length + exhaust.length;
             let runner = &c.exhaust_runner;
@@ -1213,6 +1223,11 @@ impl Engine {
                 * (1.0 * (runner.pressure() - ATM)
                     + 0.1 * runner.dynamic_pressure(1.0, 0.0)
                     + 0.1 * runner.dynamic_pressure(-1.0, 0.0));
+            if self.per_cylinder_audio {
+                // The pulse as it leaves the valve: the exhaust's acoustics do the rest.
+                self.staging[i] = c.sound_attenuation * (exhaust.audio_volume * exhaust_flow / count);
+                continue;
+            }
             let delayed = c.delay.f(exhaust_flow);
             self.staging[c.exhaust] += c.sound_attenuation
                 * (exhaust.audio_volume * delayed / count)

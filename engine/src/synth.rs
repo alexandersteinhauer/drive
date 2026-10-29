@@ -3,6 +3,7 @@
 //! synthesizer.cpp and its filters). Single-threaded: write input, then render.
 
 use crate::rng::{Rng, RAND_MAX};
+use std::collections::VecDeque;
 
 
 const PI_F32: f32 = crate::units::PI as f32;
@@ -240,6 +241,153 @@ impl Convolution {
     }
 }
 
+/// Block size of the partitioned convolution (the AudioWorklet's render quantum).
+pub const BLOCK: usize = 128;
+
+/// A real FFT of 2 * BLOCK points, as the convolution needs it: f32, split re/im.
+struct Fft {
+    n: usize,
+    cos: Vec<f32>,
+    sin: Vec<f32>,
+    rev: Vec<usize>,
+}
+
+impl Fft {
+    fn new(n: usize) -> Self {
+        let bits = n.trailing_zeros();
+        Fft {
+            n,
+            cos: (0..n / 2).map(|i| (-2.0 * std::f64::consts::PI * i as f64 / n as f64).cos() as f32).collect(),
+            sin: (0..n / 2).map(|i| (-2.0 * std::f64::consts::PI * i as f64 / n as f64).sin() as f32).collect(),
+            rev: (0..n).map(|i| i.reverse_bits() >> (usize::BITS - bits)).collect(),
+        }
+    }
+
+    /// In place; `inverse` conjugates the twiddles (unscaled).
+    fn run(&self, re: &mut [f32], im: &mut [f32], inverse: bool) {
+        let n = self.n;
+        for i in 0..n {
+            let j = self.rev[i];
+            if i < j {
+                re.swap(i, j);
+                im.swap(i, j);
+            }
+        }
+        let sign = if inverse { -1.0 } else { 1.0 };
+        let mut len = 2;
+        while len <= n {
+            let half = len / 2;
+            let step = n / len;
+            for start in (0..n).step_by(len) {
+                for k in 0..half {
+                    let (wr, wi) = (self.cos[k * step], sign * self.sin[k * step]);
+                    let (a, b) = (start + k, start + k + half);
+                    let (xr, xi) = (re[b] * wr - im[b] * wi, re[b] * wi + im[b] * wr);
+                    re[b] = re[a] - xr;
+                    im[b] = im[a] - xi;
+                    re[a] += xr;
+                    im[a] += xi;
+                }
+            }
+            len <<= 1;
+        }
+    }
+}
+
+/// Uniformly partitioned overlap-save convolution: a long impulse response at a cost per
+/// sample that grows with its length only through one multiply-add per partition and bin.
+struct Partitioned {
+    fft: Fft,
+    bins: usize,
+    /// Spectra of the impulse response's partitions, re then im.
+    h_re: Vec<Vec<f32>>,
+    h_im: Vec<Vec<f32>>,
+    /// Spectra of the last inputs (frequency-domain delay line).
+    x_re: Vec<Vec<f32>>,
+    x_im: Vec<Vec<f32>>,
+    position: usize,
+    previous: Vec<f32>,
+    re: Vec<f32>,
+    im: Vec<f32>,
+    acc_re: Vec<f32>,
+    acc_im: Vec<f32>,
+}
+
+impl Partitioned {
+    fn new(impulse: &[f32]) -> Self {
+        let n = 2 * BLOCK;
+        let fft = Fft::new(n);
+        let bins = BLOCK + 1;
+        let parts = impulse.len().div_ceil(BLOCK).max(1);
+        let (mut h_re, mut h_im) = (Vec::new(), Vec::new());
+        for p in 0..parts {
+            let mut re = vec![0.0f32; n];
+            let mut im = vec![0.0f32; n];
+            for (i, &v) in impulse.iter().skip(p * BLOCK).take(BLOCK).enumerate() {
+                re[i] = v;
+            }
+            fft.run(&mut re, &mut im, false);
+            h_re.push(re[..bins].to_vec());
+            h_im.push(im[..bins].to_vec());
+        }
+        Partitioned {
+            fft,
+            bins,
+            x_re: vec![vec![0.0; bins]; parts],
+            x_im: vec![vec![0.0; bins]; parts],
+            h_re,
+            h_im,
+            position: 0,
+            previous: vec![0.0; BLOCK],
+            re: vec![0.0; n],
+            im: vec![0.0; n],
+            acc_re: vec![0.0; bins],
+            acc_im: vec![0.0; bins],
+        }
+    }
+
+    /// Convolves one block of BLOCK samples.
+    fn process(&mut self, input: &[f32], output: &mut [f32]) {
+        let n = 2 * BLOCK;
+        let parts = self.h_re.len();
+        self.re[..BLOCK].copy_from_slice(&self.previous);
+        self.re[BLOCK..].copy_from_slice(input);
+        self.previous.copy_from_slice(input);
+        self.im.iter_mut().for_each(|v| *v = 0.0);
+        self.fft.run(&mut self.re, &mut self.im, false);
+        let slot = self.position;
+        self.x_re[slot].copy_from_slice(&self.re[..self.bins]);
+        self.x_im[slot].copy_from_slice(&self.im[..self.bins]);
+
+        self.acc_re.iter_mut().for_each(|v| *v = 0.0);
+        self.acc_im.iter_mut().for_each(|v| *v = 0.0);
+        for p in 0..parts {
+            let x = (slot + parts - p) % parts;
+            let (xr, xi) = (&self.x_re[x], &self.x_im[x]);
+            let (hr, hi) = (&self.h_re[p], &self.h_im[p]);
+            for k in 0..self.bins {
+                self.acc_re[k] += xr[k] * hr[k] - xi[k] * hi[k];
+                self.acc_im[k] += xr[k] * hi[k] + xi[k] * hr[k];
+            }
+        }
+        // Back to the time domain: the Hermitian spectrum, the second half is this block.
+        for k in 0..self.bins {
+            self.re[k] = self.acc_re[k];
+            self.im[k] = self.acc_im[k];
+        }
+        for k in 1..BLOCK {
+            self.re[n - k] = self.acc_re[k];
+            self.im[n - k] = -self.acc_im[k];
+        }
+        self.fft.run(&mut self.re, &mut self.im, true);
+        let scale = 1.0 / n as f32;
+        for (o, v) in output.iter_mut().zip(&self.re[BLOCK..]) {
+            *o = v * scale;
+        }
+        self.position = (self.position + 1) % parts;
+    }
+}
+
 struct Leveling {
     peak: f32,
     attenuation: f32,
@@ -301,6 +449,9 @@ impl Default for AudioParameters {
 }
 
 struct Channel {
+    /// When set, the channel's impulse response is applied block by block (see render).
+    partitioned: Option<Partitioned>,
+    block_in: Vec<f32>,
     data: Ring<f32>,
     transfer: Vec<f32>,
     last_input_sample: f64,
@@ -321,6 +472,10 @@ pub struct Synthesizer {
     input_write_offset: f64,
     last_input_sample_offset: f64,
     audio: Ring<i16>,
+    /// Block mode: rendered samples waiting to be read (starts a block of silence ahead).
+    block_out: VecDeque<f32>,
+    block_mix: Vec<f32>,
+    block_tmp: Vec<f32>,
     input_sample_rate: f32,
     audio_sample_rate: f32,
     rng: Rng,
@@ -340,6 +495,8 @@ impl Synthesizer {
                 let mut antialiasing = Butterworth::new();
                 antialiasing.set_cutoff_frequency(1900.0f32 as f64, audio_sample_rate as f64);
                 Channel {
+                    partitioned: None,
+                    block_in: Vec::with_capacity(BLOCK),
                     data: Ring::new(input_buffer_size),
                     transfer: vec![0.0; input_buffer_size],
                     last_input_sample: 0.0,
@@ -369,6 +526,9 @@ impl Synthesizer {
             input_write_offset: 0.0,
             last_input_sample_offset: 0.0,
             audio: Ring::new(audio_buffer_size),
+            block_out: std::iter::repeat_n(0.0, BLOCK).collect(),
+            block_mix: vec![0.0; BLOCK],
+            block_tmp: vec![0.0; BLOCK],
             input_sample_rate,
             audio_sample_rate,
             rng: Rng::new(1),
@@ -388,6 +548,13 @@ impl Synthesizer {
         c.shift = vec![0.0; count];
         c.impulse = samples[..count].iter().map(|&s| volume * s as f32 / i16::MAX as f32).collect();
         c.offset = 0;
+    }
+
+    /// An impulse response at the audio rate for channel `index`, applied by partitioned
+    /// convolution (for long ones, as acoustics.rs computes). The whole synthesizer then
+    /// renders in blocks of BLOCK samples, BLOCK samples late.
+    pub fn set_impulse_response_f32(&mut self, index: usize, impulse: &[f32]) {
+        self.channels[index].partitioned = Some(Partitioned::new(impulse));
     }
 
     pub fn set_input_sample_rate(&mut self, rate: f32) {
@@ -460,6 +627,9 @@ impl Synthesizer {
         if self.channels.is_empty() {
             return 0;
         }
+        if self.channels.iter().any(|c| c.partitioned.is_some()) {
+            return self.render_blocks(out);
+        }
         let n = out.len().min(self.channels[0].data.size());
         if n == 0 {
             return 0;
@@ -478,6 +648,73 @@ impl Synthesizer {
             *o = self.render_sample(i) as f32 / 32768.0;
         }
         n
+    }
+
+    /// render, with the impulse responses applied a block at a time.
+    fn render_blocks(&mut self, out: &mut [f32]) -> usize {
+        let n = out.len().min(self.channels[0].data.size());
+        if n > 0 {
+            self.leveling.min_level = self.params.leveler_min_gain;
+            self.leveling.max_level = self.params.leveler_max_gain;
+            for ch in &mut self.channels {
+                let (data, transfer) = (&ch.data, &mut ch.transfer[..n]);
+                data.read_into(transfer);
+                ch.data.remove_beginning(n);
+                ch.air_noise_low_pass
+                    .set_cutoff_frequency(self.params.air_noise_frequency_cutoff, self.audio_sample_rate);
+                ch.jitter.scale = self.params.input_sample_noise;
+            }
+        }
+        let p = self.params;
+        for i in 0..n {
+            for c in 0..self.channels.len() {
+                let v_in = self.channel_input(c, i);
+                self.channels[c].block_in.push(v_in);
+            }
+            if self.channels[0].block_in.len() == BLOCK {
+                self.block_mix.iter_mut().for_each(|v| *v = 0.0);
+                for ch in &mut self.channels {
+                    match &mut ch.partitioned {
+                        Some(conv) => conv.process(&ch.block_in, &mut self.block_tmp),
+                        None => self.block_tmp.copy_from_slice(&ch.block_in),
+                    }
+                    for (m, (&y, &x)) in self.block_mix.iter_mut().zip(self.block_tmp.iter().zip(&ch.block_in)) {
+                        *m += p.convolution * y + (1.0 - p.convolution) * x;
+                    }
+                    ch.block_in.clear();
+                }
+                for k in 0..BLOCK {
+                    let signal = self.antialiasing.f(self.block_mix[k]);
+                    self.leveling.target = p.leveler_target;
+                    let v = self.leveling.f(signal) * p.volume;
+                    self.block_out.push_back(v.clamp(i16::MIN as f32, i16::MAX as f32) / 32768.0);
+                }
+            }
+        }
+        for o in out[..n].iter_mut() {
+            *o = self.block_out.pop_front().unwrap_or(0.0);
+        }
+        n
+    }
+
+    /// One channel's signal ahead of its impulse response (render_sample's first half).
+    fn channel_input(&mut self, c: usize, input: usize) -> f32 {
+        let p = self.params;
+        let _r_0 = self.rng.next();
+        let ch = &mut self.channels[c];
+        let f_in = ch.jitter.f(ch.transfer[input]);
+        let f_dc = ch.input_dc.f(f_in);
+        let f = f_in - f_dc;
+        let f_p = ch.derivative.f(f_in);
+        let noise = (2.0 * (self.rng.next() as f64 / RAND_MAX as f64) - 1.0) as f32;
+        let r = self.channels[0].air_noise_low_pass.f(noise);
+        let r_mixed = p.air_noise * r + (1.0 - p.air_noise);
+        let v_in = f_p * p.df_f_mix + f * r_mixed * (1.0 - p.df_f_mix);
+        if v_in.is_subnormal() {
+            0.0
+        } else {
+            v_in
+        }
     }
 
     /// Drops buffered input beyond `keep` samples (when the simulation ran ahead).
@@ -568,3 +805,23 @@ pub fn read_wav(data: &[u8]) -> Option<Vec<i16>> {
     None
 }
 
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn partitioned_convolution_matches_direct() {
+        let impulse: Vec<f32> = (0..1000).map(|i| ((i as f32 * 0.37).sin() * (-(i as f32) / 300.0).exp())).collect();
+        let input: Vec<f32> = (0..BLOCK * 20).map(|i| ((i * 7919) % 101) as f32 / 50.0 - 1.0).collect();
+        let mut conv = Partitioned::new(&impulse);
+        let mut fast = vec![0.0; input.len()];
+        for (i, o) in input.chunks(BLOCK).zip(fast.chunks_mut(BLOCK)) {
+            conv.process(i, o);
+        }
+        for n in 0..input.len() {
+            let direct: f32 = (0..impulse.len().min(n + 1)).map(|k| impulse[k] * input[n - k]).sum();
+            assert!((direct - fast[n]).abs() < 1e-3, "sample {n}: {direct} vs {}", fast[n]);
+        }
+    }
+}

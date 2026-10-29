@@ -183,4 +183,75 @@ pub struct AudioSpec {
     pub hf_gain: f64,
     pub noise: f64,
     pub jitter: f64,
+    /// The exhaust's acoustics (acoustics.rs). Without them, engine-sim's sound: each
+    /// exhaust system's pulses through its recorded impulse response.
+    #[serde(default)]
+    pub acoustics: Option<AcousticsSpec>,
+}
+
+/// The exhaust as an acoustic network of named junctions (acoustics.rs). Temperatures in K.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AcousticsSpec {
+    pub pipes: Vec<AcousticPipe>,
+    #[serde(default)]
+    pub orifices: Vec<AcousticOrifice>,
+    #[serde(default)]
+    pub volumes: Vec<AcousticVolume>,
+    /// The junction behind each cylinder's exhaust valve, in cylinder order.
+    pub ports: Vec<String>,
+    pub outlets: Vec<AcousticOutlet>,
+    pub listener_distance: f64,
+    /// Scales the impulse responses (sets the level against engine-sim's synthesizer).
+    pub gain: f64,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AcousticPipe {
+    pub a: String,
+    pub b: String,
+    pub length: f64,
+    pub diameter: f64,
+    pub temperature: f64,
+    /// Wall losses as a multiple of a smooth pipe's.
+    #[serde(default = "one")]
+    pub damping: f64,
+    /// Absorption of a lining (a perforated pipe in packing), Np/m per kHz.
+    #[serde(default)]
+    pub absorption: f64,
+}
+
+fn one() -> f64 {
+    1.0
+}
+
+/// A perforated cone, baffle or cap: a mass of gas through `area` over `length` (with end
+/// corrections), and a resistance in units of the gas's characteristic impedance there.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AcousticOrifice {
+    pub a: String,
+    pub b: String,
+    pub area: f64,
+    pub length: f64,
+    pub resistance: f64,
+    pub temperature: f64,
+}
+
+/// A volume small against the wavelength, at a junction.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AcousticVolume {
+    pub node: String,
+    pub volume: f64,
+    pub temperature: f64,
+}
+
+/// An open pipe end radiating into the air.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AcousticOutlet {
+    pub node: String,
+    pub diameter: f64,
 }

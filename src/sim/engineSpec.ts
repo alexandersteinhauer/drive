@@ -114,7 +114,50 @@ export interface EngineSpec {
     /** Firing angle per cylinder, banks in order. */
     firing: number[];
   };
-  audio: { hfGain: number; noise: number; jitter: number };
+  audio: {
+    hfGain: number;
+    noise: number;
+    jitter: number;
+    /**
+     * The exhaust's acoustics, computed from its geometry (engine/src/acoustics.rs): one
+     * impulse response per cylinder in place of the exhausts' recorded ones.
+     */
+    acoustics?: Acoustics;
+  };
+}
+
+/** The exhaust as an acoustic network of named junctions. Temperatures in K. */
+export interface Acoustics {
+  pipes: {
+    a: string;
+    b: string;
+    length: number;
+    diameter: number;
+    temperature: number;
+    /** Wall losses as a multiple of a smooth pipe's. */
+    damping?: number;
+    /** Absorption of a lining (a perforated pipe in packing), Np/m per kHz. */
+    absorption?: number;
+  }[];
+  /** Perforated cones, baffles, caps: gas mass through `area` over `length`, resistance in
+   * units of the characteristic impedance there. */
+  orifices?: {
+    a: string;
+    b: string;
+    area: number;
+    length: number;
+    resistance: number;
+    temperature: number;
+  }[];
+  /** Volumes small against the wavelength (a cylinder behind its open valve). */
+  volumes?: { node: string; volume: number; temperature: number }[];
+  /** The junction behind each cylinder's exhaust valve, in cylinder order. */
+  ports: string[];
+  /** Open pipe ends, radiating. */
+  outlets: { node: string; diameter: number }[];
+  listenerDistance: number;
+  /** Scales the impulse responses, against the synthesizer's fixed gain. */
+  gain: number;
 }
 
 export interface CamSpec {
@@ -202,6 +245,13 @@ export function kCarb(cfm: number): number {
 /** Flow constant passing `cfm` at a flow bench's 28 inH2O. */
 export function k28inH2O(cfm: number): number {
   return flowConstant(cfm * u.scfm, 1.0 * u.atm, 28.0 * u.inH2O, u.celcius(25));
+}
+
+/** Flow constant of an opening of `area` with discharge coefficient `cd`. */
+export function kArea(area: number, cd = 1): number {
+  // engine-sim's flow is k * p * psi / sqrt(R T) mol/s; an orifice passes
+  // cd * A * p * psi / sqrt(M R T).
+  return (cd * area) / Math.sqrt(28.97 * u.g);
 }
 
 export function diskInertia(mass: number, radius: number): number {

@@ -5,13 +5,13 @@ import { Loudness } from "./loudness";
 
 export interface EngineProcessorOptions {
   wasm: ArrayBuffer;
-  /** Impulse response WAV per exhaust system, with its volume. */
-  impulses: { wav: ArrayBuffer; volume: number }[];
-  /** Simulation steps per second. */
+  /** The engine: EngineSpec as UTF-8 JSON (worklets may lack TextEncoder). */
+  spec: ArrayBuffer;
+  /** Its simulation steps per second, and audio channels (cylinders with acoustics). */
   frequency: number;
-  hfGain: number;
-  noise: number;
-  jitter: number;
+  channels: number;
+  /** Without acoustics in the spec: the recorded impulse response per exhaust system. */
+  impulses: { wav: ArrayBuffer; volume: number }[];
 }
 
 /** From the game: the steps simulated since the last message. */
@@ -48,18 +48,16 @@ class EngineProcessor extends AudioWorkletProcessor {
     super();
     const o = options.processorOptions;
     this.frequency = o.frequency;
-    this.channels = o.impulses.length;
+    this.channels = o.channels;
     this.port.onmessage = (e: MessageEvent<EngineInput>) => this.input(e.data);
     EngineModule.load(o.wasm)
       .then((m) => {
         const x = m.exports;
-        this.synth = x.synth_new(
-          this.channels,
-          o.frequency,
-          o.hfGain,
-          o.noise,
-          o.jitter,
-        );
+        // With acoustics, this computes the exhaust's impulse responses (~0.1 s).
+        const json = m.write(new Uint8Array(o.spec));
+        this.synth = x.synth_for_engine(json.ptr, json.len);
+        m.free(json);
+        if (!this.synth) throw new Error("engine spec rejected");
         o.impulses.forEach((imp, i) => {
           const wav = m.write(new Uint8Array(imp.wav));
           const ok = x.synth_set_impulse_wav(

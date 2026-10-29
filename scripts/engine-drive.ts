@@ -32,37 +32,28 @@ const held = (spans: [number, number][], t: number) =>
 const car = new Car(structuredClone(vwBeetle), new FlatGround());
 const engine = car.powerplant as SimulatedEngine;
 engine.sim.collectAudio = true;
-const spec =
-  vwBeetle.powertrain.type === "combustion" &&
-  vwBeetle.powertrain.engine.type === "simulated"
-    ? vwBeetle.powertrain.engine.spec
-    : null!;
+const spec = structuredClone(engine.cfg.spec);
 
-// The synthesizer as the worklet runs it.
+// The synthesizer as the worklet runs it. RECORDED=1: engine-sim's recorded impulse
+// response instead of the computed acoustics.
+if (process.env.RECORDED) delete spec.audio.acoustics;
 const audio = await EngineModule.load(await wasm());
 const x = audio.exports;
-const synth = x.synth_new(
-  1,
-  spec.simulationFrequency,
-  spec.audio.hfGain,
-  spec.audio.noise,
-  spec.audio.jitter,
-);
-const wav = audio.write(
-  new Uint8Array(
-    await Bun.file(
-      `public/audio/impulse/${spec.exhausts[0]!.impulseResponse}`,
-    ).arrayBuffer(),
-  ),
-);
-x.synth_set_impulse_wav(
-  synth,
-  0,
-  wav.ptr,
-  wav.len,
-  spec.exhausts[0]!.impulseVolume,
-);
+const json = audio.write(new TextEncoder().encode(JSON.stringify(spec)));
+const synth = x.synth_for_engine(json.ptr, json.len);
+if (!spec.audio.acoustics) {
+  const exhaust = spec.exhausts[0]!;
+  const wav = audio.write(
+    new Uint8Array(
+      await Bun.file(
+        `public/audio/impulse/${exhaust.impulseResponse}`,
+      ).arrayBuffer(),
+    ),
+  );
+  x.synth_set_impulse_wav(synth, 0, wav.ptr, wav.len, exhaust.impulseVolume);
+}
 x.synth_set_gain(synth, 0.003);
+const channels = spec.audio.acoustics ? 4 : 1;
 const loudness = new Loudness(RATE);
 const pcm: number[] = [];
 
@@ -84,13 +75,20 @@ while (t < total) {
     car.step(DT, { throttle: pedal, brake, steer: 0, handbrake: 0 });
   t += FRAME;
 
-  const samples = engine.sim.takeAudio()[0]!;
+  const perCylinder = engine.sim.takeAudio();
+  const steps = perCylinder[0]!.length;
+  // The recorded impulse response takes one channel: the cylinders' pulses mixed (as
+  // engine-sim mixes them, without its delays and distance scaling).
+  const samples = new Float32Array(steps * channels);
+  if (channels === 1)
+    for (const c of perCylinder) c.forEach((v, i) => (samples[i] += v));
+  else perCylinder.forEach((c, k) => samples.set(c, k * steps));
   if (car.clutchEngagement > 0.5) {
     const s = car.engineThrottle;
     overrun = 1 - Math.sin((s * s * Math.PI) / 2);
   } else overrun *= Math.exp(-FRAME / 0.2);
   const block = audio.write(new Uint8Array(samples.buffer));
-  x.synth_write(synth, block.ptr, samples.length, 1);
+  x.synth_write(synth, block.ptr, steps, channels);
   audio.free(block);
   const n = x.synth_input_available(synth);
   const ptr = x.synth_render(synth, n);
