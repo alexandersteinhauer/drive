@@ -265,10 +265,13 @@ pub fn split_responses(
 ) -> (Vec<Vec<f32>>, Vec<Vec<f32>>) {
     let m = spec.ports.len();
     let injections: Vec<&str> = spec.ports.iter().chain(nodes).map(|p| p.as_str()).collect();
-    let all = responses(spec, band, mass_flow, &injections, &|s| {
+    // spec.gain is the output's level: on the second part only, the first (pressures in
+    // the exhaust, which drive the nonlinear stretch between) in pascals.
+    let unscaled = AcousticsSpec { gain: 1.0, ..spec.clone() };
+    let all = responses(&unscaled, band, mass_flow, &injections, &|s| {
         let mut out: Vec<C> = (0..m).map(|i| s.pressure(i, &nodes[port_node[i]])).collect();
         for (k, node) in nodes.iter().enumerate() {
-            out.push(s.listener(m + k) / s.pressure(m + k, node));
+            out.push((s.listener(m + k) / s.pressure(m + k, node)).scale(spec.gain));
         }
         out
     });
@@ -381,6 +384,7 @@ pub fn responses(
                 * p.damping
                 // Absorptive lining (a perforated pipe in packing): rising with frequency.
                 + p.absorption * omega / (2.0 * std::f64::consts::PI * 1000.0)
+                + p.loss
                 + friction(flow, p.diameter, &g);
             let k = C::new(omega / g.c, -alpha);
             let kl = k.scale(p.length);
@@ -545,6 +549,7 @@ mod tests {
             temperature: AMBIENT,
             damping: 1.0,
             absorption: 0.0,
+            loss: 0.0,
         }
     }
 

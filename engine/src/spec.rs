@@ -336,11 +336,12 @@ pub struct AcousticsSpec {
     /// Where the pulses turn nonlinear, for the voice (voice.rs) to steepen them there.
     #[serde(default)]
     pub nonlinear: Option<NonlinearSpec>,
-    /// Valves (a silencer's bypass) an ECU opens.
+    /// Valves (a silencer's bypass) an ECU opens. The voice blends the responses past
+    /// `nonlinear.nodes` by them, so they need those.
     #[serde(default)]
     pub valves: Option<ValvesSpec>,
     /// A turbocharger's wastegates, fully open: orifices around the turbines (to the
-    /// junctions of `nonlinear.nodes`), opened as the engine's wastegate is.
+    /// junctions of `nonlinear.nodes`, which they need), opened as the engine's wastegate is.
     #[serde(default)]
     pub wastegate: Vec<AcousticOrifice>,
 }
@@ -384,7 +385,8 @@ impl AcousticsSpec {
 
 /// Pipes in which the exhaust's pulses steepen as they travel, their crests outrunning
 /// their troughs: from each exhaust system's junction in `nodes` (exhaust order; the only
-/// way on from its cylinders), or from each port, along `length` of pipe at `temperature`.
+/// way on from its cylinders), or from each port, along `length` of pipe at `temperature`
+/// (0: not past the junctions, which then only split the responses, as for wastegates).
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct NonlinearSpec {
@@ -393,6 +395,19 @@ pub struct NonlinearSpec {
     #[serde(default)]
     pub nodes: Vec<String>,
     pub length: f64,
+    pub temperature: f64,
+    /// With `nodes`, each cylinder's own pipe too, ahead of them (a turbo engine's
+    /// primaries, where the pulses are largest).
+    #[serde(default)]
+    pub primaries: Option<PrimariesSpec>,
+}
+
+/// Each cylinder's pipe from its port, for its pulses to steepen in.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PrimariesSpec {
+    pub length: f64,
+    pub diameter: f64,
     pub temperature: f64,
 }
 
@@ -410,6 +425,10 @@ pub struct AcousticPipe {
     /// Absorption of a lining (a perforated pipe in packing), Np/m per kHz.
     #[serde(default)]
     pub absorption: f64,
+    /// Losses alike at every frequency (Np/m): large pulses' to their own flow at bends and
+    /// junctions, which linear acoustics leave out.
+    #[serde(default)]
+    pub loss: f64,
 }
 
 fn one() -> f64 {

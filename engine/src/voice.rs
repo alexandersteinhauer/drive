@@ -25,9 +25,10 @@
 //! exhaust's convolutions a block at a time):
 //!
 //! ```text
-//! valve flow q_i x this blowdown's strength ─> manifold ─> steepening ─> rest of exhaust ─> + tail jet noise
-//!   + valve jet noise ~ |q|^1.5                (per port)  (per bank)    (valves blended)    (from the flow out)
-//!                                                   └─> engine bay (shells, mass law)
+//! valve flow q_i x this blowdown's strength ─> steepening ─> manifold ─> [steepening] ─> rest of exhaust ─> + tail jet noise
+//!   + valve jet noise ~ |q|^1.5                (primaries)  (per port,   (per bank)      (valves blended)    (from the flow out)
+//!                                                           wastegates blended)
+//!                                                             └─> engine bay (shells, mass law)
 //! valve events ─> valve seating, injector ticks ─┐
 //! turbo state ─> whoosh, whine, blow-off ────────┴─> heard directly, as late as the exhaust's lead
 //! ```
@@ -218,6 +219,8 @@ struct Group {
     /// The valve jets' noise into it, before shaping.
     noise: f32,
     noise_filter: Biquad,
+    /// With the ports' steepening, the noise waits as long as their pulses do.
+    noise_delay: VecDeque<f32>,
 }
 
 /// Nonlinear propagation down a pipe (Burgers'): a wave's crest travels faster than its
@@ -225,12 +228,10 @@ struct Group {
 /// L a sample of pressure p arrives kappa p = L (gamma + 1)/2 p / (rho c^3) earlier. How
 /// large exhaust pulses (a tenth of a bar or more) gain the high harmonics no linear pipe
 /// makes, the more the larger (Selamet et al., SAE 880082; the brassiness of loud
-/// trombones: Msallam et al., Acustica 86, 2000). Solved as Pestorius's algorithm does
-/// (JASA 1973): the length in slices, each one warping the wave's time a little, and where
-/// a crest would overtake the trough ahead, a shock: the two merge, and the energy the
-/// steepening put into the jump is lost, as a real shock's is. So a wave saturates however
-/// loud: beyond a few shock-forming distances, a sawtooth whose amplitude no longer grows
-/// with the source's.
+/// trombones: Msallam et al., Acustica 86, 2000). Solved in slices of pipe, as Pestorius's
+/// algorithm does (JASA 1973), each one warping the wave's time a little and resolving its
+/// shocks by the equal-area rule (Slice). So a wave saturates however loud: beyond a few
+/// shock-forming distances, a sawtooth whose amplitude no longer grows with the source's.
 struct Steepener {
     slices: Vec<Slice>,
     /// Takes out the mean and the infrasound first: the back-pressure the mean flow keeps
@@ -238,46 +239,67 @@ struct Steepener {
     mean: [Biquad; 2],
 }
 
-/// One slice of Steepener's pipe, SLICE_DELAY samples late.
+/// One slice of Steepener's pipe, SLICE_DELAY samples late. Its input samples are points
+/// (arrival, value), arriving kappa p early; the wave is the line through them, folding back
+/// on itself where crests overtake troughs. Each output sample is that line's mean over its
+/// sample interval, the stretches running backwards counted negative: the equal-area rule
+/// (Whitham), which puts each shock where the fold's two lobes cancel, keeps the wave's
+/// mean, and takes the steepened excess away as a real shock does. A sample is out once no
+/// later input can reach it: arrivals are at least SLICE_DELAY - MAX_EARLY after their input.
 struct Slice {
-    /// Samples per pascal earlier, and the most (within the delay).
     kappa: f64,
-    /// The last input's arrival (samples) and value; inputs so far; the next output's time.
-    arrival: f64,
-    value: f32,
+    /// The last point; inputs so far.
+    last: (f64, f64),
     time: f64,
-    next: f64,
+    /// The areas of the samples not yet out, from `next` on.
+    next: i64,
+    bins: VecDeque<f64>,
     out: VecDeque<f32>,
 }
 
 /// Below this (Hz), a Steepener's input is taken out (4th-order Butterworth).
 const STEEPENER_HIGH_PASS: f64 = 20.0;
-/// Slices of a Steepener, and each one's delay (samples).
+/// Slices of a Steepener, each one's delay, and the most a sample may arrive early in one
+/// (samples): beyond, the slice can't keep time, and the wave is far past shock-forming.
 const SLICES: usize = 8;
-const SLICE_DELAY: f64 = 8.0;
+const SLICE_DELAY: f64 = 16.0;
+const MAX_EARLY: f64 = 14.0;
 
 impl Slice {
     fn push(&mut self, p: f32) {
-        let early = (self.kappa * p as f64).clamp(-(SLICE_DELAY - 1.0), SLICE_DELAY - 1.0);
-        let a = self.time + SLICE_DELAY - early;
-        if a <= self.arrival {
-            // Overtaking the sample ahead: a shock. They go on as one, at its arrival,
-            // with their mean.
-            self.value = 0.5 * (self.value + p);
-        } else {
-            while self.next <= a {
-                let f = ((self.next - self.arrival) / (a - self.arrival)) as f32;
-                self.out.push_back(self.value + (p - self.value) * f);
-                self.next += 1.0;
+        let v1 = p as f64;
+        let a1 = self.time + SLICE_DELAY - (self.kappa * v1).clamp(-MAX_EARLY, MAX_EARLY);
+        let (a0, v0) = self.last;
+        // The segment's area into each sample interval it crosses, signed by its direction.
+        let (lo, hi) = if a1 >= a0 { (a0, a1) } else { (a1, a0) };
+        if hi > lo {
+            let sign = if a1 >= a0 { 1.0 } else { -1.0 };
+            let at = |a: f64| v0 + (v1 - v0) * (a - a0) / (a1 - a0);
+            let mut x = lo;
+            while x < hi {
+                let n = x.floor();
+                let y = (n + 1.0).min(hi);
+                let area = sign * (y - x) * 0.5 * (at(x) + at(y));
+                let i = (n as i64 - self.next) as usize;
+                if self.bins.len() <= i {
+                    self.bins.resize(i + 1, 0.0);
+                }
+                self.bins[i] += area;
+                x = y;
             }
-            self.arrival = a;
-            self.value = p;
         }
+        self.last = (a1, v1);
         self.time += 1.0;
+        // Every later input arrives after `safe`, and every later segment starts at a1.
+        let done = (self.time + SLICE_DELAY - MAX_EARLY).min(a1).floor() as i64;
+        while self.next < done {
+            self.out.push_back(self.bins.pop_front().unwrap_or(0.0) as f32);
+            self.next += 1;
+        }
     }
 
     fn pop(&mut self) -> f32 {
-        self.out.pop_front().unwrap_or(self.value)
+        self.out.pop_front().unwrap_or(0.0)
     }
 }
 
@@ -288,10 +310,10 @@ impl Steepener {
         let kappa = length * (GAMMA_EXHAUST + 1.0) / 2.0 / (rho * c * c * c) * RATE;
         let slice = || Slice {
             kappa: kappa / SLICES as f64,
-            arrival: SLICE_DELAY - 1.0,
-            value: 0.0,
+            last: (SLICE_DELAY - 1.0, 0.0),
             time: 0.0,
-            next: 0.0,
+            next: 0,
+            bins: VecDeque::new(),
             out: VecDeque::new(),
         };
         Steepener {
@@ -321,12 +343,21 @@ impl Steepener {
     }
 }
 
-/// A cylinder's pulses steepening down its own pipe (without one junction to do it at):
-/// its flow as the pressure of the wave it launches there, rho c / A, and back.
+/// A cylinder's pulses steepening down its own pipe (its primary): its flow as the pressure
+/// of the wave it launches there, rho c / A, and back.
 struct Port {
     input: Vec<f32>,
     steepener: Steepener,
     impedance: f32,
+}
+
+impl Port {
+    /// A pipe of `length` and cross-section `area` at `temperature`.
+    fn new(length: f64, area: f64, temperature: f64) -> Self {
+        let t = temperature;
+        let impedance = crate::units::ATM / (R_EXHAUST * t) * (GAMMA_EXHAUST * R_EXHAUST * t).sqrt() / area;
+        Port { input: vec![0.0; BLOCK], steepener: Steepener::new(length, t), impedance: impedance as f32 }
+    }
 }
 
 /// Each exhaust system past the junction its pulses steepen from: the pressure there,
@@ -435,6 +466,7 @@ impl Voice {
             input: vec![0.0; BLOCK],
             noise: 0.0,
             noise_filter: Biquad::high_pass(500.0, 0.7),
+            noise_delay: VecDeque::new(),
         };
         let exhausts = spec.exhausts.len();
         let band = |length| crate::acoustics::Band {
@@ -456,15 +488,9 @@ impl Voice {
             Some(a) => {
                 let responses = match &a.nonlinear {
                     Some(nl) if nl.nodes.is_empty() => {
-                        let t = nl.temperature;
-                        let impedance = (crate::units::ATM / (R_EXHAUST * t) * (GAMMA_EXHAUST * R_EXHAUST * t).sqrt()) as f32;
                         for b in &spec.banks {
                             for _ in &b.cylinders {
-                                ports.push(Port {
-                                    input: vec![0.0; BLOCK],
-                                    steepener: Steepener::new(nl.length, t),
-                                    impedance: impedance / b.head.exhaust_runner_area as f32,
-                                });
+                                ports.push(Port::new(nl.length, b.head.exhaust_runner_area, nl.temperature));
                             }
                         }
                         one_set(discrete(crate::acoustics::impulse_responses_to(
@@ -477,6 +503,10 @@ impl Voice {
                         )))
                     }
                     Some(nl) => {
+                        if let Some(pr) = &nl.primaries {
+                            let area = PI * pr.diameter * pr.diameter / 4.0;
+                            ports = (0..port_exhaust.len()).map(|_| Port::new(pr.length, area, pr.temperature)).collect();
+                        }
                         let (manifolds, rest) = crate::acoustics::split_responses(
                             a,
                             &band(IMPULSE_LENGTH),
@@ -506,7 +536,7 @@ impl Voice {
                             };
                             splits.push(Split {
                                 input: vec![0.0; BLOCK],
-                                steepener: Some(Steepener::new(nl.length, nl.temperature)),
+                                steepener: (nl.length > 0.0).then(|| Steepener::new(nl.length, nl.temperature)),
                                 convolution: Partitioned::blending(&sets),
                                 last: 0.0,
                                 bay: 0.0,
@@ -563,7 +593,8 @@ impl Voice {
                 for (i, sets) in responses.iter().enumerate() {
                     let peak = sets.iter().flatten().fold(0.0f32, |m, x| m.max(x.abs()));
                     let same = distinct.iter().position(|&j| {
-                        responses[j].iter().flatten().zip(sets.iter().flatten()).all(|(a, b)| (a - b).abs() <= 1e-5 * peak)
+                        port_exhaust[j] == port_exhaust[i]
+                            && responses[j].iter().flatten().zip(sets.iter().flatten()).all(|(a, b)| (a - b).abs() <= 1e-5 * peak)
                     });
                     port_group.push(same.unwrap_or_else(|| {
                         distinct.push(i);
@@ -577,15 +608,9 @@ impl Voice {
             None => {
                 // The pulses steepen down each cylinder's primary pipe, the recorded
                 // responses (set_impulse_response) taking each exhaust's flow after.
-                let t = PRIMARY_TEMPERATURE;
-                let impedance = (crate::units::ATM / (R_EXHAUST * t) * (GAMMA_EXHAUST * R_EXHAUST * t).sqrt()) as f32;
                 for b in &spec.banks {
                     for c in &b.cylinders {
-                        ports.push(Port {
-                            input: vec![0.0; BLOCK],
-                            steepener: Steepener::new(c.primary_length, t),
-                            impedance: impedance / b.head.exhaust_runner_area as f32,
-                        });
+                        ports.push(Port::new(c.primary_length, b.head.exhaust_runner_area, PRIMARY_TEMPERATURE));
                     }
                 }
                 let groups = spec.exhausts.iter().map(|_| group(&[vec![1.0]])).collect();
@@ -601,11 +626,18 @@ impl Voice {
                 (groups, port_exhaust.clone(), true, LISTENER, spec.exhausts.len() as f64, 0.08)
             }
         };
+        let mut groups = groups;
+        if !ports.is_empty() {
+            for g in &mut groups {
+                g.noise_delay = std::iter::repeat_n(0.0, Steepener::delay()).collect();
+            }
+        }
         let group_exhaust: Vec<usize> = (0..groups.len())
             .map(|g| port_exhaust[port_group.iter().position(|&x| x == g).unwrap_or(0)])
             .collect();
         // The direct sources wait for the exhaust: its responses' leads and the steepening.
-        let steepening = if splits.iter().all(|s| s.steepener.is_none()) && ports.is_empty() { 0 } else { Steepener::delay() };
+        let stages = usize::from(splits.iter().any(|s| s.steepener.is_some())) + usize::from(!ports.is_empty());
+        let steepening = stages * Steepener::delay();
         let delay = match (&spec.audio.acoustics, splits.is_empty()) {
             (Some(_), true) => PRE_DELAY + steepening,
             (Some(_), false) => 2 * PRE_DELAY + steepening,
@@ -642,7 +674,7 @@ impl Voice {
             valve_ring: [Biquad::band_pass(2600.0, 6.0), Biquad::band_pass(5400.0, 8.0)],
             injector_ring: [Biquad::band_pass(7200.0, 10.0), Biquad::band_pass(11500.0, 10.0)],
             whoosh_filter: [Biquad::high_pass(3000.0, 0.6), Biquad::low_pass(12000.0, 0.6)],
-            blow_off_filter: [Biquad::band_pass(1800.0, 0.6), Biquad::high_pass(400.0, 0.7)],
+            blow_off_filter: [Biquad::band_pass(900.0, 0.7), Biquad::high_pass(250.0, 0.7)],
             whistle_phase: 0.0,
             flutter_phase: 0.0,
             tail_volume: 0.0,
@@ -784,7 +816,13 @@ impl Voice {
         }
         let port_noise = self.spec.port_noise as f32;
         for g in &mut self.groups {
-            g.input[k] += port_noise * g.noise_filter.f(g.noise);
+            let n = port_noise * g.noise_filter.f(g.noise);
+            g.input[k] += if self.ports.is_empty() {
+                n
+            } else {
+                g.noise_delay.push_back(n);
+                g.noise_delay.pop_front().unwrap_or(0.0)
+            };
             g.noise = 0.0;
         }
         let mut controls = [0.0f64; GLOBALS];
@@ -863,7 +901,6 @@ impl Voice {
                 .map_or((w.len() - 1) as f64, |i| (i - 1) as f64 + (opening - w[i - 1]) / (w[i] - w[i - 1]));
             (self.wastegate, x.max(0.0))
         };
-        self.wastegate = wastegate1;
         for (i, p) in self.ports.iter_mut().enumerate() {
             let z = p.impedance;
             p.input.iter_mut().for_each(|v| *v *= z);
@@ -874,7 +911,7 @@ impl Voice {
             }
         }
         for (i, g) in self.groups.iter_mut().enumerate() {
-            g.convolution.process_blended(&g.input, &mut self.tmp, wastegate0, wastegate1);
+            self.wastegate = g.convolution.process_blended(&g.input, &mut self.tmp, wastegate0, wastegate1);
             let target = match self.splits.get_mut(self.group_exhaust[i]) {
                 Some(s) => &mut s.input,
                 None => &mut self.exhaust,
@@ -930,7 +967,7 @@ impl Voice {
                     *w = d;
                 }
             }
-            s.convolution.process_blended(&warped, &mut s.input, valve0, valve1);
+            self.valve = s.convolution.process_blended(&warped, &mut s.input, valve0, valve1);
             for (e, &y) in self.exhaust.iter_mut().zip(&s.input) {
                 *e += y;
             }
@@ -956,13 +993,12 @@ impl Voice {
             let to_volume = 4.0 * PI * self.listener / RHO_AIR / RATE;
             let leak = 1.0 - 2.0 * PI * 10.0 / RATE;
             // p_rms^2 = W rho c / (4 pi r^2), W = K rho U^8 A / c^5 (Lighthill).
-            let jet = self.spec.tail_noise * LIGHTHILL * rho * area / C_AIR.powi(5) * RHO_AIR * C_AIR
-                / (4.0 * PI * self.listener * self.listener);
+            let jet = LIGHTHILL * rho * area / C_AIR.powi(5) * RHO_AIR * C_AIR / (4.0 * PI * self.listener * self.listener);
             for e in self.exhaust.iter_mut() {
                 self.tail_volume = self.tail_volume * leak + *e as f64 * to_volume;
                 let u = (u_mean + self.tail_volume / area).max(0.0);
                 let u2 = u * u;
-                let p = (jet * u2 * u2 * u2 * u2).sqrt() * band;
+                let p = self.spec.tail_noise * (jet * u2 * u2 * u2 * u2).sqrt() * band;
                 let w = self.noise.next() * UNIT_NOISE;
                 *e += (p as f32) * chain(&mut self.tail_filters, w);
             }
@@ -1037,6 +1073,38 @@ mod tests {
         assert!((b2 / b1 - expected).abs() < 0.2 * expected, "B2/B1 {} against {expected}", b2 / b1);
     }
 
+    /// A sine of `amplitude` (Pa) at `f` through 2.5 m of hot pipe: the output past the
+    /// start-up, and the steepener.
+    fn through(amplitude: f64, f: f64) -> (Vec<f32>, Steepener) {
+        let mut s = Steepener::new(2.5, 900.0);
+        let n = 44100;
+        let input: Vec<f32> = (0..n).map(|i| (amplitude * (2.0 * PI * f * i as f64 / RATE).sin()) as f32).collect();
+        let mut out = vec![0.0f32; n];
+        for (i, o) in input.chunks(BLOCK).zip(out.chunks_mut(BLOCK)) {
+            s.process(i, o);
+        }
+        (out[4410..4410 + 44100 / 2].to_vec(), s)
+    }
+
+    #[test]
+    fn shocks_keep_the_mean_and_saturate() {
+        let rms = |x: &[f32]| (x.iter().map(|&v| (v as f64).powi(2)).sum::<f64>() / x.len() as f64).sqrt();
+        let mean = |x: &[f32]| x.iter().map(|&v| v as f64).sum::<f64>() / x.len() as f64;
+        let mut last = 0.0;
+        for amplitude in [3e4, 1e5, 3e5, 1e6] {
+            let (out, _) = through(amplitude, 500.0);
+            // No mean made up (a fraction of a percent of the amplitude).
+            assert!(mean(&out).abs() < 0.005 * amplitude, "{amplitude} Pa: mean {}", mean(&out));
+            // Far past shock-forming, the louder the source the less of it gets through.
+            let r = rms(&out) / amplitude;
+            assert!(r <= 0.7072, "{amplitude} Pa: rms ratio {r}");
+            if amplitude >= 3e5 {
+                assert!(r < 0.8 * last, "{amplitude} Pa: rms ratio {r} against {last}");
+            }
+            last = r;
+        }
+    }
+
     #[test]
     fn shocks_take_energy_and_never_stall() {
         // Far beyond the shock-forming distance (a bar of pressure at 500 Hz), a pulse train
@@ -1059,7 +1127,7 @@ mod tests {
         };
         assert!(ac(&out[4410..]) < ac(&input[4410..]));
         for sl in &s.slices {
-            assert!(sl.out.len() < 2 * SLICE_DELAY as usize + 2, "queue {}", sl.out.len());
+            assert!(sl.out.len() + sl.bins.len() < 2 * SLICE_DELAY as usize + 2, "queue {} {}", sl.out.len(), sl.bins.len());
         }
     }
 

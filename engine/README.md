@@ -57,29 +57,35 @@ rest directly:
   goes quiet on a closed throttle (the opening wastegate changes the spectrum: Kabral et
   al., ETC 2017). Valves (`acoustics.valves`, a silencer's bypass) open with revs and
   load, crossfading between the responses with them shut and open.
-- Where the pulses turn nonlinear (`acoustics.nonlinear`: after a turbine, or down each
-  port's pipe without one), they steepen as they travel, crests outrunning troughs into
-  shocks (Burgers', solved as Pestorius's algorithm does: slices of pipe, merging what
-  overtakes into a shock, which takes its energy). Loud pulses gain the high harmonics no
-  linear pipe makes, and only loud ones (Selamet et al., SAE 880082), and saturate however
-  loud.
+- Where the pulses turn nonlinear (`acoustics.nonlinear`: a turbo engine's primaries, where
+  they are near a bar, or each port's pipe without a turbine), they steepen as they travel,
+  crests outrunning troughs into shocks (Burgers'). Each slice of pipe warps the wave's time
+  by its pressure and takes each sample as the mean of the folded wave over its interval,
+  counting the stretches running backwards negative: Whitham's equal-area rule, which puts
+  the shocks where the fold's lobes cancel, keeps the mean, and takes the steepened excess
+  away, so a wave saturates however loud. Loud pulses gain the high harmonics no linear pipe
+  makes, and only loud ones (Selamet et al., SAE 880082): an exhaust's rasp, and its
+  brightening with load.
 - Turbulence: the valve jets', carried through the acoustics, and the tailpipe jets'
   (Lighthill's U^8), pulsing with their flow, both near their physical estimates.
 - The engine bay (the manifolds' shells radiating the pressure inside, through the walls'
   mass law), valves seating and injectors ticking, and the turbocharger: compressor noise,
-  its blade-pass whine, the blow-off valve.
+  its blade-pass whine, the blow-off valve (the F154's recirculate: faint).
 
 Levels are pascals at the listener (the chase camera) over a full scale per car. The 488
 Pista's exhaust lengths, areas and losses that the published figures leave open were fitted
 to a dynamometer recording of the real car by what an exhaust's sound is made of: its
-harmonics (energy on the engine's half orders, crank-angle domain) and how much of each band
-they are. A fit to band levels alone filled the bands with noise: the recording's highs are
-partly the dynamometer cell's, and noise made the engine sound like air rushing in rather
-than an exhaust. At full throttle 3000-7500 rpm the real car is 75-90 % harmonics from 500 to
-1500 Hz, the voice 83-95 % (the synthesizer with computed acoustics 17-57 % after a fit to
-band levels); lifting off at 6000 rpm drops the level by ~12 dB, as the real car's 6-15
-(the synthesizer's rose by 16); firing to firing, the pulses' energy varies by 18 % (the
-real car's 15-16 %). The voice costs ~3 % of real time (the synthesizer ~6 %).
+harmonics (energy on the engine's half orders, crank-angle domain), how much of each band
+they are, and the band levels up to 5 kHz. A first fit to band levels alone filled the bands
+with noise (the recording's highs are partly the dynamometer cell's): the engine sounded like
+air rushing in rather than an exhaust. Now the highs are the exhaust's own harmonics, from
+its shocks; the primaries' losses to their large pulses are alike at every frequency (the
+wall losses' growth with frequency would take those harmonics away again). At full throttle
+3000-7500 rpm, 500-1500 Hz is 83-98 % harmonics (the real car 78-86 %; the synthesizer with
+computed acoustics fitted to band levels 17-57 %); lifting off at 6000 rpm drops the level
+by ~20 dB (the real car's recording 6-15, perhaps compressed; the synthesizer's rose by 16);
+firing to firing, the pulses' energy varies about as much as the real car's (15-18 %). The
+voice costs ~3 % of real time (the synthesizer ~6 %).
 
 ### Exhaust acoustics
 

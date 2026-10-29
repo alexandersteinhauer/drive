@@ -351,11 +351,12 @@ const ACOUSTICS: Acoustics = (() => {
         length: scroll(i) === "A" ? 0.41 : 0.4,
         diameter: 0.036,
         temperature: 1100,
+        damping: 4,
         // The pulses here are large (near a bar) and lose much of their energy to their
-        // own flow, at the bends and where the primaries meet: losses linear acoustics
-        // leave out, which would ring the primaries between the valve and the turbine
-        // (~700 Hz) as the real car's recordings don't. Fitted to them.
-        damping: 40,
+        // own flow, at the bends and where the primaries meet, alike at every frequency:
+        // losses linear acoustics leave out, which would ring the primaries between the
+        // valve and the turbine (~700 Hz) as the real car's recordings don't. Fitted to them.
+        loss: 4,
       })),
       ...banks.flatMap((b, k) => [
         {
@@ -372,7 +373,7 @@ const ACOUSTICS: Acoustics = (() => {
           length: 0.15,
           diameter: 0.11,
           temperature: 900,
-          damping: 30,
+          damping: 6,
         },
         {
           a: `${b} cat out`,
@@ -477,20 +478,22 @@ const ACOUSTICS: Acoustics = (() => {
         temperature: 1000,
       })),
     ),
-    // Past the turbines, the pulses steepen down the downpipes and on to the silencer.
+    // The pulses steepen into shocks in the primaries, where they are near a bar (past
+    // the turbines, far smaller, hardly).
     nonlinear: {
       nodes: banks.map((b) => `${b} turbine`),
-      length: 2.5,
+      length: 0,
       temperature: 900,
+      primaries: { length: 0.4, diameter: 0.036, temperature: 1100 },
     },
   };
 })();
 
 /**
- * The voice (engine/src/voice.rs). The flow noise near its physical estimates (fitted
- * with the acoustics above: at full throttle the real car is mostly harmonics up to
- * ~1.5 kHz, 75-90 % of the energy there, noise only above); the turbochargers' whoosh kept
- * low, as the Pista's compressors breathe through ducts in its flanks.
+ * The voice (engine/src/voice.rs). The flow noise near its physical estimates, fitted with
+ * the acoustics above (the exhaust's highs are its shocks' harmonics, not noise); the
+ * turbochargers' whoosh kept low, as the Pista's compressors breathe through ducts in its
+ * flanks.
  */
 const VOICE: VoiceSpec = {
   // Full throttle's peaks near the limiter a little below full scale.
@@ -499,14 +502,16 @@ const VOICE: VoiceSpec = {
   acousticFlow: 0.25,
   variation: 0.02,
   portNoise: 0.03,
-  tailNoise: 3,
+  tailNoise: 1,
   bay: 3e-5,
   valvetrain: 1,
   injectors: 3,
-  whoosh: 0.1,
+  whoosh: 0.01,
   whistle: 0.3,
   compressorBlades: 12,
-  blowOff: 0.5,
+  // The F154's bypass valves recirculate to the compressor inlet rather than vent: what is
+  // heard of a lift is the compressor's flutter through the intake ducts, faintly.
+  blowOff: 0.03,
   // engine-sim's recorded response (?exhaust=impulse) at about the computed level.
   impulseGain: 0.34,
 };

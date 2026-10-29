@@ -378,15 +378,22 @@ impl Partitioned {
     /// its start and `x1` at its end (0: the first, 1: the second, 1.5: half way to the
     /// third...): the outputs of the two neighbouring responses, crossfaded sample by
     /// sample. Changing a convolution's response under its history instead would click.
-    pub(crate) fn process_blended(&mut self, input: &[f32], output: &mut [f32], x0: f64, x1: f64) {
+    /// Returns where the blend got to: `x1`, or the boundary of the pair `x0` is in if `x1` is
+    /// beyond it (the next block should go on from there).
+    pub(crate) fn process_blended(&mut self, input: &[f32], output: &mut [f32], x0: f64, x1: f64) -> f64 {
         if self.sets.is_empty() {
-            return self.process(input, output);
+            self.process(input, output);
+            return x1;
         }
         let top = (self.sets.len() - 1) as f64;
         let (x0, x1) = (x0.clamp(0.0, top), x1.clamp(0.0, top));
         self.push(input);
-        let i = (x1.min(x0) as usize).min(self.sets.len() - 2);
-        let (f0, f1) = ((x0 - i as f64) as f32, (x1 - i as f64) as f32);
+        // Between the pair x0 is in (going down from a boundary, the one below it); a block
+        // that would cross into the next pair stops at their boundary (the next block goes
+        // on from there).
+        let i = if x1 >= x0 { x0.floor() } else { x0.ceil() - 1.0 }.clamp(0.0, top - 1.0) as usize;
+        let f0 = (x0 - i as f64) as f32;
+        let f1 = (x1 - i as f64).clamp(0.0, 1.0) as f32;
         let sets = std::mem::take(&mut self.sets);
         let mut b = std::mem::take(&mut self.blend_tmp);
         self.convolve(&sets[i].0, &sets[i].1, output);
@@ -400,6 +407,7 @@ impl Partitioned {
         self.blend_tmp = b;
         self.sets = sets;
         self.position = (self.position + 1) % self.x_re.len();
+        i as f64 + f1 as f64
     }
 
     /// Adds a block of input to the frequency-domain delay line.
@@ -473,7 +481,11 @@ impl HighPass {
         let mut v = x as f64;
         for (c, s) in &mut self.sections {
             // s: x[n-1], x[n-2], y[n-1], y[n-2]
-            let y = c[0] * v + c[1] * s[0] + c[2] * s[1] - c[3] * s[2] - c[4] * s[3];
+            let mut y = c[0] * v + c[1] * s[0] + c[2] * s[1] - c[3] * s[2] - c[4] * s[3];
+            // A decayed state would linger as subnormals (slow on some hardware).
+            if y.abs() < 1e-30 {
+                y = 0.0;
+            }
             *s = [v, s[0], y, s[2]];
             v = y;
         }
@@ -818,7 +830,9 @@ impl Synthesizer {
                 self.block_mix.iter_mut().for_each(|v| *v = 0.0);
                 for ch in &mut self.channels[..sound] {
                     match &mut ch.partitioned {
-                        Some(conv) => conv.process_blended(&ch.block_in, &mut self.block_tmp, x0, x1),
+                        Some(conv) => {
+                            self.flow_position = conv.process_blended(&ch.block_in, &mut self.block_tmp, x0, x1);
+                        }
                         None => self.block_tmp.copy_from_slice(&ch.block_in),
                     }
                     for (m, (&y, &x)) in self.block_mix.iter_mut().zip(self.block_tmp.iter().zip(&ch.block_in)) {

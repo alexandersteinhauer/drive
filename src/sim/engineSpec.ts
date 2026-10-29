@@ -226,6 +226,11 @@ export interface AcousticPipe {
   damping?: number;
   /** Absorption of a lining (a perforated pipe in packing), Np/m per kHz. */
   absorption?: number;
+  /**
+   * Losses alike at every frequency (Np/m): large pulses' to their own flow at bends and
+   * junctions, which linear acoustics leave out.
+   */
+  loss?: number;
 }
 
 /**
@@ -261,11 +266,17 @@ export interface Acoustics {
    * each exhaust system's junction in `nodes` (exhaust order; the only way on from its
    * cylinders), along `length` of pipe at `temperature`.
    */
-  nonlinear?: { nodes?: string[]; length: number; temperature: number };
+  nonlinear?: {
+    nodes?: string[];
+    length: number;
+    temperature: number;
+    /** With `nodes`, each cylinder's own pipe ahead of them too (a turbo's primaries). */
+    primaries?: { length: number; diameter: number; temperature: number };
+  };
   /**
    * Valves an ECU opens (a silencer's bypass): the elements opening them adds, and the
    * crank speeds (rad/s) or pedal positions they open between, whichever is further. The
-   * voice blends the responses closed and open.
+   * voice blends the responses past `nonlinear.nodes` closed and open (so needs those).
    */
   valves?: {
     pipes?: AcousticPipe[];
@@ -275,8 +286,8 @@ export interface Acoustics {
   };
   /**
    * A turbocharger's wastegates, fully open: orifices around the turbines (to the
-   * junctions of `nonlinear.nodes`). The voice blends the manifolds' responses by the
-   * engine's wastegate opening.
+   * junctions of `nonlinear.nodes`, which they need). The voice blends the manifolds'
+   * responses by the engine's wastegate opening.
    */
   wastegate?: AcousticOrifice[];
 }
