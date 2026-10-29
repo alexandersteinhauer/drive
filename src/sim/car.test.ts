@@ -1,7 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import { Vector3 } from "three";
 import { Car, FATAL_ENERGY, type CarInput } from "./car";
-import { bmwI4, sportsCoupe, type CarConfig } from "./config";
+import { bmwI4, vwBeetle, type CarConfig } from "./config";
+import { sportsCoupe } from "./testCars";
 import {
   FlatGround,
   type Obstacle,
@@ -427,6 +428,80 @@ describe("bmw i4 edrive40", () => {
   });
 });
 
+describe("vw beetle 1200", () => {
+  test("settles at rest without creeping", () => {
+    const car = makeCar(vwBeetle);
+    run(car, 4, () => idle);
+    const start = car.position.clone();
+    run(car, 4, () => idle);
+    expect(car.position.distanceTo(start)).toBeLessThan(0.01);
+    expect(Math.abs(car.position.y - vwBeetle.cgHeight)).toBeLessThan(0.03);
+  });
+
+  test("is about as slow as the real one", () => {
+    const car = makeCar(vwBeetle);
+    run(car, 2, () => idle);
+    const t80 = accelerateTo(car, 80);
+    run(car, 90, () => ({ ...idle, throttle: 1 }));
+    console.log(
+      `beetle 0-80: ${t80.toFixed(1)} s (Autocar: 18.0), top: ${kmh(car).toFixed(1)} km/h (VW: 115), gear ${car.gear}, ${car.rpm.toFixed(0)} rpm`,
+    );
+    expect(t80).toBeGreaterThan(16);
+    expect(t80).toBeLessThan(20);
+    expect(kmh(car)).toBeGreaterThan(110);
+    expect(kmh(car)).toBeLessThan(120);
+    expect(car.gear).toBe(4);
+  });
+
+  test("brakes and reverses", () => {
+    const car = makeCar(vwBeetle);
+    accelerateTo(car, 80);
+    const start = car.position.clone();
+    run(
+      car,
+      20,
+      () => ({ ...idle, brake: 1 }),
+      () => car.speed < 0.1,
+    );
+    const distance = car.position.distanceTo(start);
+    run(car, 4, () => ({ ...idle, brake: 1 }));
+    console.log(
+      `beetle 80-0: ${distance.toFixed(1)} m, reverse ${kmh(car).toFixed(1)} km/h`,
+    );
+    expect(distance).toBeGreaterThan(30);
+    expect(distance).toBeLessThan(42);
+    expect(car.gear).toBe(-1);
+    expect(car.speed).toBeLessThan(-3);
+  });
+
+  test("holds a corner and stays upright", () => {
+    const car = makeCar(vwBeetle);
+    accelerateTo(car, 60);
+    let sumA = 0;
+    let n = 0;
+    run(car, 12, (t) => {
+      const err = 60 - kmh(car);
+      if (t > 6) {
+        sumA += car.speed * car.angularVelocity.y;
+        n++;
+      }
+      return {
+        ...idle,
+        steer: 0.45,
+        throttle: clamp01(0.3 + err * 0.1),
+        brake: clamp01(-err * 0.05),
+      };
+    });
+    const g = Math.abs(sumA / n) / 9.81;
+    console.log(
+      `beetle corner: ${g.toFixed(2)} g at ${kmh(car).toFixed(0)} km/h, roll up.y=${upright(car).toFixed(3)}`,
+    );
+    expect(g).toBeGreaterThan(0.5);
+    expect(g).toBeLessThan(0.95);
+    expect(upright(car)).toBeGreaterThan(0.95);
+  });
+});
+
 function clamp01(v: number): number {
   return Math.min(1, Math.max(0, v));
 }
@@ -561,6 +636,7 @@ describe("resting suspension and reset", () => {
   for (const [name, cfg] of [
     ["coupe", sportsCoupe],
     ["i4", bmwI4],
+    ["beetle", vwBeetle],
   ] as const)
     test(`${name} starts in static equilibrium without a suspension hop`, () => {
       const car = makeCar(cfg);

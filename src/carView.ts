@@ -9,6 +9,7 @@ import {
   reflect,
   smoothstep,
   step,
+  texture,
   uniform,
   vec3,
 } from "three/tsl";
@@ -28,8 +29,19 @@ const REVERSE = 2.5;
 const HEADLIGHT = 600;
 const TAIL = 2;
 const BRAKE = 25;
+/** Glow of headlamps that are only lit at night (no daytime running lights). */
+const HEADLAMP = 6;
+/**
+ * Lamps of an older car, whose lenses are large and lit by a bulb behind them: tail lights
+ * only with the headlights, and brake lights kept below where tone mapping washes red out
+ * to pink.
+ */
+const OLD_TAIL = 0.2;
+const OLD_BRAKE = 2.2;
 const LAMP_WHITE = vec3(1, 0.97, 0.92);
 const LAMP_RED = vec3(1, 0.03, 0.01);
+/** A deeper red for the large incandescent tail lamps, which tone mapping lightens. */
+const TAIL_RED = vec3(1, 0.012, 0.004);
 
 /** Emission levels the lamp materials read, set every frame. */
 interface Lamps {
@@ -40,11 +52,15 @@ interface Lamps {
   /** Brake-only: the third brake light. */
   brake: UniformNode<"float", number>;
   reverse: UniformNode<"float", number>;
+  /** Headlamps without daytime running lights: off by day. */
+  head: UniformNode<"float", number>;
+  /** Tail and brake lamps in one, on with the headlights. */
+  rear: UniformNode<"float", number>;
 }
 
 const CORNERS = ["fl", "fr", "rl", "rr"] as const;
 /** Model parts that cast into the shadow map; the small ones (badges, lamps, rotors) don't. */
-const SHADOW_CASTERS = /^plain|Tires|White|Paint|_Windows$/;
+const SHADOW_CASTERS = /^plain|Tires|White|Paint|_Windows$|^Body|^Bumpers$/;
 const normal = new THREE.Vector3();
 const forward = new THREE.Vector3();
 const side = new THREE.Vector3();
@@ -89,28 +105,34 @@ function contactShadow(car: Car): THREE.Mesh {
   return mesh;
 }
 const loader = new GLTFLoader().setMeshoptDecoder(MeshoptDecoder);
+const files = new Map<string, Promise<ArrayBuffer>>();
 
-const box = (w: number, h: number, d: number, color: number, emissive = 0) => {
-  const mesh = new THREE.Mesh(
-    new THREE.BoxGeometry(w, h, d),
-    new THREE.MeshStandardMaterial({
-      color,
-      emissive,
-      flatShading: true,
-      roughness: 0.6,
-    }),
-  );
-  mesh.castShadow = true;
-  return mesh;
-};
+/** Downloads a model once; every view of it parses its own copy. */
+export function fetchModel(url: string): Promise<ArrayBuffer> {
+  let file = files.get(url);
+  if (!file) {
+    file = new THREE.FileLoader()
+      .setResponseType("arraybuffer")
+      .loadAsync(url, trackDownload(url)) as Promise<ArrayBuffer>;
+    files.set(url, file);
+  }
+  return file;
+}
 
-/** Low-poly car; all geometry is relative to the centre of mass. */
+/** A car's model, and where its headlamps are in it (axle-midpoint origin, on the ground). */
+export interface CarModel {
+  url: string;
+  envMap?: THREE.Texture;
+  headlights: { x: number; y: number; z: number };
+}
+
+/** A car model, moved with the physics body; all geometry is relative to the centre of mass. */
 export class CarView {
   /** Add this to the scene: the car plus its contact shadow on the ground. */
   readonly group = new THREE.Group();
   /** The car itself, moved with the physics body. */
   readonly root = new THREE.Group();
-  /** Resolves once the model (if any) has replaced the placeholder. */
+  /** Resolves once the model is loaded and in place. */
   readonly ready: Promise<void>;
   /**
    * A soft dark patch on the ground under the car. Shadow maps are too coarse for the
@@ -124,101 +146,50 @@ export class CarView {
     tail: uniform(TAIL),
     brake: uniform(0),
     reverse: uniform(0),
+    head: uniform(0),
+    rear: uniform(0),
   };
-  /** Boxes shown until (or instead of) a model. */
-  private readonly placeholder = new THREE.Group();
+  /** How far the headlights are on (0 by day .. 1 at night). */
+  private lightsOn = 0;
   /** Low beams, lit at dusk and night. No shadows, to stay cheap. */
   private readonly headlights: THREE.SpotLight[] = [];
 
   constructor(
     private readonly car: Car,
-    paint = 0xd2552d,
-    /** Optional GLB with nodes "body", "wheel_<fl|fr|rl|rr>_spin" and "wheel_<..>_caliper". */
-    model?: { url: string; envMap?: THREE.Texture },
+    /** A GLB with nodes "body", "wheel_<fl|fr|rl|rr>_spin" and "wheel_<..>_caliper". */
+    model: CarModel,
   ) {
-    this.root.add(this.placeholder);
     this.contact = contactShadow(car);
     this.group.add(this.root, this.contact);
     // Lamp positions in the model (axle-midpoint origin), moved to centre-of-mass coordinates.
     const mid = (car.cfg.front.z + car.cfg.rear.z) / 2;
-    for (const x of [-0.7, 0.7]) {
+    const lamp = model.headlights;
+    for (const x of [-lamp.x, lamp.x]) {
       const light = new THREE.SpotLight(0xfff4e6, 0, 140, Math.PI / 7, 0.6, 2);
-      light.position.set(x, 0.72 - car.cfg.cgHeight, -2.05 + mid);
+      light.position.set(x, lamp.y - car.cfg.cgHeight, lamp.z + mid);
       // Aimed slightly down, to meet the road about 40 m ahead.
       light.target.position.set(x * 2, -car.cfg.cgHeight, -40 + mid);
       this.root.add(light, light.target);
       this.headlights.push(light);
     }
-    // Proportions follow the collision box, so each car's placeholder matches its size.
-    const [, cy, cz] = car.cfg.body.center;
-    const [hx, hy, hz] = car.cfg.body.halfExtents;
-    const top = cy + hy;
-    const bottom = cy - hy;
-    const width = 2 * hx - 0.12; // let the wheels show past the body sides
-    const length = 2 * hz;
-    const beltline = bottom + (top - bottom) * 0.55;
-    const lower = box(width, beltline - bottom, length, paint);
-    lower.position.set(0, (bottom + beltline) / 2, cz);
-    const cabin = box(width * 0.84, top - beltline, length * 0.46, 0x2b2f36);
-    cabin.position.set(0, (beltline + top) / 2, cz + length * 0.06);
-    const nose = box(width * 0.92, 0.08, length * 0.26, paint);
-    nose.position.set(0, beltline + 0.04, cz - length * 0.33);
-    this.placeholder.add(lower, cabin, nose);
-    const front = cz - hz;
-    const rear = cz + hz;
-    for (const x of [-width * 0.38, width * 0.38]) {
-      const head = box(width * 0.2, 0.1, 0.05, 0xffffff, 0xfff2cc);
-      head.position.set(x, beltline - 0.12, front - 0.02);
-      const tail = box(width * 0.22, 0.08, 0.05, 0x550000, 0xaa0000);
-      tail.position.set(x, beltline - 0.06, rear + 0.02);
-      this.placeholder.add(head, tail);
-    }
-
-    const tireMat = new THREE.MeshStandardMaterial({
-      color: 0x1c1c1c,
-      roughness: 0.9,
-      flatShading: true,
-    });
-    const rimMat = new THREE.MeshStandardMaterial({
-      color: 0xb8bcc4,
-      metalness: 0.6,
-      roughness: 0.4,
-    });
     for (const w of car.wheels) {
       const steer = new THREE.Group();
       const spin = new THREE.Group();
-      const r = w.axle.wheelRadius;
-      const tire = new THREE.Mesh(
-        new THREE.CylinderGeometry(r, r, 0.24, 14),
-        tireMat,
-      );
-      tire.rotation.z = Math.PI / 2;
-      tire.castShadow = true;
-      const spoke = new THREE.Mesh(
-        new THREE.BoxGeometry(0.02, r * 1.5, 0.12),
-        rimMat,
-      );
-      spoke.position.x = (w.side * 0.24) / 2;
-      const spoke2 = spoke.clone();
-      spoke2.rotation.x = Math.PI / 2;
-      const parts = new THREE.Group();
-      parts.name = "placeholder";
-      parts.add(tire, spoke, spoke2);
-      spin.add(parts);
       steer.add(spin);
       steer.position.copy(w.mount);
       this.root.add(steer);
       this.wheels.push({ steer, spin });
     }
-    this.ready = model ? this.load(model.url, model.envMap) : Promise.resolve();
+    this.ready = this.load(model.url, model.envMap);
   }
 
   /**
-   * Swaps the placeholder for a model. Its origin is on the ground midway between the axles;
-   * wheel parts are centred on their wheel centres and scaled to the physics wheel radius.
+   * Puts the model in place. Its origin is on the ground midway between the axles; wheel
+   * parts are centred on their wheel centres and scaled to the physics wheel radius.
    */
   private async load(url: string, envMap?: THREE.Texture): Promise<void> {
-    const gltf = await loader.loadAsync(url, trackDownload(url));
+    const path = THREE.LoaderUtils.extractUrlBase(url);
+    const gltf = await loader.parseAsync(await fetchModel(url), path);
     const scene = gltf.scene;
     const info = scene.userData as {
       radius: number;
@@ -235,6 +206,7 @@ export class CarView {
       if (/_Windows$/.test(name)) mark(o, "carPos", (p) => p.toArray(), 3);
       if (/DarkRed$/.test(name))
         mark(o, "zone", (p) => (p.y > 1.15 ? 2 : p.y > 0.65 ? 1 : 0));
+      if (name === "Body") mark(o, "lamp", beetleLamp, 4);
       o.material = upgrade(o.material as THREE.Material, this.lamps, envMap);
       const m = o.material as THREE.MeshStandardMaterial;
       if ("envMapIntensity" in m && m.envMap) this.envMaterials.push(m);
@@ -245,12 +217,10 @@ export class CarView {
     body.add(scene.getObjectByName("body")!);
     body.position.set(0, -cfg.cgHeight, (cfg.front.z + cfg.rear.z) / 2);
     this.root.add(body);
-    this.root.remove(this.placeholder);
     CORNERS.forEach((corner, i) => {
       const wheel = this.wheels[i]!;
       const [x, y, z] = info.wheels[corner].center as [number, number, number];
       const scale = this.car.wheels[i]!.axle.wheelRadius / info.radius;
-      wheel.spin.remove(wheel.spin.getObjectByName("placeholder")!);
       for (const [part, parent] of [
         ["spin", wheel.spin],
         ["caliper", wheel.steer],
@@ -383,6 +353,8 @@ export class CarView {
     const on = THREE.MathUtils.smoothstep(darkness, 0.05, 0.35);
     for (const light of this.headlights) light.intensity = HEADLIGHT * on;
     this.lamps.front.value = DRL * (1 + 1.5 * on);
+    this.lamps.head.value = HEADLAMP * on;
+    this.lightsOn = on;
   }
 
   /** Strength of the sky light and reflections on the car's materials. */
@@ -397,6 +369,10 @@ export class CarView {
     const braking = c.brake > 0.05 ? 1 : 0;
     this.lamps.tail.value = TAIL + (BRAKE - TAIL) * braking;
     this.lamps.brake.value = 0.5 * BRAKE * braking;
+    this.lamps.rear.value = Math.max(
+      OLD_TAIL * this.lightsOn,
+      OLD_BRAKE * braking,
+    );
     this.lamps.reverse.value = c.gear < 0 ? REVERSE : 0;
     this.root.position.lerpVectors(c.prevPosition, c.position, alpha);
     this.root.quaternion.slerpQuaternions(
@@ -451,6 +427,62 @@ function mark(
   mesh.geometry.setAttribute(name, new THREE.BufferAttribute(out, size));
 }
 
+/**
+ * The Beetle's lamps are painted into its body texture: which part of the car (model
+ * coordinates) is a tail/brake lamp (x) or headlamp (y), and where in the tail lamp's oval
+ * (zw: -1..1 across its width and height). The texture then picks out the lens inside
+ * these boxes.
+ */
+function beetleLamp(p: THREE.Vector3): number[] {
+  const x = Math.abs(p.x);
+  const tail =
+    x > 0.42 && x < 0.68 && p.y > 0.55 && p.y < 0.82 && p.z > 1.58 ? 1 : 0;
+  const head =
+    x > 0.4 && x < 0.6 && p.y > 0.56 && p.y < 0.82 && p.z < -1.48 ? 1 : 0;
+  return [tail, head, (x - 0.555) / 0.055, (p.y - 0.675) / 0.085];
+}
+
+/**
+ * The Beetle's body with its lamps lit: the red tail lenses as tail and brake lights (one
+ * lamp does both), the dark headlamp lenses at night.
+ */
+function beetleBody(
+  material: THREE.MeshStandardMaterial,
+  lamps: Lamps,
+): THREE.Material {
+  const m = new THREE.MeshStandardNodeMaterial();
+  m.setValues({
+    name: material.name,
+    color: material.color,
+    map: material.map,
+    normalMap: material.normalMap,
+    normalScale: material.normalScale,
+    roughnessMap: material.roughnessMap,
+    metalnessMap: material.metalnessMap,
+    roughness: material.roughness,
+    metalness: material.metalness,
+    envMap: material.envMap,
+    envMapIntensity: material.envMapIntensity,
+    side: material.side,
+  });
+  const base = texture(material.map!).rgb;
+  const zone = attribute<"vec4">("lamp", "vec4");
+  // Linear colour: the tail lenses are a dull red (~0.15, 0.05, 0.05); the headlamp lenses
+  // dark to mid grey, against cream paint and chrome (~0.5 and up).
+  const red = smoothstep(0.03, 0.08, base.r.sub(base.g));
+  const dark = smoothstep(0.32, 0.18, base.dot(vec3(0.3, 0.6, 0.1)));
+  // The bulb lights the middle of the lens most, fading towards its rim; the lens's own
+  // texture shows through.
+  const bulb = mix(0.25, 1, smoothstep(1, 0, zone.zw.length()));
+  const lens = base.r.div(0.15).clamp(0.5, 1.5);
+  const tail = red.mul(step(0.5, zone.x)).mul(bulb).mul(lens);
+  m.emissiveNode = TAIL_RED.mul(lamps.rear)
+    .mul(tail)
+    .add(LAMP_WHITE.mul(lamps.head).mul(dark.mul(step(0.5, zone.y))));
+  material.dispose();
+  return m;
+}
+
 /** A copy of the geometry with float attributes (the model's are quantized) and an index. */
 function floatGeometry(src: THREE.BufferGeometry): THREE.BufferGeometry {
   const g = new THREE.BufferGeometry();
@@ -496,6 +528,8 @@ function upgrade(
 ): THREE.Material {
   if (!(material instanceof THREE.MeshStandardMaterial)) return material;
   if (envMap) material.envMap = envMap;
+  if (material.name === "Body" && material.map)
+    return beetleBody(material, lamps);
   // Daytime running lights at the front; the same material at the rear is the reversing lights.
   if (/DRLs$/.test(material.name))
     return lamp(

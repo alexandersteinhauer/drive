@@ -139,115 +139,6 @@ export interface CarConfig {
   };
 }
 
-const axle = {
-  halfTrack: 0.78,
-  restLength: 0.3,
-  bumpStop: 0.2,
-  wheelRadius: 0.32,
-  wheelInertia: 1.2,
-};
-
-/** A ~1250 kg, ~300 hp rear-wheel-drive coupe. */
-export const sportsCoupe: CarConfig = {
-  mass: 1250,
-  inertia: [2100, 2300, 520],
-  cgHeight: 0.5,
-  front: {
-    ...axle,
-    z: -1.25,
-    springRate: 34000,
-    bumpDamping: 2400,
-    reboundDamping: 3400,
-    antiRoll: 26000,
-    brakeTorque: 2200,
-    steered: true,
-    driven: false,
-  },
-  rear: {
-    ...axle,
-    z: 1.35,
-    springRate: 38000,
-    bumpDamping: 2400,
-    reboundDamping: 3400,
-    antiRoll: 12000,
-    brakeTorque: 1100,
-    steered: false,
-    driven: true,
-  },
-  tire: {
-    muX: 1.15,
-    muY: 1.1,
-    peakSlipX: 0.1,
-    peakSlipY: Math.tan((8 * Math.PI) / 180),
-    shapeC: 1.45,
-    shapeE: 0.2,
-    relaxX: 0.12,
-    relaxY: 0.35,
-    loadSensitivity: 0.1,
-    nominalLoad: 3000,
-    lowSpeedDampingX: 0.04,
-    lowSpeedDampingY: 0.1,
-    lowSpeedThreshold: 3,
-    rollingResistance: 0.012,
-  },
-  powertrain: {
-    type: "combustion",
-    engine: {
-      idleRpm: 900,
-      limiterRpm: 7400,
-      engageRpm: 1100,
-      launchRpm: 3000,
-      idleThrottle: 0.12,
-      clutchTorque: 600,
-      torqueCurve: [
-        [0, 150],
-        [1000, 200],
-        [2000, 280],
-        [3000, 330],
-        [4000, 360],
-        [5000, 370],
-        [6000, 350],
-        [7000, 310],
-        [8000, 260],
-      ],
-      inertia: 0.2,
-      frictionTorque: 15,
-      frictionPerRpm: 0.006,
-    },
-    gearbox: {
-      ratios: [3.6, 2.19, 1.54, 1.21, 1.0, 0.83],
-      reverse: 3.4,
-      final: 3.42,
-      efficiency: 0.92,
-      shiftUpRpm: 6900,
-      shiftDownRpm: 3000,
-      shiftUpRpmLight: 3200,
-      shiftDownRpmLight: 1400,
-      shiftTime: 0.18,
-    },
-  },
-  diff: { preload: 60, powerRamp: 0.35, coastRamp: 0.2 },
-  dragArea: 0.68,
-  airDensity: 1.2,
-  steering: { lock: (34 * Math.PI) / 180, ackermann: 0.8, limitAssist: true },
-  abs: true,
-  tcs: true,
-  esc: {
-    enabled: true,
-    understeerGradient: 0.0015,
-    deadband: 0.04,
-    deadbandRatio: 0.15,
-    yawLag: 0.15,
-    slipAngleLimit: (6 * Math.PI) / 180,
-    slipAngleGain: 1.5,
-    gain: 6000,
-    maxTorque: 2200,
-  },
-  handbrakeTorque: 2500,
-  body: { center: [0, 0.28, 0.05], halfExtents: [0.9, 0.62, 2.15] },
-};
-
-/** The same chassis as an electric car: heavier, lower centre of mass, one fixed gear. */
 /**
  * BMW i4 eDrive40 (G26, 2021-). Published by BMW (press kit technical data): 2125 kg (EU),
  * 45.1/54.9 % front/rear, 4783 x 1852 x 1448 mm, 2856 mm wheelbase, 1601/1630 mm track,
@@ -268,7 +159,6 @@ const i4Axle = {
 };
 
 export const bmwI4: CarConfig = {
-  ...sportsCoupe,
   mass: 2125,
   inertia: [4000, 4300, 850],
   cgHeight: 0.49,
@@ -297,11 +187,19 @@ export const bmwI4: CarConfig = {
     driven: true,
   },
   tire: {
-    ...sportsCoupe.tire,
     muX: 1.05,
     muY: 1.0,
-    nominalLoad: 5000,
+    peakSlipX: 0.1,
+    peakSlipY: Math.tan((8 * Math.PI) / 180),
+    shapeC: 1.45,
+    shapeE: 0.2,
+    relaxX: 0.12,
+    relaxY: 0.35,
     loadSensitivity: 0.12,
+    nominalLoad: 5000,
+    lowSpeedDampingX: 0.04,
+    lowSpeedDampingY: 0.1,
+    lowSpeedThreshold: 3,
     rollingResistance: 0.009,
   },
   powertrain: {
@@ -319,11 +217,159 @@ export const bmwI4: CarConfig = {
     regenTorque: 100,
     regenPower: 70000,
   },
+  diff: { preload: 60, powerRamp: 0.35, coastRamp: 0.2 },
   dragArea: 0.24 * 2.31,
+  airDensity: 1.2,
   // Centre-of-mass to front axle 1.568 m; the 12.5 m turning circle gives ~31 deg at the centre.
-  steering: { ...sportsCoupe.steering, lock: (31 * Math.PI) / 180 },
-  // Matches the measured understeer gradient of this setup, so ESC stays quiet in normal driving.
-  esc: { ...sportsCoupe.esc, understeerGradient: 0.0007 },
+  steering: { lock: (31 * Math.PI) / 180, ackermann: 0.8, limitAssist: true },
+  abs: true,
+  tcs: true,
+  esc: {
+    enabled: true,
+    // Matches the measured understeer gradient of this setup, so ESC stays quiet in normal driving.
+    understeerGradient: 0.0007,
+    deadband: 0.04,
+    deadbandRatio: 0.15,
+    yawLag: 0.15,
+    slipAngleLimit: (6 * Math.PI) / 180,
+    slipAngleGain: 1.5,
+    gain: 6000,
+    maxTorque: 2200,
+  },
+  handbrakeTorque: 2500,
   // 125 mm clearance up to the 1448 mm roof; ~0.85 m front and ~1.08 m rear overhang.
   body: { center: [0, 0.297, -0.027], halfExtents: [0.926, 0.662, 2.392] },
+};
+
+/**
+ * VW Beetle 1200 (Type 1, 1963). Published by VW (1963 brochure / owner's manual): 34 PS DIN
+ * (25 kW) at 3600 rpm, 82 Nm (8.4 mkp) at 2000 rpm, 1192 cc air-cooled flat four in the rear,
+ * all-synchromesh 4-speed 3.80/2.06/1.32/0.89, reverse 3.88, final drive 4.375, 5.60-15
+ * cross-ply tyres (~0.315 m rolling radius), 740 kg unladen, 4070 x 1540 x 1500 mm,
+ * 2400 mm wheelbase, 11 m turning circle, 115 km/h top speed. Autocar (1961, 34 bhp):
+ * 0-50 mph (80 km/h) 18.0 s, 0-60 mph 32.1 s, 72 mph (116 km/h) top speed.
+ *
+ * The model is ~5 % larger than the real car (scaled to its length, its wheels measure
+ * 0.376 m and the track 1.372 m); the axles and wheels follow the model so the wheels sit in
+ * its arches, and the final drive is raised by the same factor to keep the real road speed
+ * per engine rpm.
+ *
+ * Estimated (not published): ~58 % on the rear axle with a driver, centre of mass height,
+ * inertias, torsion bar/damper rates (soft, ~1.25/1.35 Hz), tyre grip, drum brake torques.
+ */
+const BEETLE_WHEELBASE = 2.423;
+const BEETLE_REAR_SHARE = 0.58;
+const BEETLE_RADIUS = 0.375;
+const beetleAxle = {
+  halfTrack: 1.372 / 2,
+  restLength: 0.34,
+  bumpStop: 0.26,
+  wheelRadius: BEETLE_RADIUS,
+  wheelInertia: 0.9,
+};
+
+export const vwBeetle: CarConfig = {
+  // 740 kg unladen plus fuel and a driver.
+  mass: 840,
+  inertia: [1150, 1300, 320],
+  cgHeight: 0.53,
+  front: {
+    ...beetleAxle,
+    z: -BEETLE_WHEELBASE * BEETLE_REAR_SHARE,
+    springRate: 11000,
+    bumpDamping: 850,
+    reboundDamping: 1200,
+    antiRoll: 9000,
+    brakeTorque: 900,
+    steered: true,
+    driven: false,
+  },
+  rear: {
+    ...beetleAxle,
+    z: BEETLE_WHEELBASE * (1 - BEETLE_REAR_SHARE),
+    springRate: 17500,
+    bumpDamping: 1250,
+    reboundDamping: 1750,
+    antiRoll: 2000,
+    brakeTorque: 600,
+    steered: false,
+    driven: true,
+  },
+  // Narrow cross-ply tyres: less grip, a wider and softer peak.
+  tire: {
+    muX: 0.82,
+    muY: 0.8,
+    peakSlipX: 0.12,
+    peakSlipY: Math.tan((10 * Math.PI) / 180),
+    shapeC: 1.4,
+    shapeE: 0.1,
+    relaxX: 0.15,
+    relaxY: 0.45,
+    loadSensitivity: 0.1,
+    nominalLoad: 2200,
+    lowSpeedDampingX: 0.04,
+    lowSpeedDampingY: 0.1,
+    lowSpeedThreshold: 3,
+    rollingResistance: 0.013,
+  },
+  powertrain: {
+    type: "combustion",
+    engine: {
+      idleRpm: 850,
+      limiterRpm: 4600,
+      engageRpm: 1000,
+      launchRpm: 1900,
+      idleThrottle: 0.1,
+      clutchTorque: 160,
+      torqueCurve: [
+        [0, 50],
+        [1000, 68],
+        [2000, 82],
+        [3000, 77],
+        [3600, 67],
+        [4000, 58],
+        [4600, 44],
+        [5000, 30],
+      ],
+      // Heavy flywheel.
+      inertia: 0.15,
+      frictionTorque: 6,
+      frictionPerRpm: 0.0025,
+    },
+    gearbox: {
+      ratios: [3.8, 2.06, 1.32, 0.89],
+      reverse: 3.88,
+      final: (4.375 * BEETLE_RADIUS) / 0.315,
+      efficiency: 0.88,
+      shiftUpRpm: 4200,
+      shiftDownRpm: 2000,
+      shiftUpRpmLight: 2600,
+      shiftDownRpmLight: 1200,
+      // No hurry: a long lever and a cable clutch.
+      shiftTime: 0.5,
+    },
+  },
+  // Swing axles with an open differential.
+  diff: { preload: 0, powerRamp: 0, coastRamp: 0 },
+  // Cd 0.48 x 1.8 m^2.
+  dragArea: 0.48 * 1.8,
+  airDensity: 1.2,
+  steering: { lock: (32 * Math.PI) / 180, ackermann: 0.8, limitAssist: true },
+  abs: true,
+  tcs: true,
+  esc: {
+    enabled: true,
+    // Matches the measured understeer gradient (close to neutral), as for the i4.
+    understeerGradient: 0.0005,
+    deadband: 0.04,
+    deadbandRatio: 0.15,
+    yawLag: 0.15,
+    slipAngleLimit: (6 * Math.PI) / 180,
+    slipAngleGain: 1.5,
+    gain: 3000,
+    maxTorque: 900,
+  },
+  handbrakeTorque: 1200,
+  // From the model: 0.27 m under the floor pan up to the 1.61 m roof, bumper to bumper.
+  body: { center: [0, 0.409, -0.068], halfExtents: [0.79, 0.669, 2.035] },
 };

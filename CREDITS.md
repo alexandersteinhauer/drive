@@ -17,6 +17,20 @@ resized and converted to WebP. Generated with `scripts/prepare-car.ts`.
 
 BMW and i4 are trademarks of BMW AG. This project is not affiliated with or endorsed by BMW.
 
+### vw-beetle.glb
+
+"1963 Volkswagen Beetle: Junkyard Herbie" by angemturc, licensed under CC BY 4.0
+(https://creativecommons.org/licenses/by/4.0/).
+Source: https://sketchfab.com/3d-models/1963-volkswagen-beetle-junkyard-herbie-e7d4acf212b4453e86caa55fcaa9718a
+
+Changes: scaled, reoriented and re-centred; wheels split per corner; the shared tyre, glass and
+underbody material split into an opaque and a transparent one; meshes merged and compressed;
+textures padded outside their UV islands, resized and converted to WebP. Generated with
+`scripts/prepare-car.ts`.
+
+Volkswagen and Beetle are trademarks of Volkswagen AG. This project is not affiliated with or
+endorsed by Volkswagen.
+
 ### nature.glb
 
 Trees and bushes generated with EZ-Tree by Daniel Greenheck, MIT licence

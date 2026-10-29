@@ -15,10 +15,10 @@ if (import.meta.env.DEV) {
 import { Atmosphere, skyGain, skySaturation } from "./atmosphere";
 import { crash, createCrashPipeline, createPipeline } from "./post";
 import { hdrRendererOptions, setUpHdr } from "./tonemap";
-import { CarView } from "./carView";
+import { CarView, fetchModel } from "./carView";
 import { Input } from "./input";
 import { Car, type EscMode } from "./sim/car";
-import { bmwI4, sportsCoupe } from "./sim/config";
+import { bmwI4, vwBeetle } from "./sim/config";
 import { RoadView } from "./roadView";
 import { TerrainView } from "./terrainView";
 import { Vegetation } from "./vegetation";
@@ -139,10 +139,18 @@ let carSun = 1;
 /** -1 left view, 0 behind, +1 right view (smoothed). */
 let camSide = 0;
 
-// C cycles through these.
+// C switches between these; the first is the one to start in.
 const models = [
-  { config: bmwI4, paint: 0x2f7fc4, model: "models/bmw-i4.glb" },
-  { config: sportsCoupe, paint: 0xd2552d, model: undefined },
+  {
+    config: bmwI4,
+    url: "models/bmw-i4.glb",
+    headlights: { x: 0.7, y: 0.72, z: -2.05 },
+  },
+  {
+    config: vwBeetle,
+    url: "models/vw-beetle.glb",
+    headlights: { x: 0.5, y: 0.78, z: -1.63 },
+  },
 ];
 let model = 0;
 // Driver assists, kept across car switches and reloads.
@@ -208,15 +216,13 @@ function placeOnRoad(i: number): void {
   car.reset(at, -h);
 }
 
-function makeView(index: number): CarView {
-  const { paint, model: url } = models[index]!;
-  return new CarView(
-    car,
-    paint,
-    url
-      ? { url: import.meta.env.BASE_URL + url, envMap: atmosphere.environment }
-      : undefined,
-  );
+function makeView(index: number, of = car): CarView {
+  const { url, headlights } = models[index]!;
+  return new CarView(of, {
+    url: import.meta.env.BASE_URL + url,
+    envMap: atmosphere.environment,
+    headlights,
+  });
 }
 
 function heading(): number {
@@ -224,15 +230,28 @@ function heading(): number {
   return Math.atan2(-fwd.x, -fwd.z);
 }
 
-function switchCar(): void {
-  model = (model + 1) % models.length;
-  const { config } = models[model]!;
-  const next = new Car(config, land);
+/** Set while the next car's model loads; the current one drives on meanwhile. */
+let switching = false;
+async function switchCar(): Promise<void> {
+  if (switching) return;
+  switching = true;
+  const index = (model + 1) % models.length;
+  const next = new Car(models[index]!.config, land);
+  const nextView = makeView(index, next);
+  try {
+    await nextView.ready;
+    // Its shaders too, so the first frame with it doesn't stall.
+    await renderer.compileAsync(nextView.group, camera, scene);
+  } finally {
+    switching = false;
+  }
+  model = index;
   applyAssists(next);
   next.reset(car.position, heading());
   scene.remove(view.group);
   car = next;
-  view = makeView(model);
+  view = nextView;
+  view.update(1);
   scene.add(view.group);
   if (import.meta.env.DEV) Object.assign(window, { car });
 }
@@ -339,7 +358,7 @@ function frame(now: number): void {
   if (crashTime >= WAIT_FROM && input.takeAny()) respawn();
   if (!crashed && input.take("KeyR"))
     placeOnRoad(land.road.nearestIndex(car.position.x, car.position.z));
-  if (!crashed && input.take("KeyC")) switchCar();
+  if (!crashed && input.take("KeyC")) void switchCar();
   if (input.take("KeyF")) stats.visible = !stats.visible;
   if (input.take("KeyM")) hud.minimap.visible = !hud.minimap.visible;
   // Hold [ / ] to turn time back / forward, two hours per second.
@@ -465,6 +484,9 @@ input.reset();
 last = performance.now();
 menu.enabled = true;
 loading.finish();
+// The other cars download in the background, ready for C.
+for (const { url } of models.slice(1))
+  void fetchModel(import.meta.env.BASE_URL + url);
 if (bench) {
   paused = true;
   stats.visible = false;
