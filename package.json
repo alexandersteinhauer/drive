@@ -17,8 +17,8 @@
     "prepare-car": "bun scripts/prepare-car.ts",
     "prepare-nature": "bun scripts/prepare-nature.ts",
     "bench": "bun scripts/bench.ts",
-    "build-engine-sim": "engine-sim/build.sh",
-    "render-engine": "bun engine-sim/render.ts"
+    "build-engine": "engine/build.sh",
+    "test-engine": "engine/reference/build.sh && cd engine && cargo test --release"
   },
   "dependencies": {
     "three": "^0.186.1"

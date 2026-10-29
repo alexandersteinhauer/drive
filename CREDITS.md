@@ -67,12 +67,13 @@ Terrain layers ship colour and normal maps only; roughness is set per layer in t
 
 ### engine-sim
 
-The engine sound is simulated by [engine-sim](https://github.com/ange-yaghi/engine-sim) by
-Ange Yaghi, with its script compiler [piranha](https://github.com/ange-yaghi/piranha) and
-[simple-2d-constraint-solver](https://github.com/ange-yaghi/simple-2d-constraint-solver) (all
-MIT), compiled to WebAssembly (`public/audio/engine-sim.wasm`, `src/audio/engine-sim.mjs`) by
-`engine-sim/build.sh`, with small changes in `engine-sim/engine-sim.patch`. The wasm embeds
-engine-sim's script library and exhaust impulse responses. Its licence:
+The combustion engine (its physics and its sound) is a Rust port, in `engine/`, of
+[engine-sim](https://github.com/ange-yaghi/engine-sim) by Ange Yaghi, including the parts of
+[simple-2d-constraint-solver](https://github.com/ange-yaghi/simple-2d-constraint-solver) it
+uses (both MIT). It is compiled to WebAssembly as `src/sim/engine.wasm`.
+`public/audio/impulse/` holds exhaust impulse responses from engine-sim's sound library, and
+`engine/reference/` builds the original (with its script compiler,
+[piranha](https://github.com/ange-yaghi/piranha), MIT) to check the port against. Its licence:
 
 ```
 Copyright 2022 AngeTheGreat (Ange Yaghi)

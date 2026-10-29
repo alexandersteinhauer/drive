@@ -28,6 +28,10 @@ import { CrashCard, Hud, type AssistMode } from "./hud";
 import { PauseMenu } from "./pauseMenu";
 import { Stats } from "./stats";
 import { EngineSound } from "./audio/engineSound";
+import { EngineFollower } from "./audio/engineFollower";
+import { EngineSim, loadEngineModule } from "./sim/engineSim";
+import type { EngineSpec } from "./sim/engineSpec";
+import { vw1200 } from "./sim/engines/vw1200";
 import { SunField } from "./sunField";
 import { WorldWorkers } from "./worldWorkers";
 import { LoadingScreen, filesLoaded } from "./loading";
@@ -145,7 +149,7 @@ const models: {
   config: CarConfig;
   url: string;
   headlights: { x: number; y: number; z: number };
-  engine?: string;
+  engine?: EngineSpec;
 }[] = [
   {
     config: bmwI4,
@@ -156,8 +160,8 @@ const models: {
     config: vwBeetle,
     url: "models/vw-beetle.glb",
     headlights: { x: 0.5, y: 0.78, z: -1.63 },
-    /** engine-sim script for its sound (engine-sim/engines/). */
-    engine: "beetle",
+    /** Its simulated engine, for its sound. */
+    engine: vw1200,
   },
 ];
 let model = 0;
@@ -240,29 +244,31 @@ function heading(): number {
 }
 
 /** The current car's engine sound, once loaded; null for a silent (electric) car. */
-let engineSound: EngineSound | null = null;
-const engineSounds = new Map<string, Promise<EngineSound | null>>();
+let engineSound: { sound: EngineSound; follower: EngineFollower } | null = null;
+const engineSounds = new Map<EngineSpec, Promise<EngineSound | null>>();
 function loadEngineSound(): void {
-  const engine = models[model]!.engine;
-  engineSound?.update(0, 0, 0);
+  const spec = models[model]!.engine;
+  engineSound?.sound.setVolume(0);
   engineSound = null;
-  if (!engine) return;
-  let sound = engineSounds.get(engine);
+  if (!spec) return;
+  let sound = engineSounds.get(spec);
   if (!sound) {
-    sound = EngineSound.create(engine).catch((e: unknown) => {
+    sound = EngineSound.create(spec).catch((e: unknown) => {
       console.warn("engine sound unavailable:", e);
       return null;
     });
-    engineSounds.set(engine, sound);
+    engineSounds.set(spec, sound);
   }
   const index = model;
-  void sound.then((s) => {
-    if (model === index) engineSound = s;
+  void Promise.all([sound, loadEngineModule()]).then(([s, module]) => {
+    if (model !== index || !s) return;
+    const sim = new EngineSim(module, spec);
+    engineSound = { sound: s, follower: new EngineFollower(sim, car.rpm) };
   });
 }
 // Browsers only start audio after the user interacts with the page.
 for (const type of ["keydown", "pointerdown"])
-  addEventListener(type, () => engineSound?.resume());
+  addEventListener(type, () => engineSound?.sound.resume());
 loadEngineSound();
 
 /** Set while the next car's model loads; the current one drives on meanwhile. */
@@ -385,7 +391,7 @@ function render(): void {
 
 function frame(now: number): void {
   if (menu.open) {
-    engineSound?.update(car.rpm, 0, 0);
+    engineSound?.sound.setVolume(0);
     return;
   }
   stats.begin();
@@ -426,12 +432,20 @@ function frame(now: number): void {
     }
   }
   updateCrash(crashedNow || paused ? 0 : dt);
-  engineSound?.update(
-    car.rpm,
-    car.engineThrottle,
-    crashTime >= 0 || paused ? 0 : 1,
-    !car.clutchOpen,
-  );
+  if (engineSound) {
+    const { sound, follower } = engineSound;
+    const stopped = crashTime >= 0 || paused;
+    sound.setVolume(stopped ? 0 : 1);
+    if (!stopped) {
+      const out = follower.advance(
+        dt,
+        car.rpm,
+        car.engineThrottle,
+        !car.clutchOpen,
+      );
+      sound.push(out.samples, out.overrun);
+    }
+  }
   view.update(crashTime >= 0 ? 1 : accumulator / DT);
 
   const pos = view.root.position;
