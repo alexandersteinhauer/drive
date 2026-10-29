@@ -13,7 +13,7 @@ if (import.meta.env.DEV) {
   }
 }
 import { Atmosphere, skyGain, skySaturation } from "./atmosphere";
-import { createPipeline } from "./post";
+import { crash, createCrashPipeline, createPipeline } from "./post";
 import { hdrRendererOptions, setUpHdr } from "./tonemap";
 import { CarView } from "./carView";
 import { Input } from "./input";
@@ -24,7 +24,7 @@ import { TerrainView } from "./terrainView";
 import { Vegetation } from "./vegetation";
 import { Grass } from "./grass";
 import { Landscape } from "./world/landscape";
-import { Hud, type AssistMode } from "./hud";
+import { CrashCard, Hud, type AssistMode } from "./hud";
 import { PauseMenu } from "./pauseMenu";
 import { Stats } from "./stats";
 import { SunField } from "./sunField";
@@ -40,6 +40,19 @@ const bench = new URL(location.href).searchParams.has("bench")
 bench?.instrument();
 
 const DT = 1 / 480;
+/**
+ * After a fatal crash: the picture turns to glowing red highlights at once, which darken
+ * and blur to black over CRASH_FADE (s). The black screen states what the crash did; after
+ * CRASH_HOLD it waits for any key, then the car is back on the road and the picture fades
+ * in over CRASH_RETURN.
+ */
+const CRASH_FADE = 2.5;
+/** How fast the crash's red flash dies away (s, to 1/e). */
+const CRASH_FLASH = 0.12;
+/** How wide the crash blur gets (a multiple of its kernel). */
+const CRASH_SPREAD = 4;
+const CRASH_HOLD = 1;
+const CRASH_RETURN = 0.6;
 /** How far ahead (along -Z) the road is generated beyond the car; must exceed the view radius. */
 const ROAD_AHEAD = 2600;
 
@@ -77,6 +90,7 @@ const atmosphere = new Atmosphere(renderer, scene, {
   farDistance: 2150,
 });
 let pipeline = createPipeline(renderer, scene, camera);
+const crashPipeline = createCrashPipeline(renderer, scene, camera);
 /** Dev hook: rebuild the post-processing chain without some stages. */
 function setPost(skip: Parameters<typeof createPipeline>[3]): void {
   pipeline = createPipeline(renderer, scene, camera, skip);
@@ -150,6 +164,7 @@ let view = makeView(0);
 scene.add(view.group);
 const input = new Input(window);
 const stats = new Stats(renderer);
+const crashCard = new CrashCard();
 const hud = new Hud(land.road, assists, (assist, mode) => {
   applyAssists(car);
   localStorage.setItem(assist, mode);
@@ -172,6 +187,7 @@ if (import.meta.env.DEV)
     },
     setPost,
     pause: (on: boolean) => (paused = on),
+    crashTime: () => crashTime,
     atmosphere,
     skySaturation,
     skyGain,
@@ -252,11 +268,65 @@ const menu = new PauseMenu(
     last = performance.now();
   },
   // Paused, no frames are drawn: redraw once to show a new setting.
-  () => pipeline.render(),
+  () => render(),
 );
 menu.enabled = false;
 let last = performance.now();
 let accumulator = 0;
+/** Seconds since a fatal crash froze the car, or -1 when driving. */
+let crashTime = -1;
+/** Seconds since the car was put back on the road after a crash (fading back in). */
+let returnTime = Infinity;
+
+/** Advances the crash sequence by `dt` and sets the screen effect for it. */
+function updateCrash(dt: number): void {
+  if (crashTime >= 0) {
+    // Once black, state what the crash was like.
+    if (crashTime < CRASH_FADE && crashTime + dt >= CRASH_FADE)
+      crashCard.show(car.impactSpeed);
+    // Then wait for a key, pressed after the hold (not one still meant for driving).
+    if (crashTime < WAIT_FROM && crashTime + dt >= WAIT_FROM) {
+      input.takeAny();
+      crashCard.prompt();
+    }
+    crashTime += dt;
+  } else if (returnTime < CRASH_RETURN) returnTime += dt;
+  if (crashTime >= 0) {
+    // Darkening eases out (quickly at first, then lingering); the blur sets in over the first second
+    // and keeps spreading; the glow dies down with the light.
+    const t = Math.min(1, crashTime / CRASH_FADE);
+    crash.light.value = (1 - t) ** 2;
+    // A blinding red flash at the impact, gone within a few tenths of a second.
+    crash.flash.value = Math.exp(-crashTime / CRASH_FLASH);
+    crash.glow.value = 1.5 * (1 - t) + crash.flash.value;
+    crash.blur.value = Math.min(1, t / 0.4);
+    crash.spread.value = CRASH_SPREAD * Math.sqrt(t);
+    crash.black.value = 1;
+  } else {
+    const t = Math.min(1, returnTime / CRASH_RETURN);
+    crash.black.value = 1 - t * t * (3 - 2 * t);
+  }
+}
+
+/** When the crash sequence starts waiting for a key (s). */
+const WAIT_FROM = CRASH_FADE + CRASH_HOLD;
+
+/** Ends the crash sequence: the car back on the road, the picture fading in. */
+function respawn(): void {
+  crashCard.hide();
+  crashTime = -1;
+  returnTime = 0;
+  placeOnRoad(land.road.nearestIndex(car.position.x, car.position.z));
+  hud.visible = true;
+  accumulator = 0;
+}
+
+/** Draws the frame: the crash look while crashed, else the normal picture. */
+function render(): void {
+  // Fully black, waiting for a key: the canvas keeps the last (black) frame.
+  if (crashTime > CRASH_FADE + 0.1) return;
+  (crashTime >= 0 ? crashPipeline : pipeline).render();
+}
 
 function frame(now: number): void {
   if (menu.open) return;
@@ -264,9 +334,12 @@ function frame(now: number): void {
   const dt = Math.min(0.1, Math.max(0, (now - last) / 1000));
   last = now;
   const controls = input.update(dt);
-  if (input.take("KeyR"))
+  const crashed = crashTime >= 0;
+  // After a crash, any key drives on (and does nothing else).
+  if (crashTime >= WAIT_FROM && input.takeAny()) respawn();
+  if (!crashed && input.take("KeyR"))
     placeOnRoad(land.road.nearestIndex(car.position.x, car.position.z));
-  if (input.take("KeyC")) switchCar();
+  if (!crashed && input.take("KeyC")) switchCar();
   if (input.take("KeyF")) stats.visible = !stats.visible;
   if (input.take("KeyM")) hud.minimap.visible = !hud.minimap.visible;
   // Hold [ / ] to turn time back / forward, two hours per second.
@@ -279,41 +352,54 @@ function frame(now: number): void {
   renderer.toneMappingExposure = EXPOSURE * atmosphere.exposure;
   view.setHeadlights(atmosphere.darkness);
   accumulator += dt;
-  if (paused) accumulator = 0;
+  // A fatal crash stops the physics at the step it happens in.
+  if (paused || crashTime >= 0) accumulator = 0;
+  let crashedNow = false;
   while (accumulator >= DT) {
     car.step(DT, controls);
     distance += Math.abs(car.speed) * DT;
     accumulator -= DT;
+    if (car.fatal) {
+      crashTime = 0;
+      hud.visible = false;
+      crashedNow = true;
+      accumulator = 0;
+      break;
+    }
   }
-  view.update(accumulator / DT);
+  updateCrash(crashedNow || paused ? 0 : dt);
+  view.update(crashTime >= 0 ? 1 : accumulator / DT);
 
-  // Chase camera: trails the car's heading with some lag. Holding Q/E swings it round to the left/right side.
   const pos = view.root.position;
-  fwd.set(0, 0, -1).applyQuaternion(view.root.quaternion).setY(0).normalize();
-  camDir.lerp(fwd, 1 - Math.exp(-4 * dt)).normalize();
-  const sideTarget =
-    (input.held("KeyE") ? 1 : 0) - (input.held("KeyQ") ? 1 : 0);
-  camSide += (sideTarget - camSide) * (1 - Math.exp(-8 * dt));
-  const angle = (camSide * Math.PI) / 2;
-  orbit.copy(camDir).negate().applyAxisAngle(UP, angle);
-  desired
-    .copy(pos)
-    .addScaledVector(orbit, 6.5)
-    .setY(pos.y + 2.2 - 0.8 * Math.abs(camSide));
-  // Smooth the offset from the car, not the world position, so the camera doesn't fall
-  // further behind the faster the car goes.
-  desired.sub(pos);
-  camOffset.lerp(desired, 1 - Math.exp(-10 * dt));
-  camera.position.copy(pos).add(camOffset);
-  // Keep the camera above the hills.
-  const floorY = land.height(camera.position.x, camera.position.z) + 0.8;
-  if (camera.position.y < floorY) camera.position.y = floorY;
-  camera.lookAt(
-    target
+  // Chase camera: trails the car's heading with some lag. Holding Q/E swings it round to the left/right side.
+  // Frozen with the car in a crash.
+  if (crashTime < 0) {
+    fwd.set(0, 0, -1).applyQuaternion(view.root.quaternion).setY(0).normalize();
+    camDir.lerp(fwd, 1 - Math.exp(-4 * dt)).normalize();
+    const sideTarget =
+      (input.held("KeyE") ? 1 : 0) - (input.held("KeyQ") ? 1 : 0);
+    camSide += (sideTarget - camSide) * (1 - Math.exp(-8 * dt));
+    const angle = (camSide * Math.PI) / 2;
+    orbit.copy(camDir).negate().applyAxisAngle(UP, angle);
+    desired
       .copy(pos)
-      .addScaledVector(camDir, 2 * Math.cos(angle))
-      .setY(pos.y + 0.6),
-  );
+      .addScaledVector(orbit, 6.5)
+      .setY(pos.y + 2.2 - 0.8 * Math.abs(camSide));
+    // Smooth the offset from the car, not the world position, so the camera doesn't fall
+    // further behind the faster the car goes.
+    desired.sub(pos);
+    camOffset.lerp(desired, 1 - Math.exp(-10 * dt));
+    camera.position.copy(pos).add(camOffset);
+    // Keep the camera above the hills.
+    const floorY = land.height(camera.position.x, camera.position.z) + 0.8;
+    if (camera.position.y < floorY) camera.position.y = floorY;
+    camera.lookAt(
+      target
+        .copy(pos)
+        .addScaledVector(camDir, 2 * Math.cos(angle))
+        .setY(pos.y + 0.6),
+    );
+  }
 
   land.road.ensure(-pos.z + ROAD_AHEAD);
   terrain.update(pos);
@@ -344,7 +430,7 @@ function frame(now: number): void {
     saveDistance();
   }
 
-  pipeline.render();
+  render();
   stats.end();
 }
 
@@ -354,7 +440,7 @@ addEventListener("resize", () => {
   renderer.setSize(innerWidth, innerHeight);
   menu.apply();
   // Paused, no frames are drawn: redraw the resized canvas once.
-  if (menu.open) pipeline.render();
+  if (menu.open) render();
 });
 
 // Build the surroundings up front (in the workers); after that they stream in a few
@@ -372,6 +458,8 @@ vegetation.flush(car.position);
 roadView.update(car.position);
 loading.enter("shaders");
 await renderer.compileAsync(scene, camera);
+// Build the crash look's shaders now, not at the moment of a crash.
+crashPipeline.render();
 // Keys pressed while loading shouldn't act now; time starts from the first frame.
 input.reset();
 last = performance.now();

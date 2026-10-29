@@ -1,8 +1,13 @@
 import { describe, expect, test } from "bun:test";
 import { Vector3 } from "three";
-import { Car, type CarInput } from "./car";
+import { Car, FATAL_ENERGY, type CarInput } from "./car";
 import { bmwI4, sportsCoupe, type CarConfig } from "./config";
-import { FlatGround, type RayHit } from "./ground";
+import {
+  FlatGround,
+  type Obstacle,
+  type Obstacles,
+  type RayHit,
+} from "./ground";
 
 const DT = 1 / 480;
 const idle: CarInput = { throttle: 0, brake: 0, steer: 0, handbrake: 0 };
@@ -634,4 +639,94 @@ describe("resting suspension and reset", () => {
           ).toBeLessThan(1e-4);
       }
     });
+});
+
+/** Flat ground with one tree trunk on it. */
+class TreeGround extends FlatGround implements Obstacles {
+  constructor(readonly tree: Obstacle) {
+    super();
+  }
+  obstaclesNear(x: number, z: number, range: number, out: Obstacle[]): number {
+    const t = this.tree;
+    if (Math.hypot(t.x - x, t.z - z) > range + t.radius) return 0;
+    out[0] = t;
+    return 1;
+  }
+}
+
+describe("obstacles", () => {
+  const trunk = (x: number): Obstacle => ({
+    x,
+    z: -12,
+    bottom: -1,
+    top: 6,
+    radius: 0.3,
+  });
+  /** Rolls the car at `speed` km/h into a trunk `offset` m to the side of its centreline. */
+  function crash(speed: number, offset = 0, throttle = 0) {
+    const car = new Car(structuredClone(bmwI4), new TreeGround(trunk(offset)));
+    car.reset(new Vector3(0, 0, 0), 0);
+    run(car, 0.5, () => idle);
+    const v = speed / 3.6;
+    car.velocity.set(0, 0, -v);
+    for (const w of car.wheels) w.omega = v / w.axle.wheelRadius;
+    let fatalAt = -1;
+    let t = 0;
+    run(
+      car,
+      4,
+      () => ({ ...idle, throttle }),
+      (time) => {
+        t = time;
+        if (car.fatal && fatalAt < 0) fatalAt = time;
+        return fatalAt >= 0;
+      },
+    );
+    return { car, fatalAt, t };
+  }
+
+  test("a slow hit stops the car at the trunk, survivably", () => {
+    const { car, fatalAt } = crash(30);
+    expect(fatalAt).toBe(-1);
+    expect(Math.abs(car.speed)).toBeLessThan(2);
+    // The bumper (about 2.4 m ahead of the centre of mass) stops short of the trunk's axis.
+    const front = car.position.z - 2.42;
+    expect(front).toBeGreaterThan(-12 + 0.3 - 0.4);
+    expect(upright(car)).toBeGreaterThan(0.95);
+    expect(car.impactEnergy).toBeGreaterThan(0);
+  });
+
+  test("a fast hit is fatal, at the moment of impact", () => {
+    const { car, fatalAt } = crash(80);
+    expect(fatalAt).toBeGreaterThan(0);
+    // Within a fraction of a second of the bumper reaching the trunk.
+    expect(fatalAt).toBeLessThan((12 - 2.7) / (80 / 3.6) + 0.15);
+    expect(car.impactEnergy).toBeGreaterThanOrEqual(
+      FATAL_ENERGY * car.cfg.mass,
+    );
+    // A pole impact's peak deceleration, as felt in the car (filtered).
+    expect(car.impactPeak / 9.81).toBeGreaterThan(30);
+    expect(car.impactPeak / 9.81).toBeLessThan(100);
+  });
+
+  test("the threshold lies between 55 and 75 km/h head-on", () => {
+    expect(crash(55).fatalAt).toBe(-1);
+    expect(crash(75).fatalAt).toBeGreaterThan(0);
+  });
+
+  test("pushing against a trunk at full throttle never adds up to a fatal impact", () => {
+    const { car } = crash(20, 0, 1);
+    const settled = car.impactEnergy;
+    run(car, 6, () => ({ ...idle, throttle: 1 }));
+    expect(car.fatal).toBe(false);
+    expect(car.impactEnergy).toBeLessThan(settled + 0.01 * car.cfg.mass);
+    expect(car.position.z - 2.42).toBeGreaterThan(-12 + 0.3 - 0.4);
+  });
+
+  test("passing beside a trunk does not touch it", () => {
+    const { car, fatalAt } = crash(80, 1.4);
+    expect(fatalAt).toBe(-1);
+    expect(car.impactEnergy).toBe(0);
+    expect(car.impactPeak).toBe(0);
+  });
 });

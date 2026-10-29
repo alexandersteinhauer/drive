@@ -1,5 +1,6 @@
 import type { Vector3 } from "three";
-import type { Ground, RayHit } from "../sim/ground";
+import type { Ground, Obstacle, Obstacles, RayHit } from "../sim/ground";
+import { ObstacleField } from "./obstacles";
 import { Simplex } from "./noise";
 import { defaultRoad, Road, type RoadConfig, type RoadHit } from "./road";
 
@@ -33,9 +34,11 @@ const sampleOut: LandSample = {
 };
 
 /** Rolling hills with an endless road cut into them. This is also the physics ground. */
-export class Landscape implements Ground {
+export class Landscape implements Ground, Obstacles {
   readonly road: Road;
   private readonly noise: Simplex;
+  /** Made on first use: the world workers never need it. */
+  private obstacles?: ObstacleField;
 
   constructor(
     readonly seed = 1,
@@ -95,6 +98,12 @@ export class Landscape implements Ground {
     const dx = this.height(x + e, z) - this.height(x - e, z);
     const dz = this.height(x, z + e) - this.height(x, z - e);
     return out.set(-dx, 2 * e, -dz).normalize();
+  }
+
+  /** Tree trunks and rocks the car can hit. */
+  obstaclesNear(x: number, z: number, range: number, out: Obstacle[]): number {
+    this.obstacles ??= new ObstacleField(this);
+    return this.obstacles.near(x, z, range, out);
   }
 
   raycast(

@@ -1,5 +1,7 @@
 import { describe, expect, test } from "bun:test";
+import type { Obstacle } from "../sim/ground";
 import { Landscape, Surface } from "./landscape";
+import { BUSHES, FIRST_ROCK, STRIDE, scatter } from "./plants";
 
 describe("road", () => {
   const land = new Landscape(1);
@@ -84,5 +86,45 @@ describe("road", () => {
     console.log(`sample: ${us.toFixed(2)} us`);
     expect(Number.isFinite(acc)).toBe(true);
     expect(us).toBeLessThan(5);
+  });
+});
+
+describe("obstacles", () => {
+  test("every tree and rock the scatter places has a hitbox, and none stands on the road", () => {
+    const land = new Landscape(3);
+    land.road.ensure(3000);
+    const size = 128;
+    const found: Obstacle[] = [];
+    let trees = 0;
+    let rocks = 0;
+    for (let tz = -6; tz < 2; tz++)
+      for (let tx = -2; tx < 2; tx++) {
+        const items = scatter(land, tx, tz, size, false);
+        for (let i = 0; i < items.length; i += STRIDE) {
+          const [x, , z, , , kind] = items.subarray(i, i + STRIDE);
+          const isRock = kind! >= FIRST_ROCK;
+          const isTree = kind! < BUSHES[0]!;
+          const n = land.obstaclesNear(x!, z!, 0, found);
+          // A rock's capsule is centred on its footprint, a little off its origin.
+          if (isRock) {
+            rocks++;
+            expect(n).toBeGreaterThan(0);
+          } else if (isTree) {
+            trees++;
+            const own = found
+              .slice(0, n)
+              .some((o) => Math.hypot(o.x - x!, o.z - z!) < 1e-3);
+            expect(own).toBe(true);
+          }
+        }
+      }
+    expect(trees).toBeGreaterThan(50);
+    expect(rocks).toBeGreaterThan(5);
+    // Nothing stands on the road.
+    const road = land.road;
+    for (let i = 0; i < road.finalCount; i += 5)
+      expect(
+        land.obstaclesNear(road.xs[i]!, road.zs[i]!, road.cfg.halfWidth, found),
+      ).toBe(0);
   });
 });

@@ -17,6 +17,9 @@ export class Input {
   };
   private readonly pressed = new Set<string>();
   private padResetHeld = false;
+  /** Whether any gamepad button was down last update, and if one went down since. */
+  private padAnyHeld = false;
+  private padPressed = false;
 
   constructor(target: Window) {
     target.addEventListener("keydown", (e) => {
@@ -36,6 +39,18 @@ export class Input {
   /** True while `code` is held. */
   held(code: string): boolean {
     return this.keys.has(code);
+  }
+
+  /**
+   * True if any key (except Escape, the menu's) or gamepad button was pressed since the
+   * last call; forgets every press either way.
+   */
+  takeAny(): boolean {
+    this.pressed.delete("Escape");
+    const any = this.pressed.size > 0 || this.padPressed;
+    this.pressed.clear();
+    this.padPressed = false;
+    return any;
   }
 
   /** True once per press of `code` since the last call. */
@@ -67,6 +82,9 @@ export class Input {
         ? 0
         : (Math.sign(axis) * (Math.abs(axis) - DEADZONE)) / (1 - DEADZONE);
     const button = (i: number) => pad.buttons[i]?.value ?? 0;
+    const anyHeld = pad.buttons.some((b) => b.pressed);
+    if (anyHeld && !this.padAnyHeld) this.padPressed = true;
+    this.padAnyHeld = anyHeld;
     const resetHeld = button(3) > 0.5;
     if (resetHeld && !this.padResetHeld) this.pressed.add("KeyR");
     this.padResetHeld = resetHeld;

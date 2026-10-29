@@ -1,9 +1,38 @@
 import { Quaternion, Vector3 } from "three";
 import type { AxleConfig, CarConfig, CombustionConfig } from "./config";
-import type { Ground, RayHit } from "./ground";
+import type { Ground, Obstacle, RayHit } from "./ground";
 import { TireCurve, TireState } from "./tire";
 
 const GRAVITY = 9.81;
+
+/**
+ * Energy (J per kg of car) the body may absorb in one impact before it is fatal: that of
+ * stopping dead from 65 km/h (18 m/s). The occupants go through the car's change of speed;
+ * hitting a tree or a rock with that much is about where a crash stops being survivable.
+ */
+export const FATAL_ENERGY = 0.5 * 18 ** 2;
+/**
+ * Obstacle contact: stiffness (N/m) and damping (N s/m) while closing; separating, only
+ * OBSTACLE_REBOUND of the stiffness above OBSTACLE_SPRINGBACK (m/s). Stiff and mostly
+ * plastic, like a crumple zone against a trunk.
+ */
+const OBSTACLE_STIFFNESS = 3e6;
+const OBSTACLE_CRUSH = 1.2e5;
+const OBSTACLE_REBOUND = 0.05;
+const OBSTACLE_SPRINGBACK = 0.3;
+const OBSTACLE_FRICTION = 0.5;
+/** Work is counted towards an impact only while the contact moves faster than this (m/s). */
+const IMPACT_SPEED = 1;
+/** An impact ends after this long (s) out of contact with any obstacle. */
+const IMPACT_GAP = 0.3;
+/**
+ * Time constant (s) of the low-pass filter on the body's acceleration, like the filters
+ * crash tests apply to accelerometers (CFC 60): what a person feels, not the contact's
+ * spikes.
+ */
+const OCCUPANT_FILTER = 0.01;
+/** Obstacles are looked up again once the car is this far (m) from the last lookup. */
+const OBSTACLE_REFRESH = 1;
 const RPM = 30 / Math.PI; // rad/s -> rpm
 
 export interface CarInput {
@@ -101,6 +130,11 @@ const qInv = new Quaternion();
 const wb = new Vector3();
 const lb = new Vector3();
 const tb = new Vector3();
+const segA = new Vector3();
+const segB = new Vector3();
+const onAxis = new Vector3();
+const onBox = new Vector3();
+const normal = new Vector3();
 
 export class Car {
   readonly position = new Vector3();
@@ -146,6 +180,22 @@ export class Car {
   private throttle = 0;
   /** Service brake pedal after reverse handling, 0..1 (for the brake lights). */
   brake = 0;
+  /** Energy (J) the body has absorbed from obstacles in the current impact. */
+  impactEnergy = 0;
+  /** Peak acceleration (m/s², filtered, gravity included) felt in the current impact. */
+  impactPeak = 0;
+  /** Speed (m/s) at the start of the current impact. */
+  impactSpeed = 0;
+  /** Filtered acceleration felt in the car (m/s²): 9.81 at rest. */
+  private readonly felt = new Vector3(0, GRAVITY, 0);
+  private readonly lastVelocity = new Vector3();
+  /** Obstacles near the car, from the last lookup, and how many. */
+  private readonly obstacles: Obstacle[] = [];
+  private obstacleCount = 0;
+  private readonly obstaclesAt = new Vector3(Infinity, 0, 0);
+  private sinceImpact = Infinity;
+  /** Horizontal reach of the body box from the centre of mass (m). */
+  private readonly bodyReach: number;
 
   constructor(
     readonly cfg: CarConfig,
@@ -184,7 +234,13 @@ export class Car {
           this.corners.push(
             new Vector3(cx + sx * hx, cy + sy * hy, cz + sz * hz),
           );
+    this.bodyReach = Math.max(...this.corners.map((c) => Math.hypot(c.x, c.z)));
     this.reset(new Vector3(0, 0, 0), 0);
+  }
+
+  /** True once an impact has absorbed a fatal amount of energy (see FATAL_ENERGY). */
+  get fatal(): boolean {
+    return this.impactEnergy >= FATAL_ENERGY * this.cfg.mass;
   }
 
   get rpm(): number {
@@ -215,6 +271,10 @@ export class Car {
     this.reflectedInertia = this.yawReference = 0;
     this.tcsFactor = this.escCut = this.regenScale = 1;
     this.escActive = false;
+    this.impactEnergy = this.impactPeak = this.impactSpeed = 0;
+    this.felt.set(0, GRAVITY, 0);
+    this.sinceImpact = Infinity;
+    this.obstaclesAt.set(Infinity, 0, 0);
     up.set(0, 1, 0).applyQuaternion(this.orientation);
     for (const w of this.wheels) {
       w.reset();
@@ -262,7 +322,10 @@ export class Car {
     );
 
     this.bodyCollision();
+    this.obstacleCollision(dt);
+    this.lastVelocity.copy(this.velocity);
     this.integrate(dt);
+    this.feel(dt);
     this.updateGearbox(dt);
   }
 
@@ -750,6 +813,120 @@ export class Car {
       f.addScaledVector(n, fn);
       this.applyForce(f, r);
     }
+  }
+
+  /**
+   * Penalty contacts between the body box and the obstacles (vertical capsules), and the
+   * energy they take out of the car over an impact: the work they do against it, which is
+   * all crush (a crumpled car keeps little of it to bounce back with).
+   */
+  private obstacleCollision(dt: number): void {
+    const ground = this.ground;
+    if (!ground.obstaclesNear) return;
+    const range = this.bodyReach + OBSTACLE_REFRESH;
+    if (
+      Math.hypot(
+        this.position.x - this.obstaclesAt.x,
+        this.position.z - this.obstaclesAt.z,
+      ) > OBSTACLE_REFRESH
+    ) {
+      this.obstaclesAt.copy(this.position);
+      this.obstacleCount = ground.obstaclesNear(
+        this.position.x,
+        this.position.z,
+        range,
+        this.obstacles,
+      );
+    }
+    this.sinceImpact += dt;
+    if (this.obstacleCount === 0) return;
+    const [cx, cy, cz] = this.cfg.body.center;
+    const [hx, hy, hz] = this.cfg.body.halfExtents;
+    qInv.copy(this.orientation).invert();
+    for (let i = 0; i < this.obstacleCount; i++) {
+      const o = this.obstacles[i]!;
+      // The capsule's axis in box space (centred on the box).
+      segA
+        .set(o.x, o.bottom, o.z)
+        .sub(this.position)
+        .applyQuaternion(qInv)
+        .sub(r.set(cx, cy, cz));
+      segB.set(o.x, o.top, o.z).sub(this.position).applyQuaternion(qInv).sub(r);
+      // Closest points of the axis and the box, by alternating projections (both convex),
+      // from level with the box's centre: against a side face that is where the trunk hits.
+      tb.subVectors(segB, segA);
+      const len2 = Math.max(tb.lengthSq(), 1e-9);
+      let t = clamp(-segA.dot(tb) / len2, 0, 1);
+      for (let k = 0; k < 4; k++) {
+        onAxis.copy(segA).addScaledVector(tb, t);
+        onBox.set(
+          clamp(onAxis.x, -hx, hx),
+          clamp(onAxis.y, -hy, hy),
+          clamp(onAxis.z, -hz, hz),
+        );
+        t = clamp(lb.subVectors(onBox, segA).dot(tb) / len2, 0, 1);
+      }
+      onAxis.copy(segA).addScaledVector(tb, t);
+      onBox.set(
+        clamp(onAxis.x, -hx, hx),
+        clamp(onAxis.y, -hy, hy),
+        clamp(onAxis.z, -hz, hz),
+      );
+      normal.subVectors(onBox, onAxis);
+      const d = normal.length();
+      if (d >= o.radius) continue;
+      let depth: number;
+      if (d > 1e-4) {
+        normal.divideScalar(d);
+        depth = o.radius - d;
+      } else {
+        // The axis is inside the box: out through the nearer side face.
+        const dx = hx - Math.abs(onAxis.x);
+        const dz = hz - Math.abs(onAxis.z);
+        if (dx < dz) normal.set(-Math.sign(onAxis.x) || 1, 0, 0);
+        else normal.set(0, 0, -Math.sign(onAxis.z) || 1);
+        depth = Math.min(dx, dz) + o.radius;
+      }
+      // Back to world space, as an arm from the centre of mass.
+      r.copy(onBox)
+        .add(lb.set(cx, cy, cz))
+        .applyQuaternion(this.orientation);
+      normal.applyQuaternion(this.orientation);
+      vc.crossVectors(this.angularVelocity, r).add(this.velocity);
+      const vn = vc.dot(normal);
+      // Crumpling: full stiffness (and damping) going in, but little of it pushing back out
+      // once the body springs away faster than OBSTACLE_SPRINGBACK m/s.
+      const fn =
+        vn < 0
+          ? OBSTACLE_STIFFNESS * depth - OBSTACLE_CRUSH * vn
+          : OBSTACLE_STIFFNESS *
+            depth *
+            (1 -
+              (1 - OBSTACLE_REBOUND) * smoothstep(0, OBSTACLE_SPRINGBACK, vn));
+      f.copy(vc).addScaledVector(normal, -vn);
+      const vt = f.length();
+      if (vt > 1e-6)
+        f.multiplyScalar(-Math.min(OBSTACLE_FRICTION * fn, 4000 * vt) / vt);
+      f.addScaledVector(normal, fn);
+      this.applyForce(f, r);
+      if (this.sinceImpact > IMPACT_GAP) {
+        this.impactEnergy = this.impactPeak = 0;
+        this.impactSpeed = this.velocity.length();
+      }
+      this.sinceImpact = 0;
+      // Pushing against an obstacle (or the contact's jitter) takes no toll on the body.
+      if (vc.lengthSq() > IMPACT_SPEED ** 2)
+        this.impactEnergy = Math.max(0, this.impactEnergy - f.dot(vc) * dt);
+    }
+  }
+
+  /** Updates the acceleration felt in the car, and its peak while in an impact. */
+  private feel(dt: number): void {
+    f.subVectors(this.velocity, this.lastVelocity).divideScalar(dt);
+    f.y += GRAVITY;
+    this.felt.lerp(f, dt / (OCCUPANT_FILTER + dt));
+    if (this.sinceImpact <= IMPACT_GAP)
+      this.impactPeak = Math.max(this.impactPeak, this.felt.length());
   }
 
   private applyForce(force: Vector3, arm: Vector3): void {

@@ -91,6 +91,11 @@ export class Hud {
     button.title = `${LABEL[assist]}: ${mode} (click to change)`;
   }
 
+  /** Shown or hidden (as during a crash). */
+  set visible(on: boolean) {
+    this.root.style.visibility = on ? "" : "hidden";
+  }
+
   /** `speed` in m/s. */
   setSpeed(speed: number): void {
     const kmh = Math.round(Math.abs(speed) * 3.6);
@@ -106,4 +111,51 @@ export class Hud {
     this.shownTenths = tenths;
     this.odometer.textContent = `${(tenths / 10).toFixed(1)} km`;
   }
+}
+
+/** Height of a storey (m), for the fall the crash compares to. */
+const STOREY = 3;
+
+/**
+ * Shown on the black screen after a fatal crash, putting the impact in terms a body knows:
+ * the fall that ends at the same speed.
+ */
+export class CrashCard {
+  private readonly root = document.createElement("div");
+
+  constructor() {
+    this.root.id = "crash";
+    document.body.append(this.root);
+  }
+
+  /** Shows the card for an impact at `speed` m/s. */
+  show(speed: number): void {
+    const fall = (speed * speed) / (2 * 9.81);
+    const floor = Math.round(fall / STOREY);
+    const at = `At ${Math.round(speed * 3.6)} km/h it's like falling`;
+    const like =
+      floor >= 1
+        ? `${at} from the ${ordinal(floor)} floor.`
+        : `${at} ${fall.toFixed(0)} m.`;
+    this.root.innerHTML = `<strong>You crashed</strong><span>${like}</span>`;
+    this.root.classList.add("shown");
+  }
+
+  /** Adds the prompt to drive again. */
+  prompt(): void {
+    const hint = document.createElement("em");
+    hint.textContent = "Press any key to drive again";
+    this.root.append(hint);
+  }
+
+  hide(): void {
+    this.root.classList.remove("shown");
+  }
+}
+
+/** 1st, 2nd, 3rd, 4th, ..., 11th, 12th, 13th, ..., 21st. */
+function ordinal(n: number): string {
+  const teen = n % 100 >= 11 && n % 100 <= 13;
+  const suffix = teen ? "th" : (["th", "st", "nd", "rd"][n % 10] ?? "th");
+  return `${n}${suffix}`;
 }

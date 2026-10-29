@@ -143,7 +143,6 @@ export function scatter(
   far: boolean,
 ): Float32Array {
   const out: number[] = [];
-  const edge = land.road.edge;
   const x0 = tx * size;
   const z0 = tz * size;
   const put = (
@@ -168,40 +167,66 @@ export function scatter(
     }
   if (far) return new Float32Array(out);
   // Rocks on a 24 m grid, more on slopes.
-  for (let j = 0; j < size / 24; j++)
-    for (let i = 0; i < size / 24; i++) {
-      const gx = Math.floor(x0 / 24) + i;
-      const gz = Math.floor(z0 / 24) + j;
-      const x = (gx + hash2(gx, gz, 21)) * 24;
-      const z = (gz + hash2(gx, gz, 22)) * 24;
-      const slope = 1 - land.normal(x, z, normal).y;
-      if (hash2(gx, gz, 23) > 0.22 + slope * 4) continue;
-      land.sample(x, z, sample);
-      if (sample.roadDistance < edge + 2) continue;
-      // A group of one big, partly buried rock and a few smaller ones around it.
-      const s = 0.6 + hash2(gx, gz, 24) ** 2 * 1.6;
-      const kind = FIRST_ROCK + Math.floor(hash2(gx, gz, 25) * 3);
-      put(x, sample.height - 0.35 * s, z, hash2(gx, gz, 26) * 6.283, s, kind);
-      const extra = Math.floor(hash2(gx, gz, 27) * 4);
-      for (let e = 0; e < extra; e++) {
-        const a = hash2(gx, gz, 30 + e) * 6.283;
-        const r = s * (1.6 + hash2(gx, gz, 40 + e) * 1.6);
-        const ex = x + Math.cos(a) * r;
-        const ez = z + Math.sin(a) * r;
-        const es = s * (0.25 + hash2(gx, gz, 50 + e) * 0.35);
-        land.sample(ex, ez, sample);
-        if (sample.roadDistance < edge + 2) continue;
-        put(
-          ex,
-          sample.height - 0.3 * es,
-          ez,
-          a * 3.1,
-          es,
-          FIRST_ROCK + ((kind + e) % 3),
-        );
-      }
-    }
+  for (let j = 0; j < size / ROCK_STEP; j++)
+    for (let i = 0; i < size / ROCK_STEP; i++)
+      rocksAt(
+        land,
+        Math.floor(x0 / ROCK_STEP) + i,
+        Math.floor(z0 / ROCK_STEP) + j,
+        put,
+      );
   return new Float32Array(out);
+}
+
+/** Spacing of the grid rock groups are placed on (m). */
+export const ROCK_STEP = 24;
+
+/**
+ * The rock group in grid cell (gx, gz), if any: one big, partly buried rock and a few
+ * smaller ones around it, each passed to `put` (x, y, z, yaw, scale, kind). The one place
+ * rocks are decided, so the meshes and the obstacles the car hits agree.
+ */
+export function rocksAt(
+  land: Landscape,
+  gx: number,
+  gz: number,
+  put: (
+    x: number,
+    y: number,
+    z: number,
+    yaw: number,
+    scale: number,
+    kind: number,
+  ) => void,
+): void {
+  const edge = land.road.edge;
+  const x = (gx + hash2(gx, gz, 21)) * ROCK_STEP;
+  const z = (gz + hash2(gx, gz, 22)) * ROCK_STEP;
+  const slope = 1 - land.normal(x, z, normal).y;
+  if (hash2(gx, gz, 23) > 0.22 + slope * 4) return;
+  land.sample(x, z, sample);
+  if (sample.roadDistance < edge + 2) return;
+  const s = 0.6 + hash2(gx, gz, 24) ** 2 * 1.6;
+  const kind = FIRST_ROCK + Math.floor(hash2(gx, gz, 25) * 3);
+  put(x, sample.height - 0.35 * s, z, hash2(gx, gz, 26) * 6.283, s, kind);
+  const extra = Math.floor(hash2(gx, gz, 27) * 4);
+  for (let e = 0; e < extra; e++) {
+    const a = hash2(gx, gz, 30 + e) * 6.283;
+    const r = s * (1.6 + hash2(gx, gz, 40 + e) * 1.6);
+    const ex = x + Math.cos(a) * r;
+    const ez = z + Math.sin(a) * r;
+    const es = s * (0.25 + hash2(gx, gz, 50 + e) * 0.35);
+    land.sample(ex, ez, sample);
+    if (sample.roadDistance < edge + 2) continue;
+    put(
+      ex,
+      sample.height - 0.3 * es,
+      ez,
+      a * 3.1,
+      es,
+      FIRST_ROCK + ((kind + e) % 3),
+    );
+  }
 }
 
 /** Forest density (0..1) at a point: the woods' extent. */
