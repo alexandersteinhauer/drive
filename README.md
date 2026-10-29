@@ -20,6 +20,10 @@ The engine simulation is Rust compiled to WebAssembly; the built `src/sim/engine
 checked in. To rebuild it: `rustup target add wasm32-unknown-unknown`, then
 `bun run build-engine`.
 
+## Inspiration
+
+Inspired by [slowroads.io](https://slowroads.io), which I've sunk far too many hours into.
+
 ## License
 
 [MIT](LICENSE). Third-party models and textures keep their own licences; see
