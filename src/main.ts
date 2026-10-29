@@ -241,6 +241,8 @@ function heading(): number {
 
 /** The current car's engine sound, once loaded; null for a silent (electric) car. */
 let engineSound: EngineSound | null = null;
+/** Whether the engine sounds outdoors (see audio/outdoors.ts). */
+let outdoors = true;
 /** How closed the throttle is with the engine driven by the car, for the sound (0..1). */
 let overrun = 0;
 const engineSounds = new Map<EngineSpec, Promise<EngineSound | null>>();
@@ -414,6 +416,10 @@ function frame(now: number): void {
   if (!crashed && input.take("KeyC")) void switchCar();
   if (input.take("KeyF")) stats.visible = !stats.visible;
   if (input.take("KeyM")) hud.minimap.visible = !hud.minimap.visible;
+  // O: the engine outdoors, or its direct sound alone (to compare).
+  if (input.take("KeyO")) outdoors = !outdoors;
+  if (engineSound && engineSound.outdoors.on !== outdoors)
+    engineSound.outdoors.on = outdoors;
   // Hold [ / ] to turn time back / forward, two hours per second.
   const timeStep =
     (input.held("BracketRight") ? 1 : 0) - (input.held("BracketLeft") ? 1 : 0);
