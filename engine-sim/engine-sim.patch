@@ -1,0 +1,315 @@
+diff --git a/include/constants.h b/include/constants.h
+index 8b39b44..0c81b9f 100644
+--- a/include/constants.h
++++ b/include/constants.h
+@@ -3,10 +3,10 @@
+ 
+ namespace constants {
+ 
+-    extern constexpr double pi = 3.14159265359;
+-    extern constexpr double R = 8.31446261815324;
+-    extern constexpr double root_2 = 1.41421356237309504880168872420969807856967187537694807317667973799;
+-    extern constexpr double e = 2.71828182845904523536028747135266249775724709369995;
++    inline constexpr double pi = 3.14159265359;
++    inline constexpr double R = 8.31446261815324;
++    inline constexpr double root_2 = 1.41421356237309504880168872420969807856967187537694807317667973799;
++    inline constexpr double e = 2.71828182845904523536028747135266249775724709369995;
+ 
+ } /* namespace Constants */
+ 
+diff --git a/include/gas_system.h b/include/gas_system.h
+index 29f674d..505ab17 100644
+--- a/include/gas_system.h
++++ b/include/gas_system.h
+@@ -10,9 +10,13 @@
+ class GasSystem {
+     public:
+         struct Mix {
+-            double p_fuel = 0.0;
+-            double p_inert = 1.0;
+-            double p_o2 = 0.0;
++            // A constructor rather than member initializers: clang rejects those in
++            // default arguments (`const Mix &mix = {}`) inside the enclosing class.
++            Mix() : p_fuel(0.0), p_inert(1.0), p_o2(0.0) {}
++
++            double p_fuel;
++            double p_inert;
++            double p_o2;
+         };
+ 
+         struct State {
+diff --git a/include/simulator.h b/include/simulator.h
+index 0517246..abae03f 100644
+--- a/include/simulator.h
++++ b/include/simulator.h
+@@ -36,6 +36,13 @@ public:
+     void releaseSimulation();
+ 
+     virtual void startFrame(double dt);
++
++    // Run exactly `steps` simulation steps, without the latency-driven frame pacing.
++    void startFrameSteps(int steps) {
++        m_currentIteration = 0;
++        m_steps = steps;
++        m_synthesizer.setInputSampleRate(m_simulationFrequency * m_simulationSpeed);
++    }
+     bool simulateStep();
+     virtual double getTotalExhaustFlow() const;
+     int readAudioOutput(int samples, int16_t *target);
+diff --git a/include/synthesizer.h b/include/synthesizer.h
+index ffbf4a2..cbe8871 100644
+--- a/include/synthesizer.h
++++ b/include/synthesizer.h
+@@ -78,6 +78,13 @@ class Synthesizer {
+         void audioRenderingThread();
+         void renderAudio();
+ 
++        // Single-threaded use (WebAssembly): render all buffered input into the output
++        // buffer without waiting on the rendering thread, report the output level, and
++        // drop the second of silence initialize() primes it with.
++        int renderPending();
++        int outputAvailable() const;
++        void clearOutput();
++
+         double getLatency() const;
+ 
+         int inputDelta(int s1, int s0) const;
+diff --git a/include/units.h b/include/units.h
+index 291e3ca..6b35182 100644
+--- a/include/units.h
++++ b/include/units.h
+@@ -5,93 +5,93 @@
+ 
+ namespace units {
+     // Force
+-    extern constexpr double N = 1.0;
++    inline constexpr double N = 1.0;
+ 
+-    extern constexpr double lbf = N * 4.44822;
++    inline constexpr double lbf = N * 4.44822;
+ 
+     // Mass
+-    extern constexpr double kg = 1.0;
+-    extern constexpr double g = kg / 1000.0;
++    inline constexpr double kg = 1.0;
++    inline constexpr double g = kg / 1000.0;
+ 
+-    extern constexpr double lb = 0.45359237 * kg;
++    inline constexpr double lb = 0.45359237 * kg;
+ 
+     // Distance
+-    extern constexpr double m = 1.0;
+-    extern constexpr double cm = m / 100.0;
+-    extern constexpr double mm = m / 1000.0;
+-    extern constexpr double km = m * 1000.0;
++    inline constexpr double m = 1.0;
++    inline constexpr double cm = m / 100.0;
++    inline constexpr double mm = m / 1000.0;
++    inline constexpr double km = m * 1000.0;
+ 
+-    extern constexpr double inch = cm * 2.54;
+-    extern constexpr double foot = inch * 12.0;
+-    extern constexpr double thou = inch / 1000.0;
+-    extern constexpr double mile = m * 1609.344;
++    inline constexpr double inch = cm * 2.54;
++    inline constexpr double foot = inch * 12.0;
++    inline constexpr double thou = inch / 1000.0;
++    inline constexpr double mile = m * 1609.344;
+ 
+     // Time
+-    extern constexpr double sec = 1.0;
+-    extern constexpr double minute = 60 * sec;
+-    extern constexpr double hour = 60 * minute;
++    inline constexpr double sec = 1.0;
++    inline constexpr double minute = 60 * sec;
++    inline constexpr double hour = 60 * minute;
+ 
+     // Torque
+-    extern constexpr double Nm = N * m;
+-    extern constexpr double ft_lb = foot * lbf;
++    inline constexpr double Nm = N * m;
++    inline constexpr double ft_lb = foot * lbf;
+ 
+     // Power
+-    extern constexpr double W = Nm / sec;
+-    extern constexpr double kW = W * 1000.0;
+-    extern constexpr double hp = 745.699872 * W;
++    inline constexpr double W = Nm / sec;
++    inline constexpr double kW = W * 1000.0;
++    inline constexpr double hp = 745.699872 * W;
+ 
+     // Volume
+-    extern constexpr double m3 = 1.0;
+-    extern constexpr double cc = cm * cm * cm;
+-    extern constexpr double mL = cc;
+-    extern constexpr double L = mL * 1000.0;
+-    extern constexpr double cubic_feet = foot * foot * foot;
+-    extern constexpr double cubic_inches = inch * inch * inch;
+-    extern constexpr double gal = 3.785411784 * L;
++    inline constexpr double m3 = 1.0;
++    inline constexpr double cc = cm * cm * cm;
++    inline constexpr double mL = cc;
++    inline constexpr double L = mL * 1000.0;
++    inline constexpr double cubic_feet = foot * foot * foot;
++    inline constexpr double cubic_inches = inch * inch * inch;
++    inline constexpr double gal = 3.785411784 * L;
+ 
+     // Molecular
+-    extern constexpr double mol = 1.0;
+-    extern constexpr double kmol = mol / 1000.0;
+-    extern constexpr double mmol = mol / 1000000.0;
+-    extern constexpr double lbmol = mol * 453.59237;
++    inline constexpr double mol = 1.0;
++    inline constexpr double kmol = mol / 1000.0;
++    inline constexpr double mmol = mol / 1000000.0;
++    inline constexpr double lbmol = mol * 453.59237;
+ 
+     // Flow-rate (moles)
+-    extern constexpr double mol_per_sec = mol / sec;
+-    extern constexpr double scfm = 0.002641 * lbmol / minute;
++    inline constexpr double mol_per_sec = mol / sec;
++    inline constexpr double scfm = 0.002641 * lbmol / minute;
+ 
+     // Area
+-    extern constexpr double m2 = 1.0;
+-    extern constexpr double cm2 = cm * cm;
++    inline constexpr double m2 = 1.0;
++    inline constexpr double cm2 = cm * cm;
+ 
+     // Pressure
+-    extern constexpr double Pa = 1.0;
+-    extern constexpr double kPa = Pa * 1000.0;
+-    extern constexpr double MPa = Pa * 1000000.0;
+-    extern constexpr double atm = 101.325 * kPa;
++    inline constexpr double Pa = 1.0;
++    inline constexpr double kPa = Pa * 1000.0;
++    inline constexpr double MPa = Pa * 1000000.0;
++    inline constexpr double atm = 101.325 * kPa;
+ 
+-    extern constexpr double mbar = Pa * 100.0;
+-    extern constexpr double bar = mbar * 1000.0;
++    inline constexpr double mbar = Pa * 100.0;
++    inline constexpr double bar = mbar * 1000.0;
+ 
+-    extern constexpr double psi = lbf / (inch * inch);
+-    extern constexpr double psig = psi;
+-    extern constexpr double inHg = Pa * 3386.3886666666713;
+-    extern constexpr double inH2O = inHg * 0.0734824;
++    inline constexpr double psi = lbf / (inch * inch);
++    inline constexpr double psig = psi;
++    inline constexpr double inHg = Pa * 3386.3886666666713;
++    inline constexpr double inH2O = inHg * 0.0734824;
+ 
+     // Temperature
+-    extern constexpr double K = 1.0;
+-    extern constexpr double K0 = 273.15;
+-    extern constexpr double C = K;
+-    extern constexpr double F = (5.0 / 9.0) * K;
+-    extern constexpr double F0 = -459.67;
++    inline constexpr double K = 1.0;
++    inline constexpr double K0 = 273.15;
++    inline constexpr double C = K;
++    inline constexpr double F = (5.0 / 9.0) * K;
++    inline constexpr double F0 = -459.67;
+ 
+     // Energy
+-    extern constexpr double J = 1.0;
+-    extern constexpr double kJ = J * 1000;
+-    extern constexpr double MJ = J * 1000000;
++    inline constexpr double J = 1.0;
++    inline constexpr double kJ = J * 1000;
++    inline constexpr double MJ = J * 1000000;
+ 
+     // Angles
+-    extern constexpr double rad = 1.0;
+-    extern constexpr double deg = rad * (constants::pi / 180);
++    inline constexpr double rad = 1.0;
++    inline constexpr double deg = rad * (constants::pi / 180);
+ 
+     // Conversions
+     inline constexpr double distance(double v, double unit) {
+diff --git a/scripting/include/object_reference_node.h b/scripting/include/object_reference_node.h
+index 800d912..7e71757 100644
+--- a/scripting/include/object_reference_node.h
++++ b/scripting/include/object_reference_node.h
+@@ -18,9 +18,9 @@ namespace es_script {
+             /* void */
+         }
+ 
+-        template <typename Type>
++        template <typename T_Override>
+         void overrideType() {
+-            m_output.overrideType(LookupChannelType<Type>());
++            m_output.overrideType(LookupChannelType<T_Override>());
+         }
+ 
+     protected:
+diff --git a/src/connecting_rod.cpp b/src/connecting_rod.cpp
+index 7474bcd..2a8102c 100644
+--- a/src/connecting_rod.cpp
++++ b/src/connecting_rod.cpp
+@@ -1,4 +1,4 @@
+-#include "..\include\connecting_rod.h"
++#include "../include/connecting_rod.h"
+ #include "../include/connecting_rod.h"
+ 
+ #include <cmath>
+diff --git a/src/engine.cpp b/src/engine.cpp
+index 15e326d..f19e3fd 100644
+--- a/src/engine.cpp
++++ b/src/engine.cpp
+@@ -1,4 +1,4 @@
+-#include "..\include\engine.h"
++#include "../include/engine.h"
+ #include "../include/engine.h"
+ 
+ #include "../include/constants.h"
+diff --git a/src/synthesizer.cpp b/src/synthesizer.cpp
+index 8cf6d74..2af323a 100644
+--- a/src/synthesizer.cpp
++++ b/src/synthesizer.cpp
+@@ -1,7 +1,6 @@
+ #include "../include/synthesizer.h"
+ 
+ #include "../include/utilities.h"
+-#include "../include/delta.h"
+ 
+ #include <cassert>
+ #include <cmath>
+@@ -344,3 +343,36 @@ void Synthesizer::setAudioParameters(const AudioParameters &params) {
+     std::lock_guard<std::mutex> lock(m_lock0);
+     m_audioParameters = params;
+ }
++
++int Synthesizer::renderPending() {
++    if (m_inputChannelCount == 0) return 0;
++    const int n = std::min(
++        std::max(0, m_audioBufferSize - (int)m_audioBuffer.size()),
++        std::min((int)m_inputChannels[0].data.size(), m_inputBufferSize));
++    if (n == 0) return 0;
++
++    m_levelingFilter.p_minLevel = m_audioParameters.levelerMinGain;
++    m_levelingFilter.p_maxLevel = m_audioParameters.levelerMaxGain;
++    for (int i = 0; i < m_inputChannelCount; ++i) {
++        m_inputChannels[i].data.read(n, m_inputChannels[i].transferBuffer);
++        m_inputChannels[i].data.removeBeginning(n);
++        m_filters[i].airNoiseLowPass.setCutoffFrequency(
++            static_cast<float>(m_audioParameters.airNoiseFrequencyCutoff), m_audioSampleRate);
++        m_filters[i].jitterFilter.setJitterScale(m_audioParameters.inputSampleNoise);
++    }
++
++    for (int i = 0; i < n; ++i) {
++        m_audioBuffer.write(renderAudio(i));
++    }
++
++    m_latency = m_inputChannels[0].data.size();
++    return n;
++}
++
++int Synthesizer::outputAvailable() const {
++    return (int)m_audioBuffer.size();
++}
++
++void Synthesizer::clearOutput() {
++    m_audioBuffer.removeBeginning(m_audioBuffer.size());
++}

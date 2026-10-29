@@ -1,0 +1,375 @@
+// VW Beetle 1200 (Type 1, 1961-65): 1192 cc air-cooled flat four, 34 PS DIN at 3600 rpm.
+//
+// Published: 77 mm bore, 64 mm stroke, 7.0:1 compression, single central camshaft with
+// pushrods and two valves per cylinder, firing order 1-4-3-2, one Solex 28 PICT carburettor
+// on a long central manifold, heat exchangers into a single transverse muffler.
+// Estimated: masses and inertias, port flow, cam lobe shapes, timing curve, pipe lengths.
+//
+// Structured after engine-sim's Subaru EJ25 (equal-length headers) example, also a flat four.
+
+import "engine_sim.mr"
+
+units units()
+constants constants()
+impulse_response_library ir_lib()
+label cycle(2 * 360 * units.deg)
+
+private node turbulence_to_flame_speed_ratio {
+    alias output __out:
+        function(5.0)
+            .add_sample(0.0, 1.0 * 3.0)
+            .add_sample(5.0, 1.0 * 1.5 * 5.0)
+            .add_sample(10.0, 1.0 * 1.5 * 10.0)
+            .add_sample(15.0, 1.1 * 1.5 * 15.0)
+            .add_sample(20.0, 1.25 * 1.5 * 20.0)
+            .add_sample(25.0, 1.25 * 1.5 * 25.0)
+            .add_sample(30.0, 1.25 * 1.5 * 30.0)
+            .add_sample(35.0, 1.25 * 1.5 * 35.0)
+            .add_sample(40.0, 1.25 * 1.5 * 40.0)
+            .add_sample(45.0, 1.25 * 1.5 * 45.0);
+}
+
+private node wires {
+    output wire1: ignition_wire();
+    output wire2: ignition_wire();
+    output wire3: ignition_wire();
+    output wire4: ignition_wire();
+}
+
+private node type1_head {
+    input intake_camshaft;
+    input exhaust_camshaft;
+    // 7.0:1 on 298 cc per cylinder.
+    input chamber_volume: 50 * units.cc;
+    input intake_runner_volume: 45.0 * units.cc;
+    input intake_runner_cross_section_area: 5.3 * units.cm2;
+    input exhaust_runner_volume: 35.0 * units.cc;
+    input exhaust_runner_cross_section_area: 5.5 * units.cm2;
+
+    input flip_display: false;
+    alias output __out: head;
+
+    // Small valves (about 30 mm), cfm at 28 inH2O.
+    function intake_flow(50 * units.thou)
+    intake_flow
+        .add_flow_sample(0, 0)
+        .add_flow_sample(50, 26)
+        .add_flow_sample(100, 46)
+        .add_flow_sample(150, 62)
+        .add_flow_sample(200, 72)
+        .add_flow_sample(250, 78)
+        .add_flow_sample(300, 80)
+        .add_flow_sample(350, 81)
+
+    function exhaust_flow(50 * units.thou)
+    exhaust_flow
+        .add_flow_sample(0, 0)
+        .add_flow_sample(50, 22)
+        .add_flow_sample(100, 38)
+        .add_flow_sample(150, 51)
+        .add_flow_sample(200, 60)
+        .add_flow_sample(250, 63)
+        .add_flow_sample(300, 66)
+        .add_flow_sample(350, 67)
+
+    generic_cylinder_head head(
+        chamber_volume: chamber_volume,
+        intake_runner_volume: intake_runner_volume,
+        intake_runner_cross_section_area: intake_runner_cross_section_area,
+        exhaust_runner_volume: exhaust_runner_volume,
+        exhaust_runner_cross_section_area: exhaust_runner_cross_section_area,
+
+        intake_port_flow: intake_flow,
+        exhaust_port_flow: exhaust_flow,
+        valvetrain: standard_valvetrain(
+            intake_camshaft: intake_camshaft,
+            exhaust_camshaft: exhaust_camshaft
+        ),
+        flip_display: flip_display
+    )
+}
+
+// One physical camshaft; split per bank the way engine-sim lays out a flat four.
+private node type1_camshaft {
+    input intake_lobe_profile;
+    input exhaust_lobe_profile;
+    input intake_lobe_center;
+    input exhaust_lobe_center;
+    input base_radius;
+
+    output intake_cam_0: _intake_cam_0;
+    output exhaust_cam_0: _exhaust_cam_0;
+    output intake_cam_1: _intake_cam_1;
+    output exhaust_cam_1: _exhaust_cam_1;
+
+    camshaft_parameters params(advance: 0 * units.deg, base_radius: base_radius)
+
+    camshaft _intake_cam_0(params, lobe_profile: intake_lobe_profile)
+    camshaft _exhaust_cam_0(params, lobe_profile: exhaust_lobe_profile)
+    camshaft _intake_cam_1(params, lobe_profile: intake_lobe_profile)
+    camshaft _exhaust_cam_1(params, lobe_profile: exhaust_lobe_profile)
+
+    label rot360(360 * units.deg)
+
+    _exhaust_cam_0
+        .add_lobe(rot360 - exhaust_lobe_center + (0.0 / 4) * cycle)
+        .add_lobe(rot360 - exhaust_lobe_center + (1.0 / 4) * cycle)
+    _intake_cam_0
+        .add_lobe(rot360 + intake_lobe_center + (0.0 / 4) * cycle)
+        .add_lobe(rot360 + intake_lobe_center + (1.0 / 4) * cycle)
+
+    _exhaust_cam_1
+        .add_lobe(rot360 - exhaust_lobe_center + (2.0 / 4) * cycle)
+        .add_lobe(rot360 - exhaust_lobe_center + (3.0 / 4) * cycle)
+    _intake_cam_1
+        .add_lobe(rot360 + intake_lobe_center + (2.0 / 4) * cycle)
+        .add_lobe(rot360 + intake_lobe_center + (3.0 / 4) * cycle)
+}
+
+public node vw_type1_1200 {
+    alias output __out: engine;
+
+    engine engine(
+        name: "VW 1200 (Type 1)",
+        starter_torque: 40 * units.lb_ft,
+        starter_speed: 300 * units.rpm,
+        redline: 4600 * units.rpm,
+        fuel: fuel(
+            max_burning_efficiency: 0.9,
+            turbulence_to_flame_speed_ratio: turbulence_to_flame_speed_ratio()
+        ),
+        throttle_gamma: 2.0,
+        hf_gain: 0.01,
+        noise: 1.0,
+        jitter: 0.6,
+        simulation_frequency: 10000
+    )
+
+    wires wires()
+
+    label stroke(64 * units.mm)
+    label bore(77 * units.mm)
+    label rod_length(137 * units.mm)
+    label rod_mass(600 * units.g)
+    label compression_height(36 * units.mm)
+    label crank_mass(7.5 * units.kg)
+    label flywheel_mass(7.7 * units.kg)
+    label flywheel_radius(130 * units.mm)
+
+    label crank_moment(
+        disk_moment_of_inertia(mass: crank_mass, radius: stroke / 2)
+    )
+    label flywheel_moment(
+        disk_moment_of_inertia(mass: flywheel_mass, radius: flywheel_radius)
+    )
+    label other_moment( // Cooling fan and generator (belt driven ~1.8x), pulley, cam gear.
+        disk_moment_of_inertia(mass: 6 * units.kg, radius: 8.0 * units.cm)
+    )
+
+    crankshaft c0(
+        throw: stroke / 2,
+        flywheel_mass: flywheel_mass,
+        mass: crank_mass,
+        // Bearings plus the cooling fan, which takes a kilowatt or two at speed.
+        friction_torque: 4.0 * units.lb_ft,
+        moment_of_inertia: crank_moment + flywheel_moment + other_moment,
+        position_x: 0.0,
+        position_y: 0.0,
+        tdc: 180 * units.deg
+    )
+
+    rod_journal rj0(angle: 0.0 * units.deg)
+    rod_journal rj1(angle: 180.0 * units.deg)
+    rod_journal rj2(angle: 0.0 * units.deg)
+    rod_journal rj3(angle: 180.0 * units.deg)
+    c0
+        .add_rod_journal(rj0)
+        .add_rod_journal(rj1)
+        .add_rod_journal(rj2)
+        .add_rod_journal(rj3)
+
+    piston_parameters piston_params(
+        mass: (390 + 110) * units.g, // piston + pin
+        compression_height: compression_height,
+        wrist_pin_position: 0.0,
+        displacement: 0.0
+    )
+
+    connecting_rod_parameters cr_params(
+        mass: rod_mass,
+        moment_of_inertia: rod_moment_of_inertia(mass: rod_mass, length: rod_length),
+        center_of_mass: 0.0,
+        length: rod_length
+    )
+
+    // Solex 28 PICT on a long central manifold.
+    intake intake(
+        plenum_volume: 0.35 * units.L,
+        plenum_cross_section_area: 6.0 * units.cm2,
+        intake_flow_rate: k_carb(70.0),
+        runner_flow_rate: k_carb(50.0),
+        runner_length: 14.0 * units.inch,
+        idle_flow_rate: k_carb(0.0),
+        idle_throttle_plate_position: 0.9965,
+        velocity_decay: 0.5
+    )
+
+    // Heat exchangers on both sides into one transverse muffler: near-equal lengths.
+    exhaust_system_parameters es_params(
+        outlet_flow_rate: k_carb(250.0),
+        primary_tube_length: 30.0 * units.inch,
+        primary_flow_rate: k_carb(150.0),
+        velocity_decay: 1.0
+    )
+
+    exhaust_system exhaust0(
+        es_params,
+        length: 400 * units.mm,
+        audio_volume: 0.6 * 0.02,
+        impulse_response: ir_lib.mild_exhaust_0
+    )
+
+    cylinder_bank_parameters bank_params(
+        bore: bore,
+        deck_height: stroke / 2 + rod_length + compression_height
+    )
+
+    cylinder_bank b0(bank_params, angle: 90.0 * units.deg)
+    cylinder_bank b1(bank_params, angle: -90.0 * units.deg)
+    b0
+        .add_cylinder(
+            piston: piston(piston_params, blowby: k_28inH2O(0.002)),
+            connecting_rod: connecting_rod(cr_params),
+            rod_journal: rj0,
+            intake: intake,
+            exhaust_system: exhaust0,
+            ignition_wire: wires.wire1,
+            primary_length: 10.0 * units.inch,
+            sound_attenuation: 0.95
+        )
+        .add_cylinder(
+            piston: piston(piston_params, blowby: k_28inH2O(0.003)),
+            connecting_rod: connecting_rod(cr_params),
+            rod_journal: rj3,
+            intake: intake,
+            exhaust_system: exhaust0,
+            ignition_wire: wires.wire3,
+            primary_length: 13.0 * units.inch,
+            sound_attenuation: 1.0
+        )
+        .set_cylinder_head(
+            type1_head(
+                flip_display: true,
+                intake_camshaft: camshaft.intake_cam_0,
+                exhaust_camshaft: camshaft.exhaust_cam_0)
+        )
+    b1
+        .add_cylinder(
+            piston: piston(piston_params, blowby: k_28inH2O(0.002)),
+            connecting_rod: connecting_rod(cr_params),
+            rod_journal: rj1,
+            intake: intake,
+            exhaust_system: exhaust0,
+            ignition_wire: wires.wire2,
+            primary_length: 11.0 * units.inch,
+            sound_attenuation: 1.05
+        )
+        .add_cylinder(
+            piston: piston(piston_params, blowby: k_28inH2O(0.003)),
+            connecting_rod: connecting_rod(cr_params),
+            rod_journal: rj2,
+            intake: intake,
+            exhaust_system: exhaust0,
+            ignition_wire: wires.wire4,
+            primary_length: 14.0 * units.inch,
+            sound_attenuation: 0.95
+        )
+        .set_cylinder_head(
+            type1_head(
+                flip_display: false,
+                intake_camshaft: camshaft.intake_cam_1,
+                exhaust_camshaft: camshaft.exhaust_cam_1)
+        )
+
+    engine
+        .add_cylinder_bank(b0)
+        .add_cylinder_bank(b1)
+
+    engine.add_crankshaft(c0)
+
+    // Mild stock cam: valve opens ~2.5 deg BTDC, closes ~37.5 deg ABDC (and mirrored).
+    harmonic_cam_lobe intake_lobe(
+        duration_at_50_thou: 200 * units.deg,
+        gamma: 1.5,
+        lift: 7.9 * units.mm,
+        steps: 100
+    )
+
+    harmonic_cam_lobe exhaust_lobe(
+        duration_at_50_thou: 200 * units.deg,
+        gamma: 1.5,
+        lift: 7.9 * units.mm,
+        steps: 100
+    )
+
+    type1_camshaft camshaft(
+        intake_lobe_profile: intake_lobe,
+        exhaust_lobe_profile: exhaust_lobe,
+        intake_lobe_center: 108 * units.deg,
+        exhaust_lobe_center: 108 * units.deg,
+        base_radius: 14 * units.mm
+    )
+
+    // Distributor: 10 deg static, centrifugal advance to ~30 deg.
+    function timing_curve(1000 * units.rpm)
+    timing_curve
+        .add_sample(0000 * units.rpm, 10 * units.deg)
+        .add_sample(1000 * units.rpm, 12 * units.deg)
+        .add_sample(2000 * units.rpm, 22 * units.deg)
+        .add_sample(3000 * units.rpm, 28 * units.deg)
+        .add_sample(4000 * units.rpm, 30 * units.deg)
+        .add_sample(5000 * units.rpm, 30 * units.deg)
+
+    ignition_module ignition_module(
+        timing_curve: timing_curve,
+        rev_limit: 4800 * units.rpm,
+        limiter_duration: 0.1)
+    ignition_module
+        .connect_wire(wires.wire1, (0.0 / 4.0) * cycle)
+        .connect_wire(wires.wire3, (1.0 / 4.0) * cycle)
+        .connect_wire(wires.wire2, (2.0 / 4.0) * cycle)
+        .connect_wire(wires.wire4, (3.0 / 4.0) * cycle)
+
+    engine.add_ignition_module(ignition_module)
+}
+
+label car_mass(840 * units.kg)
+
+private node beetle {
+    alias output __out:
+        vehicle(
+            mass: car_mass,
+            drag_coefficient: 0.48,
+            cross_sectional_area: 1.8 * units.m2,
+            diff_ratio: 4.375,
+            tire_radius: 0.315 * units.m,
+            rolling_resistance: 0.013 * car_mass * 9.81
+        );
+}
+
+private node beetle_transmission {
+    alias output __out:
+        transmission(max_clutch_torque: 150 * units.lb_ft)
+        .add_gear(3.80)
+        .add_gear(2.06)
+        .add_gear(1.32)
+        .add_gear(0.89);
+}
+
+public node main {
+    set_engine(vw_type1_1200())
+    set_vehicle(beetle())
+    set_transmission(beetle_transmission())
+}
+
+main()

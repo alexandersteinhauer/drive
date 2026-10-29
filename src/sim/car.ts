@@ -247,6 +247,16 @@ export class Car {
     return this.engineOmega * RPM;
   }
 
+  /** Throttle the engine sees, 0..1: the pedal, closed while the clutch is out for a shift. */
+  get engineThrottle(): number {
+    return this.clutchOpen ? 0 : this.throttle;
+  }
+
+  /** True while the clutch is out for a gear change. */
+  get clutchOpen(): boolean {
+    return this.shiftTimer > 0;
+  }
+
   get wheelbase(): number {
     return this.cfg.rear.z - this.cfg.front.z;
   }

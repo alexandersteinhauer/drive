@@ -18,7 +18,7 @@ import { hdrRendererOptions, setUpHdr } from "./tonemap";
 import { CarView, fetchModel } from "./carView";
 import { Input } from "./input";
 import { Car, type EscMode } from "./sim/car";
-import { bmwI4, vwBeetle } from "./sim/config";
+import { bmwI4, vwBeetle, type CarConfig } from "./sim/config";
 import { RoadView } from "./roadView";
 import { TerrainView } from "./terrainView";
 import { Vegetation } from "./vegetation";
@@ -27,6 +27,7 @@ import { Landscape } from "./world/landscape";
 import { CrashCard, Hud, type AssistMode } from "./hud";
 import { PauseMenu } from "./pauseMenu";
 import { Stats } from "./stats";
+import { EngineSound } from "./audio/engineSound";
 import { SunField } from "./sunField";
 import { WorldWorkers } from "./worldWorkers";
 import { LoadingScreen, filesLoaded } from "./loading";
@@ -140,7 +141,12 @@ let carSun = 1;
 let camSide = 0;
 
 // C switches between these; the first is the one to start in.
-const models = [
+const models: {
+  config: CarConfig;
+  url: string;
+  headlights: { x: number; y: number; z: number };
+  engine?: string;
+}[] = [
   {
     config: bmwI4,
     url: "models/bmw-i4.glb",
@@ -150,6 +156,8 @@ const models = [
     config: vwBeetle,
     url: "models/vw-beetle.glb",
     headlights: { x: 0.5, y: 0.78, z: -1.63 },
+    /** engine-sim script for its sound (engine-sim/engines/). */
+    engine: "beetle",
   },
 ];
 let model = 0;
@@ -196,6 +204,7 @@ if (import.meta.env.DEV)
     setPost,
     pause: (on: boolean) => (paused = on),
     crashTime: () => crashTime,
+    engineSound: () => engineSound,
     atmosphere,
     skySaturation,
     skyGain,
@@ -230,6 +239,32 @@ function heading(): number {
   return Math.atan2(-fwd.x, -fwd.z);
 }
 
+/** The current car's engine sound, once loaded; null for a silent (electric) car. */
+let engineSound: EngineSound | null = null;
+const engineSounds = new Map<string, Promise<EngineSound | null>>();
+function loadEngineSound(): void {
+  const engine = models[model]!.engine;
+  engineSound?.update(0, 0, 0);
+  engineSound = null;
+  if (!engine) return;
+  let sound = engineSounds.get(engine);
+  if (!sound) {
+    sound = EngineSound.create(engine).catch((e: unknown) => {
+      console.warn("engine sound unavailable:", e);
+      return null;
+    });
+    engineSounds.set(engine, sound);
+  }
+  const index = model;
+  void sound.then((s) => {
+    if (model === index) engineSound = s;
+  });
+}
+// Browsers only start audio after the user interacts with the page.
+for (const type of ["keydown", "pointerdown"])
+  addEventListener(type, () => engineSound?.resume());
+loadEngineSound();
+
 /** Set while the next car's model loads; the current one drives on meanwhile. */
 let switching = false;
 async function switchCar(): Promise<void> {
@@ -250,6 +285,7 @@ async function switchCar(): Promise<void> {
   next.reset(car.position, heading());
   scene.remove(view.group);
   car = next;
+  loadEngineSound();
   view = nextView;
   view.update(1);
   scene.add(view.group);
@@ -348,7 +384,10 @@ function render(): void {
 }
 
 function frame(now: number): void {
-  if (menu.open) return;
+  if (menu.open) {
+    engineSound?.update(car.rpm, 0, 0);
+    return;
+  }
   stats.begin();
   const dt = Math.min(0.1, Math.max(0, (now - last) / 1000));
   last = now;
@@ -387,6 +426,12 @@ function frame(now: number): void {
     }
   }
   updateCrash(crashedNow || paused ? 0 : dt);
+  engineSound?.update(
+    car.rpm,
+    car.engineThrottle,
+    crashTime >= 0 || paused ? 0 : 1,
+    !car.clutchOpen,
+  );
   view.update(crashTime >= 0 ? 1 : accumulator / DT);
 
   const pos = view.root.position;

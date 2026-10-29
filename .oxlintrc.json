@@ -6,5 +6,5 @@
     "suspicious": "warn",
     "perf": "warn"
   },
-  "ignorePatterns": ["dist"]
+  "ignorePatterns": ["dist", "src/audio/engine-sim.mjs", "engine-sim/.cache"]
 }

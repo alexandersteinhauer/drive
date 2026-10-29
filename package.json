@@ -16,7 +16,9 @@
     "test": "bun test",
     "prepare-car": "bun scripts/prepare-car.ts",
     "prepare-nature": "bun scripts/prepare-nature.ts",
-    "bench": "bun scripts/bench.ts"
+    "bench": "bun scripts/bench.ts",
+    "build-engine-sim": "engine-sim/build.sh",
+    "render-engine": "bun engine-sim/render.ts"
   },
   "dependencies": {
     "three": "^0.186.1"

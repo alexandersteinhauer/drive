@@ -65,6 +65,34 @@ Terrain layers ship colour and normal maps only; roughness is set per layer in t
 
 ## Code
 
+### engine-sim
+
+The engine sound is simulated by [engine-sim](https://github.com/ange-yaghi/engine-sim) by
+Ange Yaghi, with its script compiler [piranha](https://github.com/ange-yaghi/piranha) and
+[simple-2d-constraint-solver](https://github.com/ange-yaghi/simple-2d-constraint-solver) (all
+MIT), compiled to WebAssembly (`public/audio/engine-sim.wasm`, `src/audio/engine-sim.mjs`) by
+`engine-sim/build.sh`, with small changes in `engine-sim/engine-sim.patch`. The wasm embeds
+engine-sim's script library and exhaust impulse responses. Its licence:
+
+```
+Copyright 2022 AngeTheGreat (Ange Yaghi)
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of this software
+and associated documentation files (the "Software"), to deal in the Software without
+restriction, including without limitation the rights to use, copy, modify, merge, publish,
+distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the
+Software is furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all copies or
+substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING
+BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM,
+DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+```
+
 ### three.js
 
 [three.js](https://threejs.org) (`three` 0.186) is bundled into the built app. Its licence:

@@ -1,3 +1,5 @@
 dist
 node_modules
 bun.lock
+src/audio/engine-sim.mjs
+engine-sim/.cache
