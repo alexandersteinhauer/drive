@@ -241,6 +241,7 @@ pub struct System {
     /// Per row, the rows sharing a body with it (ascending), and their coupling values.
     neighbours: Vec<Vec<usize>>,
     coupling: Vec<Vec<f64>>,
+    inv_diagonal: Vec<f64>,
     /// Warm start: the impulses of the previous step.
     pub lambda: Vec<f64>,
     pub right: Vec<f64>,
@@ -459,6 +460,7 @@ impl System {
                 })
                 .collect();
             self.coupling = self.neighbours.iter().map(|n| vec![0.0; n.len()]).collect();
+            self.inv_diagonal = vec![0.0; m_f];
         }
         for i in 0..m_f {
             for (slot, &jj) in self.neighbours[i].iter().enumerate() {
@@ -478,6 +480,9 @@ impl System {
                     }
                 }
                 self.coupling[i][slot] = dot;
+                if jj == i {
+                    self.inv_diagonal[i] = 1.0 / dot;
+                }
             }
         }
 
@@ -487,17 +492,14 @@ impl System {
             for i in 0..m_f {
                 let mut s0 = 0.0;
                 let mut s1 = 0.0;
-                let mut diagonal = 0.0;
                 for (&j, &a) in self.neighbours[i].iter().zip(&self.coupling[i]) {
                     if j < i {
                         s0 += a * self.lambda[j];
                     } else if j > i {
                         s1 += a * self.lambda[j];
-                    } else {
-                        diagonal = a;
                     }
                 }
-                let k_next_i = (1.0 / diagonal) * (self.right[i] - s0 - s1);
+                let k_next_i = self.inv_diagonal[i] * (self.right[i] - s0 - s1);
                 let [limit_min, limit_max] = self.limits[i];
                 let x = limit_min.max(limit_max.min(k_next_i));
                 let k_i = self.lambda[i];

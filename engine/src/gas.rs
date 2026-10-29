@@ -236,6 +236,11 @@ impl GasSystem {
     }
 
     pub fn dissipate_excess_velocity(&mut self) {
+        // Nearly always below the speed of sound: nothing to do.
+        let [m_x, m_y] = self.state.momentum;
+        if (m_x == 0.0 && m_y == 0.0) || self.certainly_subsonic(m_x * m_x + m_y * m_y) {
+            return;
+        }
         let v_x = self.velocity_x();
         let v_y = self.velocity_y();
         let v_squared = v_x * v_x + v_y * v_y;
@@ -303,8 +308,19 @@ impl GasSystem {
     /// Flow between two systems; returns the moles moved from `s0` to `s1` (negative the
     /// other way).
     pub fn flow(params: &FlowParameters, s0: &mut GasSystem, s1: &mut GasSystem) -> f64 {
-        let p_0 = s0.pressure() + s0.dynamic_pressure(params.direction_x, params.direction_y);
-        let p_1 = s1.pressure() + s1.dynamic_pressure(-params.direction_x, -params.direction_y);
+        // A closed valve (or an absent idle circuit) moves nothing: engine-sim works through
+        // the whole exchange anyway, which leaves both systems as they were but for clamping
+        // their energy at zero.
+        if params.k_flow == 0.0 {
+            for s in [s0, s1] {
+                if s.state.e_k < 0.0 {
+                    s.state.e_k = 0.0;
+                }
+            }
+            return 0.0;
+        }
+        let p_0 = s0.total_pressure(params.direction_x, params.direction_y);
+        let p_1 = s1.total_pressure(-params.direction_x, -params.direction_y);
 
         let (source, sink, dx, dy, source_pressure, sink_pressure, source_cs, sink_cs, direction) =
             if p_0 > p_1 {
@@ -333,13 +349,19 @@ impl GasSystem {
                 )
             };
 
+        // flow_rate uses the upstream temperature: the source's unless the pressures are equal.
+        let (t_source, t_sink) = if source_pressure > sink_pressure {
+            (source.temperature(), 0.0)
+        } else {
+            (0.0, sink.temperature())
+        };
         let mut flow = params.dt
             * Self::flow_rate(
                 params.k_flow,
                 source_pressure,
                 sink_pressure,
-                source.temperature(),
-                sink.temperature(),
+                t_source,
+                t_sink,
                 source.heat_capacity_ratio(),
                 source.choked_flow_limit,
                 source.choked_flow_factor_cached,
@@ -379,8 +401,6 @@ impl GasSystem {
         let sink_mass = sink.mass();
         let inv_sink_mass = 1.0 / sink_mass;
 
-        let c_source = source.c();
-        let c_sink = sink.c();
 
         let source_initial_momentum_x = source.state.momentum[0];
         let source_initial_momentum_y = source.state.momentum[1];
@@ -388,13 +408,13 @@ impl GasSystem {
         let sink_initial_momentum_y = sink.state.momentum[1];
 
         if sink_cs != 0.0 {
-            let v = clamp((fraction_volume / sink_cs) / params.dt, 0.0, c_sink);
+            let v = sink.clamp_to_c((fraction_volume / sink_cs) / params.dt);
             sink.state.momentum[0] += v * dx * fraction_mass;
             sink.state.momentum[1] += v * dy * fraction_mass;
         }
 
         if source_cs != 0.0 && source_mass != 0.0 {
-            let v = clamp((fraction_volume / source_cs) / params.dt, 0.0, c_source);
+            let v = source.clamp_to_c((fraction_volume / source_cs) / params.dt);
             source.state.momentum[0] += v * dx * fraction_mass;
             source.state.momentum[1] += v * dy * fraction_mass;
         }
@@ -521,6 +541,46 @@ impl GasSystem {
         let v_y = self.state.momentum[1] / m;
         let v_squared = v_x * v_x + v_y * v_y;
         0.5 * m * v_squared
+    }
+
+    /// pressure() + dynamic_pressure(dx, dy), with the static pressure worked out once.
+    #[inline]
+    fn total_pressure(&self, dx: f64, dy: f64) -> f64 {
+        let p = self.pressure();
+        if self.n() == 0.0 || self.kinetic_energy() == 0.0 {
+            return p + 0.0;
+        }
+        let inverse_mass = 1.0 / self.mass();
+        let density = self.approximate_density();
+        let c_squared = p * self.heat_capacity_ratio() / density;
+        p + self.dynamic_pressure_with(&Some((inverse_mass, p, c_squared)), dx, dy)
+    }
+
+    /// Whether the bulk speed |momentum| / mass is certainly below the speed of sound, without
+    /// computing either: v^2 < c^2 = P hcr / rho rearranged free of divisions, with a margin
+    /// far beyond their rounding (so it never says yes where c() would say no).
+    #[inline]
+    fn certainly_subsonic(&self, momentum_squared: f64) -> bool {
+        let n = self.n();
+        let e = self.kinetic_energy();
+        n > 0.0
+            && e > 0.0
+            && self.volume() != 0.0
+            && momentum_squared * (0.5 * self.degrees_of_freedom as f64)
+                < e * self.hcr * AIR_MOLECULAR_MASS * n * (1.0 - 1e-9)
+    }
+
+    /// clamp(v, 0, c()), without the square root when v is certainly below c.
+    #[inline]
+    fn clamp_to_c(&self, v: f64) -> f64 {
+        if v <= 0.0 {
+            return 0.0;
+        }
+        let m = self.mass();
+        if self.certainly_subsonic(v * v * m * m) {
+            return v;
+        }
+        clamp(v, 0.0, self.c())
     }
 
     #[inline]

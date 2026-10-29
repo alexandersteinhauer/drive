@@ -34,4 +34,4 @@ Differences from engine-sim: no script compiler (engines are data), no UI, singl
 synthesizer; rand() is a small fixed generator so runs repeat. In the game the engine drives
 the car: `Engine::set_load` puts the driven wheels (through the gearing) on the far side of
 the clutch, and the clutch is solved with the rest of the constraints (src/sim/powerplant.ts).
-`examples/bench.rs` times it (~10 % of real time natively, ~15 % in WebAssembly).
+`examples/bench.rs` times it (~9 % of real time natively, ~10 % in WebAssembly).
