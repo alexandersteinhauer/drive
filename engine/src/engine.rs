@@ -531,8 +531,15 @@ pub struct Engine {
     timestep: f64,
     fluid_steps: usize,
     filtered_rpm: f64,
-    /// Exhaust signal per exhaust system, one value per step (the synthesizer's input).
+    /// Exhaust signal per exhaust system, one value per step (the synthesizer's input), kept
+    /// while `collect_audio` is set.
     pub audio: Vec<Vec<f32>>,
+    pub collect_audio: bool,
+    /// Torque on the driven side (the load body), e.g. from the tyres.
+    load_torque: f64,
+    /// Sum of the clutch torque (forwards, on the load) over the steps since `set_load`.
+    clutch_torque_sum: f64,
+    clutch_steps: u32,
     staging: Vec<f64>,
     dyno_torque_samples: Vec<f64>,
     last_dyno_torque_sample: usize,
@@ -848,6 +855,10 @@ impl Engine {
             fluid_steps: spec.fluid_steps,
             filtered_rpm: 0.0,
             audio: vec![Vec::new(); spec.exhausts.len()],
+            collect_audio: true,
+            load_torque: 0.0,
+            clutch_torque_sum: 0.0,
+            clutch_steps: 0,
             staging: vec![0.0; spec.exhausts.len()],
             dyno_torque_samples: vec![0.0; 512],
             last_dyno_torque_sample: 0,
@@ -953,13 +964,33 @@ impl Engine {
         self.dyno_torque_samples.iter().sum::<f64>() / self.dyno_torque_samples.len() as f64
     }
 
-    /// The driven side: its spin inertia, speed, clutch capacity and the torque limit of its
-    /// drag constraint.
-    pub fn set_load(&mut self, inertia: f64, mass: f64, speed: f64) {
+    /// The driven side, seen from the crank, for the steps that follow: its inertia, its
+    /// speed and the torque on it (forwards positive), and the torque the clutch can pass.
+    /// Starts a new average of the clutch torque.
+    pub fn set_load(&mut self, inertia: f64, speed: f64, torque: f64, clutch_capacity: f64) {
         let b = &mut self.system.bodies[self.load_body];
         b.i = inertia;
-        b.m = mass;
-        b.v_theta = speed;
+        b.m = 1.0;
+        b.v_theta = -speed;
+        self.load_torque = -torque;
+        self.set_clutch(clutch_capacity);
+        self.clutch_torque_sum = 0.0;
+        self.clutch_steps = 0;
+    }
+
+    /// The clutch torque on the driven side (forwards positive), averaged over the steps
+    /// since `set_load`.
+    pub fn clutch_torque(&self) -> f64 {
+        if self.clutch_steps == 0 {
+            0.0
+        } else {
+            self.clutch_torque_sum / self.clutch_steps as f64
+        }
+    }
+
+    /// The driven side's speed (forwards positive).
+    pub fn load_speed(&self) -> f64 {
+        -self.system.bodies[self.load_body].v_theta
     }
 
     pub fn load_body(&self) -> &Body {
@@ -977,11 +1008,6 @@ impl Engine {
         if let Kind::Drag { max_torque: m } = &mut self.system.constraints[self.drag].kind {
             *m = max_torque;
         }
-    }
-
-    /// Torque the clutch passes from the crank to the load, from the last step.
-    pub fn clutch_torque(&self) -> f64 {
-        self.system.constraints[self.clutch].f_t[0][1]
     }
 
     pub fn timestep(&self) -> f64 {
@@ -1017,7 +1043,9 @@ impl Engine {
                 .collect();
             let cylinders = &self.cylinders;
             let banks = &self.banks;
+            let (load_body, load_torque) = (self.load_body, self.load_torque);
             self.system.process(dt, |state: &mut State| {
+                state.t[load_body] += load_torque;
                 for (c, &wall_force) in cylinders.iter().zip(&wall_forces) {
                     let bank = &banks[c.bank];
                     let area = (bank.bore * bank.bore / 4.0) * PI;
@@ -1034,6 +1062,9 @@ impl Engine {
                 }
             });
         }
+
+        self.clutch_torque_sum += -self.system.constraints[self.clutch].f_t[0][1];
+        self.clutch_steps += 1;
 
         // Engine::update: the throttle linkage.
         for intake in &mut self.intakes {
@@ -1187,8 +1218,10 @@ impl Engine {
                 * (exhaust.audio_volume * delayed / count)
                 * (1.0 / (exhaust_length * exhaust_length));
         }
-        for (out, s) in self.audio.iter_mut().zip(&self.staging) {
-            out.push(*s as f32);
+        if self.collect_audio {
+            for (out, s) in self.audio.iter_mut().zip(&self.staging) {
+                out.push(*s as f32);
+            }
         }
     }
 

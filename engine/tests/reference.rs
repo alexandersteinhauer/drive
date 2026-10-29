@@ -49,6 +49,10 @@ fn vehicle_drag(body: &engine_sim::solver::Body) -> f64 {
 
 #[test]
 fn matches_engine_sim() {
+    if !cfg!(feature = "reference") {
+        eprintln!("needs --features reference (engine-sim's exact arithmetic); skipped");
+        return;
+    }
     let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("reference/.build");
     let (Ok(spec), Ok(trace)) = (
         std::fs::read_to_string(dir.join("beetle.json")),

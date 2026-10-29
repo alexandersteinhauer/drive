@@ -9,6 +9,10 @@ publish = false
 [lib]
 crate-type = ["cdylib", "rlib"]
 
+[features]
+# Exactly engine-sim's arithmetic, for tests/reference.rs (slower in WebAssembly).
+reference = []
+
 [dependencies]
 serde = { version = "1", default-features = false, features = ["derive", "alloc"] }
 serde_json = { version = "1", default-features = false, features = ["alloc", "float_roundtrip"] }

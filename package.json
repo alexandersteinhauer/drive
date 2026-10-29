@@ -18,7 +18,8 @@
     "prepare-nature": "bun scripts/prepare-nature.ts",
     "bench": "bun scripts/bench.ts",
     "build-engine": "engine/build.sh",
-    "test-engine": "engine/reference/build.sh && cd engine && cargo test --release"
+    "test-engine": "engine/reference/build.sh && cd engine && cargo test --release --features reference",
+    "engine-drive": "bun scripts/engine-drive.ts"
   },
   "dependencies": {
     "three": "^0.186.1"

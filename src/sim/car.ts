@@ -1,5 +1,11 @@
 import { Quaternion, Vector3 } from "three";
 import type { AxleConfig, CarConfig, CombustionConfig } from "./config";
+import {
+  createPowerplant,
+  SimulatedEngine,
+  type DriveLoad,
+  type Powerplant,
+} from "./powerplant";
 import type { Ground, Obstacle, RayHit } from "./ground";
 import { TireCurve, TireState } from "./tire";
 
@@ -162,7 +168,13 @@ export class Car {
   /** Axle topology is fixed at construction, not rebuilt in the physics loop. */
   private readonly drivenWheels: readonly Wheel[];
   private readonly steeredWheels: readonly Wheel[];
+  /** The combustion engine, if any. */
+  readonly powerplant: Powerplant | null;
   private shiftTimer = 0;
+  /** Time since the clutch came back after a shift (s). */
+  private sinceClutch = Infinity;
+  /** How far the clutch is engaged, 0..1 (combustion engines). */
+  clutchEngagement = 0;
   private targetGear = 1;
   private reverseTimer = 0;
   private sinceShift = 0;
@@ -235,7 +247,15 @@ export class Car {
             new Vector3(cx + sx * hx, cy + sy * hy, cz + sz * hz),
           );
     this.bodyReach = Math.max(...this.corners.map((c) => Math.hypot(c.x, c.z)));
+    const pt = cfg.powertrain;
+    this.powerplant =
+      pt.type === "combustion" ? createPowerplant(pt.engine) : null;
     this.reset(new Vector3(0, 0, 0), 0);
+  }
+
+  /** Frees the simulated engine, if any. */
+  dispose(): void {
+    this.powerplant?.dispose();
   }
 
   /** True once an impact has absorbed a fatal amount of energy (see FATAL_ENERGY). */
@@ -249,6 +269,8 @@ export class Car {
 
   /** Throttle the engine sees, 0..1: the pedal, closed while the clutch is out for a shift. */
   get engineThrottle(): number {
+    if (this.powerplant instanceof SimulatedEngine)
+      return this.powerplant.throttle;
     return this.clutchOpen ? 0 : this.throttle;
   }
 
@@ -292,8 +314,9 @@ export class Car {
     }
     this.antiRoll(this.wheels[0]!, this.wheels[1]!);
     this.antiRoll(this.wheels[2]!, this.wheels[3]!);
-    const pt = this.cfg.powertrain;
-    this.engineOmega = pt.type === "combustion" ? pt.engine.idleRpm / RPM : 0;
+    this.powerplant?.reset();
+    this.engineOmega = this.powerplant?.omega ?? 0;
+    this.sinceClutch = Infinity;
   }
 
   step(dt: number, input: CarInput): void {
@@ -474,22 +497,6 @@ export class Car {
     return 0;
   }
 
-  private engineTorque(
-    pt: CombustionConfig,
-    omega: number,
-    pedal: number,
-  ): number {
-    const e = pt.engine;
-    const rpm = omega * RPM;
-    const governor =
-      e.idleThrottle * clamp((1.3 * e.idleRpm - rpm) / (0.3 * e.idleRpm), 0, 1);
-    // Progressive pedal map: small inputs give proportionally more torque, like a real throttle body.
-    const open = 1 - (1 - pedal) * (1 - pedal);
-    const t = rpm > e.limiterRpm ? 0 : governor + open * (1 - governor);
-    const friction = e.frictionTorque + e.frictionPerRpm * rpm;
-    return t * interpolate(e.torqueCurve, rpm) - (1 - t) * friction;
-  }
-
   private updateDrivetrain(dt: number, throttle: number): void {
     const driven = this.drivenWheels;
     if (this.cfg.tcs && this.escMode !== "off")
@@ -599,9 +606,9 @@ export class Car {
   }
 
   /**
-   * Engine and clutch. The clutch torque that keeps engine and wheels locked together is
-   * solved for implicitly; if it exceeds the clutch capacity, the clutch slips at capacity.
-   * Returns the total torque at the driven wheels.
+   * Engine and clutch: the engine (see Powerplant) steps against the driven wheels seen
+   * through the gearing, and the clutch passes what it can. Returns the total torque at the
+   * driven wheels.
    */
   private combustionTorque(
     pt: CombustionConfig,
@@ -610,57 +617,46 @@ export class Car {
     throttle: number,
   ): number {
     const e = pt.engine;
-    const n = driven.length;
+    const engine = this.powerplant!;
     const shifting = this.shiftTimer > 0;
     const ratio = shifting ? 0 : this.gearRatio(pt, this.gear);
     const eff = pt.gearbox.efficiency;
-    const idle = e.idleRpm / RPM;
-    const avgOmega = driven.reduce((s, w) => s + w.omega, 0) / n;
-    const engineTorque = this.engineTorque(
-      pt,
-      this.engineOmega,
-      shifting ? 0 : throttle,
-    );
+    const avgOmega = driven.reduce((s, w) => s + w.omega, 0) / driven.length;
     this.reflectedInertia = 0;
 
-    let clutch = 0;
+    let load: DriveLoad | null = null;
+    this.clutchEngagement = 0;
     if (ratio !== 0) {
+      // The auto-clutch bites as the engine revs, and comes back over clutchRelease after a
+      // shift.
       const engagement = smoothstep(
         e.engageRpm / RPM,
         e.launchRpm / RPM,
-        this.engineOmega,
+        engine.omega,
       );
-      const capacity = engagement * e.clutchTorque;
+      const release = pt.gearbox.clutchRelease
+        ? Math.min(1, this.sinceClutch / pt.gearbox.clutchRelease)
+        : 1;
       const wheelInertia = driven.reduce((s, w) => s + w.axle.wheelInertia, 0);
       // External torque on the driven wheels, from the tires.
       const external = driven.reduce(
         (s, w) => s - w.tire.fx * w.axle.wheelRadius,
         0,
       );
-      const mismatch = this.engineOmega - ratio * avgOmega;
-      const lockTorque =
-        (mismatch / dt +
-          engineTorque / e.inertia -
-          (ratio * external) / wheelInertia) /
-        (1 / e.inertia + (eff * ratio * ratio) / wheelInertia);
-      clutch = clamp(lockTorque, -capacity, capacity);
+      load = {
+        inertia: wheelInertia / (eff * ratio * ratio),
+        speed: ratio * avgOmega,
+        torque: external / (ratio * eff),
+        capacity: engagement * release * e.clutchTorque,
+      };
+      this.clutchEngagement = engagement * release;
     }
-
-    if (shifting) {
-      // Rev-match towards the next gear while the clutch is open.
-      const target = Math.max(
-        idle,
-        avgOmega * this.gearRatio(pt, this.targetGear),
-      );
-      this.engineOmega += (target - this.engineOmega) * Math.min(1, dt * 25);
-    } else {
-      this.engineOmega += ((engineTorque - clutch) / e.inertia) * dt;
-    }
-    this.engineOmega = clamp(
-      this.engineOmega,
-      idle,
-      (e.limiterRpm * 1.05) / RPM,
-    );
+    this.sinceClutch += dt;
+    const revTarget = shifting
+      ? avgOmega * this.gearRatio(pt, this.targetGear)
+      : null;
+    const clutch = engine.step(dt, shifting ? 0 : throttle, load, revTarget);
+    this.engineOmega = engine.omega;
     return clutch * ratio * eff;
   }
 
@@ -979,7 +975,10 @@ export class Car {
     this.sinceShift += dt;
     if (this.shiftTimer > 0) {
       this.shiftTimer -= dt;
-      if (this.shiftTimer <= 0) this.gear = this.targetGear;
+      if (this.shiftTimer <= 0) {
+        this.gear = this.targetGear;
+        this.sinceClutch = 0;
+      }
       return;
     }
     if (this.gear < 1 || this.sinceShift < 0.6) return;
@@ -1014,17 +1013,4 @@ function smoothstep(lo: number, hi: number, v: number): number {
 
 function clamp(v: number, lo: number, hi: number): number {
   return Math.min(hi, Math.max(lo, v));
-}
-
-function interpolate(table: [number, number][], x: number): number {
-  const first = table[0]!;
-  if (x <= first[0]) return first[1];
-  for (let i = 1; i < table.length; i++) {
-    const [x1, y1] = table[i]!;
-    if (x <= x1) {
-      const [x0, y0] = table[i - 1]!;
-      return y0 + ((y1 - y0) * (x - x0)) / (x1 - x0);
-    }
-  }
-  return table[table.length - 1]![1];
 }

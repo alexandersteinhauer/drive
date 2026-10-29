@@ -12,8 +12,13 @@ at 10 kHz, and synthesizes the sound from the exhaust pulses.
 - `./build.sh` compiles it to `../src/sim/engine.wasm` (needs the `wasm32-unknown-unknown`
   target: `rustup target add wasm32-unknown-unknown`).
 - `reference/build.sh` builds the original C++ natively and records a run of the Beetle;
-  `cargo test --release` then checks the port reproduces it exactly, step for step and sample
-  for sample (`bun run test-engine` does both).
+  `cargo test --release --features reference` then checks the port reproduces it exactly,
+  step for step and sample for sample (`bun run test-engine` does both). The `reference`
+  feature keeps engine-sim's arithmetic where the game uses a faster equivalent (`x^(1/1.4)`
+  in subsonic flow, accurate to an ulp).
 
 Differences from engine-sim: no script compiler (engines are data), no UI, single-threaded
-synthesizer; rand() is a small fixed generator so runs repeat.
+synthesizer; rand() is a small fixed generator so runs repeat. In the game the engine drives
+the car: `Engine::set_load` puts the driven wheels (through the gearing) on the far side of
+the clutch, and the clutch is solved with the rest of the constraints (src/sim/powerplant.ts).
+`examples/bench.rs` times it (~10 % of real time natively, ~15 % in WebAssembly).

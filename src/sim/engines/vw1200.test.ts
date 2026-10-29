@@ -1,9 +1,10 @@
 import { expect, test } from "bun:test";
-import { vw1200 } from "./vw1200";
+import { REFERENCE_TUNING, vw1200Engine } from "./vw1200";
 
 /**
- * The Beetle's engine as engine-sim built it from the original .mr script (written by
- * engine/reference): the TypeScript version must describe the same engine.
+ * The Beetle's engine as engine-sim built it from engine/reference/vw1200.mr (written by
+ * engine/reference/build.sh): the TypeScript version, with the script's tuning, must describe
+ * the same engine, which checks the helpers in engineSpec.ts against engine-sim's.
  */
 test("matches the engine engine-sim built from the script", async () => {
   const reference = await Bun.file(
@@ -21,7 +22,7 @@ test("matches the engine engine-sim built from the script", async () => {
     }
     return v;
   };
-  const ours = sortFunctions(structuredClone(vw1200)) as Record<
+  const ours = sortFunctions(vw1200Engine(REFERENCE_TUNING)) as Record<
     string,
     unknown
   >;

@@ -3,3 +3,4 @@ node_modules
 bun.lock
 engine/target
 engine/reference/.build
+engine/tests/vw1200.json

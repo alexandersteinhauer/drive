@@ -114,7 +114,11 @@ for (const [name, cfg] of [
     expect(r.distance).toBeGreaterThan(1800);
     expect(r.maxOff).toBeLessThan(1.5);
     expect(r.airborne).toBeLessThan(0.05);
-    expect(r.msPerStep).toBeLessThan(0.1);
+    // A simulated engine (engine/) runs ~21 of its steps per car step.
+    const simulated =
+      cfg.powertrain.type === "combustion" &&
+      cfg.powertrain.engine.type === "simulated";
+    expect(r.msPerStep).toBeLessThan(simulated ? 0.6 : 0.1);
     // Normal driving must not trigger stability control.
     expect(r.escShare).toBeLessThan(0.01);
-  });
+  }, 60_000);

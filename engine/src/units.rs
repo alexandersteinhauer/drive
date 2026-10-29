@@ -1,4 +1,6 @@
 //! SI units and physical constants (engine-sim's units.h and constants.h).
+// engine-sim's own (approximate) constants, kept so results match it.
+#![allow(clippy::approx_constant)]
 
 pub const PI: f64 = 3.14159265359;
 pub const R: f64 = 8.31446261815324;

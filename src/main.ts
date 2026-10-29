@@ -28,10 +28,9 @@ import { CrashCard, Hud, type AssistMode } from "./hud";
 import { PauseMenu } from "./pauseMenu";
 import { Stats } from "./stats";
 import { EngineSound } from "./audio/engineSound";
-import { EngineFollower } from "./audio/engineFollower";
-import { EngineSim, loadEngineModule } from "./sim/engineSim";
+import { loadEngineModule } from "./sim/engineSim";
 import type { EngineSpec } from "./sim/engineSpec";
-import { vw1200 } from "./sim/engines/vw1200";
+import { SimulatedEngine } from "./sim/powerplant";
 import { SunField } from "./sunField";
 import { WorldWorkers } from "./worldWorkers";
 import { LoadingScreen, filesLoaded } from "./loading";
@@ -149,7 +148,6 @@ const models: {
   config: CarConfig;
   url: string;
   headlights: { x: number; y: number; z: number };
-  engine?: EngineSpec;
 }[] = [
   {
     config: bmwI4,
@@ -160,8 +158,6 @@ const models: {
     config: vwBeetle,
     url: "models/vw-beetle.glb",
     headlights: { x: 0.5, y: 0.78, z: -1.63 },
-    /** Its simulated engine, for its sound. */
-    engine: vw1200,
   },
 ];
 let model = 0;
@@ -244,13 +240,20 @@ function heading(): number {
 }
 
 /** The current car's engine sound, once loaded; null for a silent (electric) car. */
-let engineSound: { sound: EngineSound; follower: EngineFollower } | null = null;
+let engineSound: EngineSound | null = null;
+/** How closed the throttle is with the engine driven by the car, for the sound (0..1). */
+let overrun = 0;
 const engineSounds = new Map<EngineSpec, Promise<EngineSound | null>>();
+function simulatedEngine(of: Car): SimulatedEngine | null {
+  return of.powerplant instanceof SimulatedEngine ? of.powerplant : null;
+}
 function loadEngineSound(): void {
-  const spec = models[model]!.engine;
-  engineSound?.sound.setVolume(0);
+  engineSound?.setVolume(0);
   engineSound = null;
-  if (!spec) return;
+  const engine = simulatedEngine(car);
+  if (!engine) return;
+  engine.sim.collectAudio = true;
+  const spec = engine.cfg.spec;
   let sound = engineSounds.get(spec);
   if (!sound) {
     sound = EngineSound.create(spec).catch((e: unknown) => {
@@ -259,16 +262,16 @@ function loadEngineSound(): void {
     });
     engineSounds.set(spec, sound);
   }
-  const index = model;
-  void Promise.all([sound, loadEngineModule()]).then(([s, module]) => {
-    if (model !== index || !s) return;
-    const sim = new EngineSim(module, spec);
-    engineSound = { sound: s, follower: new EngineFollower(sim, car.rpm) };
+  const current = car;
+  void sound.then((s) => {
+    if (car === current) engineSound = s;
   });
 }
 // Browsers only start audio after the user interacts with the page.
 for (const type of ["keydown", "pointerdown"])
-  addEventListener(type, () => engineSound?.sound.resume());
+  addEventListener(type, () => engineSound?.resume());
+// Simulated engines need their WebAssembly module before such a car is made.
+void loadEngineModule();
 loadEngineSound();
 
 /** Set while the next car's model loads; the current one drives on meanwhile. */
@@ -277,9 +280,12 @@ async function switchCar(): Promise<void> {
   if (switching) return;
   switching = true;
   const index = (model + 1) % models.length;
-  const next = new Car(models[index]!.config, land);
-  const nextView = makeView(index, next);
+  let next: Car;
+  let nextView: CarView;
   try {
+    await loadEngineModule();
+    next = new Car(models[index]!.config, land);
+    nextView = makeView(index, next);
     await nextView.ready;
     // Its shaders too, so the first frame with it doesn't stall.
     await renderer.compileAsync(nextView.group, camera, scene);
@@ -290,7 +296,9 @@ async function switchCar(): Promise<void> {
   applyAssists(next);
   next.reset(car.position, heading());
   scene.remove(view.group);
+  const previous = car;
   car = next;
+  previous.dispose();
   loadEngineSound();
   view = nextView;
   view.update(1);
@@ -391,7 +399,7 @@ function render(): void {
 
 function frame(now: number): void {
   if (menu.open) {
-    engineSound?.sound.setVolume(0);
+    engineSound?.setVolume(0);
     return;
   }
   stats.begin();
@@ -432,18 +440,19 @@ function frame(now: number): void {
     }
   }
   updateCrash(crashedNow || paused ? 0 : dt);
-  if (engineSound) {
-    const { sound, follower } = engineSound;
-    const stopped = crashTime >= 0 || paused;
-    sound.setVolume(stopped ? 0 : 1);
-    if (!stopped) {
-      const out = follower.advance(
-        dt,
-        car.rpm,
-        car.engineThrottle,
-        !car.clutchOpen,
-      );
-      sound.push(out.samples, out.overrun);
+  const engine = simulatedEngine(car);
+  if (engine) {
+    // The engine's exhaust signal of this frame's physics steps.
+    const samples = engine.sim.takeAudio();
+    if (car.clutchEngagement > 0.5) {
+      // Follows the airflow rather than the pedal (throttle plate gamma 2).
+      const s = car.engineThrottle;
+      overrun = 1 - Math.sin((s * s * Math.PI) / 2);
+    } else overrun *= Math.exp(-dt / 0.2);
+    if (engineSound) {
+      const stopped = crashTime >= 0 || paused;
+      engineSound.setVolume(stopped ? 0 : 1);
+      engineSound.push(samples, overrun);
     }
   }
   view.update(crashTime >= 0 ? 1 : accumulator / DT);

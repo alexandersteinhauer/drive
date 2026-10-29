@@ -1,3 +1,5 @@
+import type { EngineSpec } from "./engineSpec";
+import { vw1200 } from "./engines/vw1200";
 import type { TireConfig } from "./tire";
 
 export interface AxleConfig {
@@ -19,23 +21,40 @@ export interface AxleConfig {
   driven: boolean;
 }
 
-export interface EngineConfig {
+/** The clutch and idle speed, whatever the engine. */
+interface EngineBase {
   idleRpm: number;
-  /** Fuel cut above this. */
-  limiterRpm: number;
   /** Auto-clutch starts engaging here and is fully engaged at launchRpm. */
   engageRpm: number;
   launchRpm: number;
-  /** Throttle the idle governor adds at idle; fades out by 1.3x idle. */
-  idleThrottle: number;
   /** Torque the fully engaged clutch can transmit before slipping. */
   clutchTorque: number;
+}
+
+/** An engine described by its full-throttle torque curve. */
+export interface MappedEngineConfig extends EngineBase {
+  type: "mapped";
+  /** Fuel cut above this. */
+  limiterRpm: number;
+  /** Throttle the idle governor adds at idle; fades out by 1.3x idle. */
+  idleThrottle: number;
   /** [rpm, Nm] at full throttle. */
   torqueCurve: [number, number][];
   inertia: number;
   frictionTorque: number;
   frictionPerRpm: number;
 }
+
+/**
+ * An engine simulated piston by piston (engine/, a port of engine-sim): its torque, idle,
+ * rev limit and sound all come from the simulation.
+ */
+export interface SimulatedEngineConfig extends EngineBase {
+  type: "simulated";
+  spec: EngineSpec;
+}
+
+export type EngineConfig = MappedEngineConfig | SimulatedEngineConfig;
 
 export interface GearboxConfig {
   ratios: number[];
@@ -48,6 +67,8 @@ export interface GearboxConfig {
   shiftUpRpmLight: number;
   shiftDownRpmLight: number;
   shiftTime: number;
+  /** Time over which the clutch comes back after a shift (s); 0 or absent: at once. */
+  clutchRelease?: number;
 }
 
 export interface CombustionConfig {
@@ -314,27 +335,14 @@ export const vwBeetle: CarConfig = {
   },
   powertrain: {
     type: "combustion",
+    // The 1200, simulated (src/sim/engines/vw1200.ts).
     engine: {
+      type: "simulated",
+      spec: vw1200,
       idleRpm: 850,
-      limiterRpm: 4600,
       engageRpm: 1000,
       launchRpm: 1900,
-      idleThrottle: 0.1,
       clutchTorque: 160,
-      torqueCurve: [
-        [0, 50],
-        [1000, 68],
-        [2000, 82],
-        [3000, 77],
-        [3600, 67],
-        [4000, 58],
-        [4600, 44],
-        [5000, 30],
-      ],
-      // Heavy flywheel.
-      inertia: 0.15,
-      frictionTorque: 6,
-      frictionPerRpm: 0.0025,
     },
     gearbox: {
       ratios: [3.8, 2.06, 1.32, 0.89],
@@ -347,6 +355,7 @@ export const vwBeetle: CarConfig = {
       shiftDownRpmLight: 1200,
       // No hurry: a long lever and a cable clutch.
       shiftTime: 0.5,
+      clutchRelease: 0.35,
     },
   },
   // Swing axles with an open differential.

@@ -57,6 +57,7 @@ export const sportsCoupe: CarConfig = {
   powertrain: {
     type: "combustion",
     engine: {
+      type: "mapped",
       idleRpm: 900,
       limiterRpm: 7400,
       engageRpm: 1100,

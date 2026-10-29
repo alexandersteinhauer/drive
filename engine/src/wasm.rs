@@ -74,6 +74,22 @@ engine_fns! {
     /// Crank speed in rad/s, positive forwards.
     fn engine_speed(e) -> f64 { -e.crank_speed() }
     fn engine_set_speed(e, speed: f64) { e.set_crank_speed(-speed) }
+    /// Sets the driven side for the next steps (see Engine::set_load).
+    fn engine_set_load(e, inertia: f64, speed: f64, torque: f64, clutch_capacity: f64) {
+        e.set_load(inertia, speed, torque, clutch_capacity)
+    }
+    /// Average clutch torque on the driven side since engine_set_load.
+    fn engine_clutch_torque(e) -> f64 { e.clutch_torque() }
+    fn engine_load_speed(e) -> f64 { e.load_speed() }
+    /// Whether to keep the exhaust signal for the sound.
+    fn engine_set_audio(e, on: u32) {
+        e.collect_audio = on != 0;
+        if !e.collect_audio {
+            for a in &mut e.audio {
+                a.clear();
+            }
+        }
+    }
     /// Exhaust signal of the steps since the last clear, per exhaust system.
     fn engine_audio_len(e) -> usize { e.audio.first().map_or(0, |a| a.len()) }
     fn engine_audio_channels(e) -> usize { e.audio.len() }

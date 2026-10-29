@@ -201,7 +201,7 @@ impl GasSystem {
             flow_rate = choked_flow_rate_cached;
             flow_rate /= (R * t_0).sqrt();
         } else {
-            let s = p_ratio.powf(1.0 / hcr);
+            let s = pow_inverse_hcr(p_ratio, hcr);
             flow_rate = (2.0 * hcr) / (hcr - 1.0);
             flow_rate *= s * (s - p_ratio);
             flow_rate = (flow_rate.max(0.0) / (R * t_0)).sqrt();
@@ -654,4 +654,45 @@ fn choked_flow_limit(dof: i32) -> f64 {
 fn choked_flow_rate(dof: i32) -> f64 {
     let hcr = heat_capacity_ratio(dof);
     hcr.sqrt() * (2.0 / (hcr + 1.0)).powf((hcr + 1.0) / (2.0 * (hcr - 1.0)))
+}
+
+/// `x^(1/hcr)`, the hot power in subsonic flow. For air (hcr 1.4, x in 0.5..=1, as subsonic
+/// flow has it) a cubic estimate refined by three Newton steps on y^7 = x^5: within an ulp or
+/// two of powf and several times faster where powf is computed in software (WebAssembly).
+/// The `reference` feature keeps powf, to compare with engine-sim exactly.
+#[inline]
+fn pow_inverse_hcr(x: f64, hcr: f64) -> f64 {
+    if cfg!(feature = "reference") || hcr != 1.4 || !(0.5..=1.0).contains(&x) {
+        return x.powf(1.0 / hcr);
+    }
+    const C: [f64; 4] = [
+        0.08856258257572591,
+        -0.35058324062335194,
+        1.1518453510510853,
+        0.1102301526234537,
+    ];
+    let mut y = ((C[0] * x + C[1]) * x + C[2]) * x + C[3];
+    let x2 = x * x;
+    let x5_7 = x2 * x2 * x / 7.0;
+    for _ in 0..3 {
+        let y2 = y * y;
+        let y6 = y2 * y2 * y2;
+        y = y * (6.0 / 7.0) + x5_7 / y6;
+    }
+    y
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn pow_inverse_hcr_matches_powf() {
+        let mut worst = 0.0f64;
+        for i in 0..=100_000 {
+            let x = 0.5 + 0.5 * i as f64 / 100_000.0;
+            let exact = x.powf(1.0 / 1.4);
+            let fast = super::pow_inverse_hcr(x, 1.4);
+            worst = worst.max(((fast - exact) / exact).abs());
+        }
+        assert!(worst < 1e-15, "worst relative error {worst:e}");
+    }
 }

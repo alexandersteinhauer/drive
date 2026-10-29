@@ -26,6 +26,16 @@ interface Exports {
   engine_filtered_dyno_torque(e: number): number;
   engine_speed(e: number): number;
   engine_set_speed(e: number, speed: number): void;
+  engine_set_load(
+    e: number,
+    inertia: number,
+    speed: number,
+    torque: number,
+    capacity: number,
+  ): void;
+  engine_clutch_torque(e: number): number;
+  engine_load_speed(e: number): number;
+  engine_set_audio(e: number, on: number): void;
   engine_audio_len(e: number): number;
   engine_audio_channels(e: number): number;
   engine_audio_ptr(e: number, channel: number): number;
@@ -84,20 +94,28 @@ export class EngineModule {
 }
 
 let shared: Promise<EngineModule> | null = null;
+let loaded: EngineModule | null = null;
 
-/** The module for the game's simulation (fetched once). */
+/** Loads the module for the game's simulation, once (from `bytes` if given). */
 export function loadEngineModule(
   bytes?: () => Promise<BufferSource>,
 ): Promise<EngineModule> {
   shared ??= (async () =>
-    EngineModule.load(
+    (loaded = await EngineModule.load(
       bytes
         ? await bytes()
         : await (
             await fetch(new URL("./engine.wasm", import.meta.url))
           ).arrayBuffer(),
-    ))();
+    )))();
   return shared;
+}
+
+/** The loaded module; cars with simulated engines need it before they are made. */
+export function engineModule(): EngineModule {
+  if (!loaded)
+    throw new Error("engine module not loaded: await loadEngineModule()");
+  return loaded;
 }
 
 /** A simulated engine. Its crank speed is positive forwards (rad/s). */
@@ -106,14 +124,15 @@ export class EngineSim {
   readonly frequency: number;
 
   constructor(
-    readonly module: EngineModule,
     readonly spec: EngineSpec,
+    readonly module: EngineModule = engineModule(),
   ) {
     const json = module.write(new TextEncoder().encode(JSON.stringify(spec)));
     this.e = module.exports.engine_new(json.ptr, json.len);
     module.free(json);
     if (!this.e) throw new Error("engine spec rejected");
     this.frequency = module.exports.engine_frequency(this.e);
+    this.collectAudio = false;
   }
 
   dispose(): void {
@@ -158,6 +177,35 @@ export class EngineSim {
   /** Torque the dynamometer absorbs, averaged over the last engine cycle (N m). */
   get dynoTorque(): number {
     return this.module.exports.engine_filtered_dyno_torque(this.e);
+  }
+
+  /**
+   * The driven side, seen from the crank, for the next steps: inertia (kg m^2), speed (rad/s),
+   * the torque on it (N m, forwards positive) and the torque the clutch can pass.
+   */
+  setLoad(
+    inertia: number,
+    speed: number,
+    torque: number,
+    capacity: number,
+  ): void {
+    this.module.exports.engine_set_load(
+      this.e,
+      inertia,
+      speed,
+      torque,
+      capacity,
+    );
+  }
+
+  /** Clutch torque on the driven side, averaged over the steps since `setLoad` (N m). */
+  get clutchTorque(): number {
+    return this.module.exports.engine_clutch_torque(this.e);
+  }
+
+  /** Whether to keep the exhaust signal for `takeAudio` (off: it is dropped). */
+  set collectAudio(on: boolean) {
+    this.module.exports.engine_set_audio(this.e, on ? 1 : 0);
   }
 
   /** The exhaust signal since the last call, per exhaust system (one value per step). */
