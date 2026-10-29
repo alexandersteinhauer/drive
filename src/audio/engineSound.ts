@@ -3,7 +3,6 @@
 import workletUrl from "./engineWorklet.ts?worker&url";
 import wasmUrl from "../sim/engine.wasm?url";
 import type { EngineSpec } from "../sim/engineSpec";
-import { Outdoors } from "./outdoors";
 import type {
   EngineInput,
   EngineMessage,
@@ -19,8 +18,6 @@ export class EngineSound {
   /** Buffered sound (s) and the synthesizer's share of real time. */
   stats = { buffered: 0, load: 0 };
   private readonly gain: GainNode;
-  /** The surroundings, added to the engine's direct sound. */
-  readonly outdoors: Outdoors;
   /** Whether the user has interacted, so the audio may play. */
   private started = false;
 
@@ -30,9 +27,7 @@ export class EngineSound {
   ) {
     this.gain = context.createGain();
     this.gain.gain.value = 0;
-    this.outdoors = new Outdoors(context);
-    node.connect(this.outdoors.input);
-    this.outdoors.output.connect(this.gain).connect(context.destination);
+    node.connect(this.gain).connect(context.destination);
     // Hidden, the game stops but audio would drone on.
     document.addEventListener("visibilitychange", () => {
       if (document.hidden) void context.suspend();
