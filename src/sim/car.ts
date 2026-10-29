@@ -2,6 +2,7 @@ import { Quaternion, Vector3 } from "three";
 import type { AxleConfig, CarConfig, CombustionConfig } from "./config";
 import {
   createPowerplant,
+  interpolate,
   SimulatedEngine,
   type DriveLoad,
   type Powerplant,
@@ -40,6 +41,13 @@ const OCCUPANT_FILTER = 0.01;
 /** Obstacles are looked up again once the car is this far (m) from the last lookup. */
 const OBSTACLE_REFRESH = 1;
 const RPM = 30 / Math.PI; // rad/s -> rpm
+/**
+ * The torque a dual-clutch gear change asks of the engine's spark (a fraction of the
+ * driver's): none, every cylinder cut for the shift's ~0.1 s, the upshift's crack. Keeping
+ * some (retarded, a third of the cylinders firing) spares the turbo's boost but costs each
+ * shift ~0.1 s here: the oncoming clutch has that torque too to take up.
+ */
+const SHIFT_TORQUE = 0;
 
 export interface CarInput {
   throttle: number;
@@ -499,20 +507,26 @@ export class Car {
 
   private updateDrivetrain(dt: number, throttle: number): void {
     const driven = this.drivenWheels;
+    // Drive torque the traction and stability controls allow, as a fraction.
+    let allowed = 1;
     if (this.cfg.tcs && this.escMode !== "off")
-      throttle *= this.updateTraction(driven, dt);
+      allowed *= this.updateTraction(driven, dt);
     else {
       this.tcsFactor = 1;
       for (const w of driven) w.tcsTorque = 0;
     }
     if (this.escCut < 1) {
-      throttle *= this.escCut;
+      allowed *= this.escCut;
     }
     const pt = this.cfg.powertrain;
+    // A simulated engine's ECU realises the cut as a torque request (SimulatedEngine);
+    // otherwise it closes the throttle.
+    const ecu = this.powerplant instanceof SimulatedEngine;
+    if (!ecu) throttle *= allowed;
     const total =
       pt.type === "electric"
         ? this.electricTorque(driven, throttle)
-        : this.combustionTorque(pt, driven, dt, throttle);
+        : this.combustionTorque(pt, driven, dt, throttle, ecu ? allowed : 1);
     this.splitDiff(driven, total, dt);
   }
 
@@ -615,9 +629,23 @@ export class Car {
     driven: readonly Wheel[],
     dt: number,
     throttle: number,
+    allowed: number,
   ): number {
     const e = pt.engine;
     const engine = this.powerplant!;
+    const simulated = engine instanceof SimulatedEngine ? engine : null;
+    if (simulated) {
+      // Variable torque management: the ECU's boost cap for the gear.
+      const caps =
+        e.type === "simulated" ? e.boostByGear?.[this.gear - 1] : undefined;
+      simulated.boostLimit = caps
+        ? interpolate(caps, engine.omega * RPM) * 1e5
+        : Infinity;
+    }
+    // The torque the ECU is asked for (a fraction of the driver's), and what a gear change
+    // asks of the spark alone.
+    let request = allowed;
+    let shiftTorque = 1;
     const shifting = this.shiftTimer > 0;
     const ratio = shifting ? 0 : this.gearRatio(pt, this.gear);
     const eff = pt.gearbox.efficiency;
@@ -637,6 +665,18 @@ export class Car {
       const release = pt.gearbox.clutchRelease
         ? Math.min(1, this.sinceClutch / pt.gearbox.clutchRelease)
         : 1;
+      let capacity = engagement * release * e.clutchTorque;
+      // Engine faster than the gearbox: the clutch slips.
+      const slipping = engine.omega > ratio * avgOmega * 1.03 + 10;
+      if (simulated && slipping) {
+        // While the clutch slips, traction control eases it rather than the engine, as
+        // launch control does: cutting torque would drop the revs the clutch bites with.
+        capacity *= allowed;
+        request = 1;
+        // A dual clutch hands over with the engine's torque cut back, so it doesn't add to
+        // its inertia's as the oncoming clutch pulls the revs down to the new gear's.
+        if (pt.gearbox.dualClutch && release < 1) shiftTorque = SHIFT_TORQUE;
+      }
       const wheelInertia = driven.reduce((s, w) => s + w.axle.wheelInertia, 0);
       // External torque on the driven wheels, from the tires.
       const external = driven.reduce(
@@ -647,15 +687,34 @@ export class Car {
         inertia: wheelInertia / (eff * ratio * ratio),
         speed: ratio * avgOmega,
         torque: external / (ratio * eff),
-        capacity: engagement * release * e.clutchTorque,
+        capacity,
       };
       this.clutchEngagement = engagement * release;
     }
     this.sinceClutch += dt;
-    const revTarget = shifting
-      ? avgOmega * this.gearRatio(pt, this.targetGear)
-      : null;
-    const clutch = engine.step(dt, shifting ? 0 : throttle, load, revTarget);
+    // A dual-clutch gearbox shifts up under power: the throttle stays open, and a turbo's
+    // boost up, while the torque is cut back by the spark to bring the revs down towards
+    // the next gear's.
+    const flatShift =
+      simulated !== null &&
+      shifting &&
+      pt.gearbox.dualClutch === true &&
+      this.targetGear > this.gear;
+    if (flatShift) shiftTorque = SHIFT_TORQUE;
+    if (simulated) {
+      simulated.torqueRequest = request;
+      simulated.shiftTorque = shiftTorque;
+    }
+    const revTarget =
+      shifting && !flatShift
+        ? avgOmega * this.gearRatio(pt, this.targetGear)
+        : null;
+    const clutch = engine.step(
+      dt,
+      shifting && !flatShift ? 0 : throttle,
+      load,
+      revTarget,
+    );
     this.engineOmega = engine.omega;
     return clutch * ratio * eff;
   }

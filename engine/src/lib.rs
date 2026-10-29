@@ -3,6 +3,7 @@
 
 pub mod crank;
 pub mod engine;
+pub mod fastmath;
 pub mod function;
 pub mod gas;
 pub mod rng;
@@ -10,5 +11,7 @@ pub mod solver;
 pub mod spec;
 pub mod units;
 pub mod synth;
+pub mod turbo;
 pub mod wasm;
 pub mod acoustics;
+pub mod voice;

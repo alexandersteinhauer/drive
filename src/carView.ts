@@ -59,8 +59,13 @@ interface Lamps {
 }
 
 const CORNERS = ["fl", "fr", "rl", "rr"] as const;
-/** Model parts that cast into the shadow map; the small ones (badges, lamps, rotors) don't. */
-const SHADOW_CASTERS = /^plain|Tires|White|Paint|_Windows$|^Body|^Bumpers$/;
+/**
+ * Model parts that cast into the shadow map; the small ones (badges, lamps, rotors) don't.
+ * The Ferrari's carbon and black trim make up much of its lower body, and its interior is
+ * mostly small parts, so its (see-through) windows stand in for the cabin.
+ */
+const SHADOW_CASTERS =
+  /^plain|Tires|White|^Paint\d|_Windows$|^Body|^Bumpers$|^Carbon2M1$|^Coloured1$|^GlassMtl$|^Wheel[12]A$/;
 const normal = new THREE.Vector3();
 const forward = new THREE.Vector3();
 const side = new THREE.Vector3();
@@ -193,7 +198,10 @@ export class CarView {
     const scene = gltf.scene;
     const info = scene.userData as {
       radius: number;
-      wheels: Record<(typeof CORNERS)[number], { center: number[] }>;
+      wheels: Record<
+        (typeof CORNERS)[number],
+        { center: number[]; radius: number }
+      >;
     };
     scene.updateMatrixWorld(true);
     scene.traverse((o) => {
@@ -204,9 +212,10 @@ export class CarView {
       // Lamp parts that share a material, told apart by where they are on the car.
       if (/DRLs$/.test(name)) mark(o, "front", (p) => (p.z < 0 ? 1 : 0));
       if (/_Windows$/.test(name)) mark(o, "carPos", (p) => p.toArray(), 3);
-      if (/DarkRed$/.test(name))
+      if (name.endsWith("i4_DarkRed"))
         mark(o, "zone", (p) => (p.y > 1.15 ? 2 : p.y > 0.65 ? 1 : 0));
       if (name === "Body") mark(o, "lamp", beetleLamp, 4);
+      if (name === "Lights") mark(o, "lamp", ferrariLamp);
       o.material = upgrade(o.material as THREE.Material, this.lamps, envMap);
       const m = o.material as THREE.MeshStandardMaterial;
       if ("envMapIntensity" in m && m.envMap) this.envMaterials.push(m);
@@ -220,7 +229,9 @@ export class CarView {
     CORNERS.forEach((corner, i) => {
       const wheel = this.wheels[i]!;
       const [x, y, z] = info.wheels[corner].center as [number, number, number];
-      const scale = this.car.wheels[i]!.axle.wheelRadius / info.radius;
+      // Each wheel to its axle's radius (the Ferrari's front and rear tyres differ).
+      const scale =
+        this.car.wheels[i]!.axle.wheelRadius / info.wheels[corner].radius;
       for (const [part, parent] of [
         ["spin", wheel.spin],
         ["caliper", wheel.steer],
@@ -450,6 +461,29 @@ function beetleBody(
   material: THREE.MeshStandardMaterial,
   lamps: Lamps,
 ): THREE.Material {
+  const m = nodeCopy(material);
+  const base = texture(material.map!).rgb;
+  const zone = attribute<"vec4">("lamp", "vec4");
+  // Linear colour: the tail lenses are a dull red (~0.15, 0.05, 0.05); the headlamp lenses
+  // dark to mid grey, against cream paint and chrome (~0.5 and up).
+  const red = smoothstep(0.03, 0.08, base.r.sub(base.g));
+  const dark = smoothstep(0.32, 0.18, base.dot(vec3(0.3, 0.6, 0.1)));
+  // The bulb lights the middle of the lens most, fading towards its rim; the lens's own
+  // texture shows through.
+  const bulb = mix(0.25, 1, smoothstep(1, 0, zone.zw.length()));
+  const lens = base.r.div(0.15).clamp(0.5, 1.5);
+  const tail = red.mul(step(0.5, zone.x)).mul(bulb).mul(lens);
+  m.emissiveNode = TAIL_RED.mul(lamps.rear)
+    .mul(tail)
+    .add(LAMP_WHITE.mul(lamps.head).mul(dark.mul(step(0.5, zone.y))));
+  material.dispose();
+  return m;
+}
+
+/** A node material copy of a textured material, for its own emissive. */
+function nodeCopy(
+  material: THREE.MeshStandardMaterial,
+): THREE.MeshStandardNodeMaterial {
   const m = new THREE.MeshStandardNodeMaterial();
   m.setValues({
     name: material.name,
@@ -465,20 +499,48 @@ function beetleBody(
     envMapIntensity: material.envMapIntensity,
     side: material.side,
   });
+  return m;
+}
+
+/**
+ * The Ferrari's lamps all share one textured material; which lamp a part belongs to, by
+ * where it is (model coordinates): 1 the headlamps (with the daytime running lights), 2 the
+ * round tail and brake lamps, 3 the third brake light, 4 the reversing light in the middle
+ * of each tail lamp, 5 the reflectors in the rear bumper, 0 the rest (the rear fog light
+ * and the plate lamps).
+ */
+function ferrariLamp(p: THREE.Vector3): number {
+  const x = Math.abs(p.x);
+  if (p.z < -1.5) return 1;
+  if (p.z < 1.6) return 0;
+  if (Math.hypot(x - 0.78, p.y - 0.76) < 0.025) return 4;
+  if (x > 0.6 && p.y > 0.6 && p.y < 0.88) return 2;
+  if (p.y > 0.86) return 3;
+  if (x > 0.35 && x < 0.65 && p.y < 0.55) return 5;
+  return 0;
+}
+
+/**
+ * The Ferrari's lamps lit: the LEDs and reflectors are the bright parts of their texture,
+ * the housings dark to mid grey. The red lenses over the rear lamps are faint, so the
+ * parts behind them are tinted red themselves.
+ */
+function ferrariLights(
+  material: THREE.MeshStandardMaterial,
+  lamps: Lamps,
+): THREE.Material {
+  const m = nodeCopy(material);
   const base = texture(material.map!).rgb;
-  const zone = attribute<"vec4">("lamp", "vec4");
-  // Linear colour: the tail lenses are a dull red (~0.15, 0.05, 0.05); the headlamp lenses
-  // dark to mid grey, against cream paint and chrome (~0.5 and up).
-  const red = smoothstep(0.03, 0.08, base.r.sub(base.g));
-  const dark = smoothstep(0.32, 0.18, base.dot(vec3(0.3, 0.6, 0.1)));
-  // The bulb lights the middle of the lens most, fading towards its rim; the lens's own
-  // texture shows through.
-  const bulb = mix(0.25, 1, smoothstep(1, 0, zone.zw.length()));
-  const lens = base.r.div(0.15).clamp(0.5, 1.5);
-  const tail = red.mul(step(0.5, zone.x)).mul(bulb).mul(lens);
-  m.emissiveNode = TAIL_RED.mul(lamps.rear)
-    .mul(tail)
-    .add(LAMP_WHITE.mul(lamps.head).mul(dark.mul(step(0.5, zone.y))));
+  const zone = attribute<"float">("lamp", "float");
+  const is = (id: number) => step(zone.sub(id).abs(), 0.5);
+  const lit = smoothstep(0.3, 0.6, base.dot(vec3(0.3, 0.6, 0.1)));
+  const red = is(2).add(is(3)).add(is(5));
+  m.colorNode = base.mul(mix(vec3(1), vec3(0.5, 0.02, 0.02), red));
+  m.emissiveNode = LAMP_WHITE.mul(
+    is(1).mul(lamps.front).add(is(4).mul(lamps.reverse)),
+  )
+    .add(LAMP_RED.mul(is(2).mul(lamps.tail).add(is(3).mul(lamps.brake))))
+    .mul(lit);
   material.dispose();
   return m;
 }
@@ -530,6 +592,8 @@ function upgrade(
   if (envMap) material.envMap = envMap;
   if (material.name === "Body" && material.map)
     return beetleBody(material, lamps);
+  if (material.name === "Lights" && material.map)
+    return ferrariLights(material, lamps);
   // Daytime running lights at the front; the same material at the rear is the reversing lights.
   if (/DRLs$/.test(material.name))
     return lamp(
@@ -540,7 +604,7 @@ function upgrade(
     );
   if (/RedMain$/.test(material.name))
     return lamp(material, LAMP_RED.mul(lamps.tail));
-  if (/DarkRed$/.test(material.name)) {
+  if (material.name.endsWith("i4_DarkRed")) {
     // Zone 2 is the third brake light, 1 the tail lamp clusters around the light guides
     // (a faint glow), 0 the unlit bumper lamps.
     const zone = attribute<"float">("zone", "float");
@@ -559,11 +623,14 @@ function upgrade(
     material.opacity = 0.25;
     material.roughness = 0.05;
   }
-  if (/White|Paint/i.test(material.name)) {
+  // Not the Ferrari's brake calipers, whose dark metallic finish is the source's own.
+  if (/White|Paint/i.test(material.name) && !/Caliper/.test(material.name)) {
     const paint = new THREE.MeshPhysicalMaterial({
       name: material.name,
       // Pure white clips under the sun; real white paint reflects roughly 70-80%.
-      color: material.color.clone().multiplyScalar(0.72),
+      color: material.color
+        .clone()
+        .multiplyScalar(/White/.test(material.name) ? 0.72 : 1),
       roughness: 0.35,
       metalness: 0,
       clearcoat: 1,

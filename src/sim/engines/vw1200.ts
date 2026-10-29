@@ -1,4 +1,6 @@
 import {
+  GASOLINE_LHV,
+  WALL_TEMPERATURE,
   diskInertia,
   gasoline,
   harmonicCamLobe,
@@ -13,6 +15,7 @@ import {
   type CamSpec,
   type EngineSpec,
   type SampledFunction,
+  type VoiceSpec,
 } from "../engineSpec";
 
 /**
@@ -124,6 +127,13 @@ const cylinder = (
   soundAttenuation,
 });
 
+/**
+ * The flame speed with physical gases: at VW's published distributor advance, the burn
+ * is half done ~9 degrees after top dead centre from 1000 to 4500 rpm, where best torque
+ * has it (Heywood), in 19-33 degrees from 10 to 90 %, as a 1960s two-valve engine burns.
+ */
+const PHYSICAL_FLAME_SPEED = 2.7;
+
 const flameSpeedFactors = [
   1.0, 1.0, 1.0, 1.1, 1.25, 1.25, 1.25, 1.25, 1.25, 1.25,
 ];
@@ -156,6 +166,14 @@ export interface Vw1200Tuning {
   };
   /** Its acoustics (none: engine-sim's recorded impulse response). */
   acoustics?: Acoustics;
+  /** Heard through the voice (engine/src/voice.rs) rather than engine-sim's synthesizer. */
+  voice?: VoiceSpec;
+  /**
+   * Physics beyond engine-sim's (engine/README.md): real gases, Woschni's heat transfer,
+   * gasoline's lower heating value, and the flame speed that goes with them. Without it,
+   * engine-sim's own, which its slow burn makes up for.
+   */
+  physical?: boolean;
 }
 
 export const REFERENCE_TUNING: Vw1200Tuning = {
@@ -195,11 +213,13 @@ export function vw1200Engine(tuning: Vw1200Tuning): EngineSpec {
     throttleGamma: 2.0,
     fuel: gasoline({
       maxBurningEfficiency: 0.9,
+      ...(tuning.physical && { energyDensity: GASOLINE_LHV }),
       turbulenceToFlameSpeedRatio: sampled(
         5.0,
         flameSpeedFactors.map((f, i) => {
           const x = i * 5.0;
-          return [x, i === 0 ? f * 3.0 : f * 1.5 * x];
+          const k = tuning.physical ? PHYSICAL_FLAME_SPEED : 1;
+          return [x, k * (i === 0 ? f * 3.0 : f * 1.5 * x)];
         }),
       ),
     }),
@@ -266,7 +286,8 @@ export function vw1200Engine(tuning: Vw1200Tuning): EngineSpec {
         velocityDecay: 1.0,
         audioVolume: 0.6 * 0.02,
         impulseResponse: "new/mild_exhaust.wav",
-        impulseVolume: 0.01,
+        // engine-sim's; with the flow source, at the same level.
+        impulseVolume: tuning.physical ? 0.0057 : 0.01,
       },
     ],
     ignition: {
@@ -285,11 +306,18 @@ export function vw1200Engine(tuning: Vw1200Tuning): EngineSpec {
       firing: [0.0, 1.0, 2.0, 3.0].map((q) => (q / 4.0) * cycle),
     },
     audio: {
-      hfGain: 0.01,
-      noise: 1.0,
+      // Computed acoustics radiate the valves' flow themselves: no derivative path, and no
+      // air noise on what is then the whole signal.
+      hfGain: tuning.acoustics ? 0 : 0.01,
+      noise: tuning.acoustics ? 0 : 1.0,
       jitter: 0.6,
+      ...(tuning.physical && { source: "flow" as const }),
       acoustics: tuning.acoustics,
+      ...(tuning.voice && { voice: tuning.voice }),
     },
+    ...(tuning.physical && {
+      physics: { realGas: true, wallTemperature: WALL_TEMPERATURE },
+    }),
   };
 }
 
@@ -380,14 +408,8 @@ const STOCK_ACOUSTICS: Acoustics = {
       temperature: 600,
     })),
   ],
-  // The cylinder behind its open exhaust valve.
-  volumes: ["cylinder 1", "cylinder 2", "cylinder 3", "cylinder 4"].map(
-    (node) => ({
-      node,
-      volume: 0.2 * u.L,
-      temperature: 900,
-    }),
-  ),
+  // No volume behind the ports: a blowdown is choked through its valve, a flow the pipe's
+  // waves can't push back on (a rigid end to them), and the other valves are shut.
   ports: ["cylinder 1", "cylinder 4", "cylinder 3", "cylinder 2"],
   outlets: [
     { node: "left tip", diameter: 0.026 },
@@ -395,18 +417,43 @@ const STOCK_ACOUSTICS: Acoustics = {
   ],
   // The chase camera.
   listenerDistance: 5,
-  gain: 1e-5,
+  gain: 1,
+  // Nothing on the way to the muffler damps the pulses: they steepen down each port's own
+  // pipe (the heat exchangers' J-tubes, the cross-over pipes).
+  nonlinear: { length: 0.5, temperature: 750 },
+};
+
+/**
+ * The voice (engine/src/voice.rs): a carburetted engine's combustion varies more from
+ * cycle to cycle than a modern one's; pushrods and solid lifters tick.
+ */
+const VOICE: VoiceSpec = {
+  // Physically some 10 dB quieter than the Ferrari at full throttle: heard a little
+  // quieter, as a game plays its cars.
+  fullScale: 2,
+  // About full throttle's exhaust flow (~35 g/s at 34 PS).
+  acousticFlow: 0.03,
+  variation: 0.04,
+  portNoise: 0.3,
+  tailNoise: 100,
+  valvetrain: 2,
+  // engine-sim's recorded response (?exhaust=impulse) at about the computed level.
+  impulseGain: 0.18,
 };
 
 /**
  * Tuned for the game against the published figures: 82 Nm at 2000 rpm, 34 PS at 3600 rpm
- * (torque falling to ~58 Nm by 4000), which give a 115 km/h top speed.
+ * (torque falling to ~58 Nm by 4000), which give a 115 km/h top speed. The cam and the
+ * small carburettor set the curve's shape: simulated, 81 Nm at 2000, 34.4 PS at 3600 and
+ * 61 Nm at 4000, the power flat beyond (with a longer cam and freer carburettor the torque
+ * held up past 3600, and the car outran Autocar's figures).
  */
 export const vw1200: EngineSpec = vw1200Engine({
+  physical: true,
   // Idles at ~850 rpm against its friction (and the fan's), unloaded.
-  idleThrottlePlate: 0.9865,
-  camDuration: 195 * u.deg,
-  carburettorCfm: 70.0,
+  idleThrottlePlate: 0.9857,
+  camDuration: 180 * u.deg,
+  carburettorCfm: 66.0,
   exhaust: {
     // The ports and J-tubes, ~30 mm.
     runnerArea: u.pi * 0.015 * 0.015,
@@ -421,4 +468,5 @@ export const vw1200: EngineSpec = vw1200Engine({
     outletFlowK: kArea(2 * u.pi * 0.013 * 0.013, 0.8),
   },
   acoustics: STOCK_ACOUSTICS,
+  voice: VOICE,
 });

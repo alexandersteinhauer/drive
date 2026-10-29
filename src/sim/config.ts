@@ -1,4 +1,5 @@
 import type { EngineSpec } from "./engineSpec";
+import { f154cd } from "./engines/f154cd";
 import { vw1200 } from "./engines/vw1200";
 import type { TireConfig } from "./tire";
 
@@ -52,6 +53,11 @@ export interface MappedEngineConfig extends EngineBase {
 export interface SimulatedEngineConfig extends EngineBase {
   type: "simulated";
   spec: EngineSpec;
+  /**
+   * Variable torque management (turbo engines): the ECU's cap on the boost in each gear,
+   * [rpm, gauge bar], from first gear up; gears beyond the list get the engine's full map.
+   */
+  boostByGear?: [number, number][][];
 }
 
 export type EngineConfig = MappedEngineConfig | SimulatedEngineConfig;
@@ -69,6 +75,8 @@ export interface GearboxConfig {
   shiftTime: number;
   /** Time over which the clutch comes back after a shift (s); 0 or absent: at once. */
   clutchRelease?: number;
+  /** Shifts up without lifting (a simulated engine's sparks are cut instead). */
+  dualClutch?: boolean;
 }
 
 export interface CombustionConfig {
@@ -158,6 +166,26 @@ export interface CarConfig {
     center: [number, number, number];
     halfExtents: [number, number, number];
   };
+}
+
+/**
+ * The car with its engine heard through engine-sim's exhaust impulse responses (each
+ * exhaust's `impulseResponse` file) instead of the acoustics computed from its geometry.
+ */
+export function withImpulseExhaust(cfg: CarConfig): CarConfig {
+  const out = structuredClone(cfg);
+  if (
+    out.powertrain.type === "combustion" &&
+    out.powertrain.engine.type === "simulated"
+  ) {
+    const audio = out.powertrain.engine.spec.audio;
+    delete audio.acoustics;
+    // engine-sim's synthesizer: its derivative path (the radiation, for the flow source),
+    // with air noise on the rest.
+    audio.hfGain = 0.01;
+    audio.noise = 1.0;
+  }
+  return out;
 }
 
 /**
@@ -381,4 +409,187 @@ export const vwBeetle: CarConfig = {
   handbrakeTorque: 1200,
   // From the model: 0.27 m under the floor pan up to the 1.61 m roof, bumper to bumper.
   body: { center: [0, 0.409, -0.068], halfExtents: [0.79, 0.669, 2.035] },
+};
+
+/**
+ * Ferrari 488 Pista (2018-20). Published by Ferrari (press kit, ferrari.com): 720 cv (530 kW)
+ * at 8000 rpm, 770 Nm at 3000 rpm in 7th gear (Variable Torque Management holds lower gears
+ * below that), 3902 cc twin-turbo V8, 8000 rpm, 1385 kg kerb with the lightweight options
+ * (1280 kg dry), 41.5/58.5 % front/rear, 4605 x 1975 x 1206 mm, 2650 mm wheelbase,
+ * 1679/1649 mm track, 245/35 ZR20 and 305/30 ZR20 (Michelin Pilot Sport Cup 2), carbon-ceramic
+ * discs 398/360 mm, 7-speed dual-clutch, E-Diff3, 0-100 km/h 2.85 s, 0-200 km/h 7.6 s,
+ * > 340 km/h. Gear ratios from the 488 GTB owner's manual (Ferrari lists none for the Pista,
+ * whose gearbox only shifts faster): 3.334/2.285/1.728/1.369/1.115/0.875/0.642, reverse
+ * 2.979, final drive 4.375.
+ * Car and Driver (2019 test): 0-60 mph 2.7 s, 0-100 mph 5.2 s, 0-150 mph 10.9 s, quarter
+ * mile 10.1 s at 144 mph, 1.10 g on the skidpad.
+ *
+ * The model measures as the real car (2.651 m wheelbase, 1.676/1.631 m track, tyres
+ * 0.342/0.348 m), so the axles and wheels follow it.
+ *
+ * Estimated (not published): centre of mass height, inertias, spring/damper/anti-roll rates
+ * (from ~1.9/2.1 Hz ride frequencies), tyre grip (for the skidpad figure), brake torques
+ * (for Ferrari's 29.5 m from 100 km/h). No downforce (the physics has none); the drag area is
+ * set for the published top speed. In the game it runs 0-100 km/h in ~3.9 s and the quarter
+ * mile in ~11 s at 144 mph: without launch control the engine first revs up from idle.
+ */
+const PISTA_WHEELBASE = 2.65;
+const PISTA_REAR_SHARE = 0.585;
+/**
+ * Variable Torque Management: Ferrari limits the boost below 7th gear, most in the lowest
+ * ones, so the torque rises with the revs like an aspirated engine's: 770 Nm only in 7th,
+ * up to 700 Nm in 1st-6th, less at low revs in the low gears (a 488 GTB logged ~11 psi of
+ * manifold boost in the low gears against 16 in 7th), and full power at 8000 in every gear
+ * (Ferrari's briefing to PistonHeads, 2015). The torque each gear is held to (estimated
+ * from that), and the boost cap that gives it on the simulated engine (calibrate.rs `boost`):
+ *
+ * - 1st-3rd: 540 Nm at 3000 rpm, 600 at 4000, 650 at 5000, 700 at 6000;
+ * - 4th: 610 at 3000, 670 at 4000, 700 from 5000; 5th: 660 at 3000, 700 from 4000;
+ *   6th: 700 from 3000;
+ * - all: 700 Nm to 6500 rpm, then the 7th-gear curve to 650 at 8000.
+ */
+const VTM_TOP: [number, number][] = [
+  [6500, 1.3],
+  [7000, 1.29],
+  [7500, 1.3],
+  [8000, 1.26],
+];
+const vtm = (low: [number, number][]): [number, number][] => [
+  ...low,
+  ...VTM_TOP,
+];
+const PISTA_VTM = [
+  ...Array.from({ length: 3 }, () =>
+    vtm([
+      [3000, 0.82],
+      [4000, 0.99],
+      [5000, 1.12],
+      [6000, 1.26],
+    ]),
+  ),
+  vtm([
+    [3000, 1.07],
+    [4000, 1.21],
+    [5000, 1.27],
+    [6000, 1.26],
+  ]),
+  vtm([
+    [3000, 1.23],
+    [4000, 1.3],
+    [5000, 1.27],
+    [6000, 1.26],
+  ]),
+  vtm([
+    [3000, 1.35],
+    [4000, 1.3],
+    [5000, 1.27],
+    [6000, 1.26],
+  ]),
+];
+
+const pistaAxle = {
+  restLength: 0.22,
+  bumpStop: 0.15,
+};
+
+export const ferrari488Pista: CarConfig = {
+  // 1385 kg kerb plus a driver.
+  mass: 1460,
+  inertia: [1950, 2100, 480],
+  cgHeight: 0.44,
+  front: {
+    ...pistaAxle,
+    z: -PISTA_WHEELBASE * PISTA_REAR_SHARE,
+    halfTrack: 1.676 / 2,
+    wheelRadius: 0.342,
+    wheelInertia: 0.9,
+    springRate: 43000,
+    bumpDamping: 2000,
+    reboundDamping: 3000,
+    antiRoll: 34000,
+    brakeTorque: 3000,
+    steered: true,
+    driven: false,
+  },
+  rear: {
+    ...pistaAxle,
+    z: PISTA_WHEELBASE * (1 - PISTA_REAR_SHARE),
+    halfTrack: 1.631 / 2,
+    wheelRadius: 0.348,
+    wheelInertia: 1.1,
+    springRate: 74000,
+    bumpDamping: 3100,
+    reboundDamping: 4700,
+    antiRoll: 26000,
+    brakeTorque: 1900,
+    steered: false,
+    driven: true,
+  },
+  // Semi-slick Cup 2s: high, sharp peak grip.
+  tire: {
+    muX: 1.4,
+    muY: 1.25,
+    peakSlipX: 0.09,
+    peakSlipY: Math.tan((7 * Math.PI) / 180),
+    shapeC: 1.5,
+    shapeE: 0.25,
+    relaxX: 0.1,
+    relaxY: 0.3,
+    loadSensitivity: 0.12,
+    nominalLoad: 4500,
+    lowSpeedDampingX: 0.04,
+    lowSpeedDampingY: 0.1,
+    lowSpeedThreshold: 3,
+    rollingResistance: 0.011,
+  },
+  powertrain: {
+    type: "combustion",
+    // The F154 CD, simulated (src/sim/engines/f154cd.ts).
+    engine: {
+      type: "simulated",
+      spec: f154cd,
+      boostByGear: PISTA_VTM,
+      idleRpm: 950,
+      // Launch control holds the revs up while the clutch slips, so the turbos spool.
+      engageRpm: 2200,
+      launchRpm: 4000,
+      clutchTorque: 1100,
+    },
+    gearbox: {
+      ratios: [3.334, 2.285, 1.728, 1.369, 1.115, 0.875, 0.642],
+      reverse: 2.979,
+      final: 4.375,
+      efficiency: 0.92,
+      shiftUpRpm: 7900,
+      shiftDownRpm: 3500,
+      shiftUpRpmLight: 3200,
+      shiftDownRpmLight: 1500,
+      // Dual clutch: one clutch hands over to the other.
+      shiftTime: 0.06,
+      clutchRelease: 0.05,
+      dualClutch: true,
+    },
+  },
+  // E-Diff3: an electronically locked differential, modelled as a strong clutch type.
+  diff: { preload: 80, powerRamp: 0.45, coastRamp: 0.3 },
+  dragArea: 0.9,
+  airDensity: 1.2,
+  steering: { lock: (30 * Math.PI) / 180, ackermann: 0.6, limitAssist: true },
+  abs: true,
+  tcs: true,
+  esc: {
+    enabled: true,
+    understeerGradient: 0.0007,
+    deadband: 0.04,
+    deadbandRatio: 0.15,
+    yawLag: 0.12,
+    slipAngleLimit: (6 * Math.PI) / 180,
+    slipAngleGain: 1.5,
+    gain: 4500,
+    maxTorque: 1800,
+  },
+  handbrakeTorque: 2000,
+  // From the model: ~0.1 m ground clearance up to the 1.19 m roof; 1.154 m front and 0.80 m
+  // rear overhang; 1975 mm wide without the mirrors.
+  body: { center: [0, 0.205, -0.403], halfExtents: [0.987, 0.545, 2.3] },
 };

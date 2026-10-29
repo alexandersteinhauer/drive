@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { Vector3 } from "three";
 import { Car, FATAL_ENERGY, type CarInput } from "./car";
-import { bmwI4, vwBeetle, type CarConfig } from "./config";
+import { bmwI4, ferrari488Pista, vwBeetle, type CarConfig } from "./config";
 import { sportsCoupe } from "./testCars";
 import {
   FlatGround,
@@ -164,6 +164,7 @@ describe("car", () => {
   for (const [name, cfg] of [
     ["i4", bmwI4],
     ["Beetle", vwBeetle],
+    ["488 Pista", ferrari488Pista],
   ] as const)
     for (const esc of ["on", "off"] as const)
       for (const target of [30, 45])
@@ -493,7 +494,9 @@ describe("vw beetle 1200", () => {
   test(
     "is about as slow as the real one",
     () => {
-      const car = makeCar(vwBeetle);
+      // As Autocar timed it: with a passenger and the test gear aboard as well as the
+      // driver, ~50 kg beyond the game's car (its kerb weight and a driver).
+      const car = makeCar({ ...vwBeetle, mass: vwBeetle.mass + 50 });
       run(car, 2, () => idle);
       const t80 = accelerateTo(car, 80);
       run(car, 90, () => ({ ...idle, throttle: 1 }));
@@ -560,6 +563,113 @@ describe("vw beetle 1200", () => {
       );
       expect(g).toBeGreaterThan(0.5);
       expect(g).toBeLessThan(0.95);
+      expect(upright(car)).toBeGreaterThan(0.95);
+    },
+    SIMULATED_ENGINE_TIMEOUT,
+  );
+});
+
+describe("ferrari 488 pista", () => {
+  test(
+    "settles at rest without creeping",
+    () => {
+      const car = makeCar(ferrari488Pista);
+      run(car, 4, () => idle);
+      const start = car.position.clone();
+      run(car, 4, () => idle);
+      expect(car.position.distanceTo(start)).toBeLessThan(0.01);
+      expect(Math.abs(car.position.y - ferrari488Pista.cgHeight)).toBeLessThan(
+        0.03,
+      );
+    },
+    SIMULATED_ENGINE_TIMEOUT,
+  );
+
+  test(
+    "is about as quick as the real one",
+    () => {
+      const car = makeCar(ferrari488Pista);
+      run(car, 2, () => idle);
+      const start = car.position.clone();
+      let t100 = 0;
+      let t200 = 0;
+      let quarter = 0;
+      let trap = 0;
+      run(
+        car,
+        90,
+        () => ({ ...idle, throttle: 1 }),
+        (t) => {
+          if (!t100 && kmh(car) >= 100) t100 = t;
+          if (!t200 && kmh(car) >= 200) t200 = t;
+          if (!quarter && car.position.distanceTo(start) >= 402.3) {
+            quarter = t;
+            trap = kmh(car) / 1.609;
+          }
+          return false;
+        },
+      );
+      console.log(
+        `488 Pista 0-100: ${t100.toFixed(2)} s (Ferrari: 2.85 with launch control), 0-200: ${t200.toFixed(2)} s (7.6), quarter mile ${quarter.toFixed(2)} s at ${trap.toFixed(0)} mph (Car and Driver: 10.1 at 144), top: ${kmh(car).toFixed(0)} km/h (> 340), gear ${car.gear}, ${car.rpm.toFixed(0)} rpm`,
+      );
+      // Without launch control the engine first has to rev up from idle.
+      expect(t100).toBeLessThan(4);
+      expect(t200).toBeLessThan(9);
+      expect(trap).toBeGreaterThan(139);
+      expect(trap).toBeLessThan(149);
+      expect(kmh(car)).toBeGreaterThan(335);
+      expect(kmh(car)).toBeLessThan(355);
+      expect(car.gear).toBe(7);
+    },
+    SIMULATED_ENGINE_TIMEOUT,
+  );
+
+  test(
+    "brakes from 100 km/h about as short as the real one",
+    () => {
+      const car = makeCar(ferrari488Pista);
+      accelerateTo(car, 100);
+      const start = car.position.clone();
+      run(
+        car,
+        10,
+        () => ({ ...idle, brake: 1 }),
+        () => car.speed < 0.1,
+      );
+      const distance = car.position.distanceTo(start);
+      console.log(`488 Pista 100-0: ${distance.toFixed(1)} m (Ferrari: 29.5)`);
+      expect(distance).toBeGreaterThan(27);
+      expect(distance).toBeLessThan(34);
+    },
+    SIMULATED_ENGINE_TIMEOUT,
+  );
+
+  test(
+    "holds about the skidpad's grip in a steady corner",
+    () => {
+      const car = makeCar(ferrari488Pista);
+      accelerateTo(car, 80);
+      let sumA = 0;
+      let n = 0;
+      run(car, 10, (t) => {
+        const err = 80 - kmh(car);
+        if (t > 6) {
+          sumA += car.speed * car.angularVelocity.y;
+          n++;
+        }
+        return {
+          ...idle,
+          steer: 0.35,
+          throttle: clamp01(0.3 + err * 0.1),
+          brake: clamp01(-err * 0.05),
+        };
+      });
+      const g = Math.abs(sumA / n) / 9.81;
+      console.log(
+        `488 Pista corner: ${g.toFixed(2)} g at ${kmh(car).toFixed(0)} km/h (Car and Driver skidpad: 1.10), roll up.y=${upright(car).toFixed(3)}`,
+      );
+      expect(g).toBeGreaterThan(0.95);
+      expect(g).toBeLessThan(1.25);
       expect(upright(car)).toBeGreaterThan(0.95);
     },
     SIMULATED_ENGINE_TIMEOUT,
@@ -701,6 +811,7 @@ describe("resting suspension and reset", () => {
     ["coupe", sportsCoupe],
     ["i4", bmwI4],
     ["beetle", vwBeetle],
+    ["488 pista", ferrari488Pista],
   ] as const)
     test(`${name} starts in static equilibrium without a suspension hop`, () => {
       const car = makeCar(cfg);

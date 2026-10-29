@@ -296,12 +296,15 @@ impl Fft {
 
 /// Uniformly partitioned overlap-save convolution: a long impulse response at a cost per
 /// sample that grows with its length only through one multiply-add per partition and bin.
-struct Partitioned {
+pub(crate) struct Partitioned {
     fft: Fft,
     bins: usize,
     /// Spectra of the impulse response's partitions, re then im.
     h_re: Vec<Vec<f32>>,
     h_im: Vec<Vec<f32>>,
+    /// Responses to blend between (spectra as h_re/h_im; process_blended).
+    sets: Vec<(Vec<Vec<f32>>, Vec<Vec<f32>>)>,
+    blend_tmp: Vec<f32>,
     /// Spectra of the last inputs (frequency-domain delay line).
     x_re: Vec<Vec<f32>>,
     x_im: Vec<Vec<f32>>,
@@ -314,11 +317,14 @@ struct Partitioned {
 }
 
 impl Partitioned {
-    fn new(impulse: &[f32]) -> Self {
+    pub(crate) fn new(impulse: &[f32]) -> Self {
+        Self::blending(&[impulse.to_vec()])
+    }
+
+    /// Spectra of an impulse response's partitions.
+    fn spectra(fft: &Fft, impulse: &[f32], parts: usize) -> (Vec<Vec<f32>>, Vec<Vec<f32>>) {
         let n = 2 * BLOCK;
-        let fft = Fft::new(n);
         let bins = BLOCK + 1;
-        let parts = impulse.len().div_ceil(BLOCK).max(1);
         let (mut h_re, mut h_im) = (Vec::new(), Vec::new());
         for p in 0..parts {
             let mut re = vec![0.0f32; n];
@@ -330,7 +336,20 @@ impl Partitioned {
             h_re.push(re[..bins].to_vec());
             h_im.push(im[..bins].to_vec());
         }
+        (h_re, h_im)
+    }
+
+    /// Convolution with a blend of `impulses` (see blend), starting at the first.
+    pub(crate) fn blending(impulses: &[Vec<f32>]) -> Self {
+        let n = 2 * BLOCK;
+        let fft = Fft::new(n);
+        let bins = BLOCK + 1;
+        let parts = impulses.iter().map(|i| i.len()).max().unwrap_or(0).div_ceil(BLOCK).max(1);
+        let sets: Vec<_> = impulses.iter().map(|i| Self::spectra(&fft, i, parts)).collect();
+        let (h_re, h_im) = sets[0].clone();
         Partitioned {
+            sets: if sets.len() > 1 { sets } else { Vec::new() },
+            blend_tmp: vec![0.0; BLOCK],
             fft,
             bins,
             x_re: vec![vec![0.0; bins]; parts],
@@ -346,10 +365,45 @@ impl Partitioned {
         }
     }
 
-    /// Convolves one block of BLOCK samples.
-    fn process(&mut self, input: &[f32], output: &mut [f32]) {
-        let n = 2 * BLOCK;
-        let parts = self.h_re.len();
+    /// Convolves one block of BLOCK samples (with the first response, or the only one).
+    pub(crate) fn process(&mut self, input: &[f32], output: &mut [f32]) {
+        self.push(input);
+        let (h_re, h_im) = (std::mem::take(&mut self.h_re), std::mem::take(&mut self.h_im));
+        self.convolve(&h_re, &h_im, output);
+        (self.h_re, self.h_im) = (h_re, h_im);
+        self.position = (self.position + 1) % self.h_re.len();
+    }
+
+    /// Convolves one block with the responses blended `x0` of the way through the sets at
+    /// its start and `x1` at its end (0: the first, 1: the second, 1.5: half way to the
+    /// third...): the outputs of the two neighbouring responses, crossfaded sample by
+    /// sample. Changing a convolution's response under its history instead would click.
+    pub(crate) fn process_blended(&mut self, input: &[f32], output: &mut [f32], x0: f64, x1: f64) {
+        if self.sets.is_empty() {
+            return self.process(input, output);
+        }
+        let top = (self.sets.len() - 1) as f64;
+        let (x0, x1) = (x0.clamp(0.0, top), x1.clamp(0.0, top));
+        self.push(input);
+        let i = (x1.min(x0) as usize).min(self.sets.len() - 2);
+        let (f0, f1) = ((x0 - i as f64) as f32, (x1 - i as f64) as f32);
+        let sets = std::mem::take(&mut self.sets);
+        let mut b = std::mem::take(&mut self.blend_tmp);
+        self.convolve(&sets[i].0, &sets[i].1, output);
+        if f0 != 0.0 || f1 != 0.0 {
+            self.convolve(&sets[i + 1].0, &sets[i + 1].1, &mut b);
+            for (k, (o, &y)) in output.iter_mut().zip(&b).enumerate() {
+                let f = f0 + (f1 - f0) * (k as f32 + 1.0) / BLOCK as f32;
+                *o += f * (y - *o);
+            }
+        }
+        self.blend_tmp = b;
+        self.sets = sets;
+        self.position = (self.position + 1) % self.x_re.len();
+    }
+
+    /// Adds a block of input to the frequency-domain delay line.
+    fn push(&mut self, input: &[f32]) {
         self.re[..BLOCK].copy_from_slice(&self.previous);
         self.re[BLOCK..].copy_from_slice(input);
         self.previous.copy_from_slice(input);
@@ -358,13 +412,19 @@ impl Partitioned {
         let slot = self.position;
         self.x_re[slot].copy_from_slice(&self.re[..self.bins]);
         self.x_im[slot].copy_from_slice(&self.im[..self.bins]);
+    }
 
+    /// The delay line convolved with the response `h` (partition spectra): this block.
+    fn convolve(&mut self, h_re: &[Vec<f32>], h_im: &[Vec<f32>], output: &mut [f32]) {
+        let n = 2 * BLOCK;
+        let parts = self.x_re.len();
+        let slot = self.position;
         self.acc_re.iter_mut().for_each(|v| *v = 0.0);
         self.acc_im.iter_mut().for_each(|v| *v = 0.0);
         for p in 0..parts {
             let x = (slot + parts - p) % parts;
             let (xr, xi) = (&self.x_re[x], &self.x_im[x]);
-            let (hr, hi) = (&self.h_re[p], &self.h_im[p]);
+            let (hr, hi) = (&h_re[p], &h_im[p]);
             for k in 0..self.bins {
                 self.acc_re[k] += xr[k] * hr[k] - xi[k] * hi[k];
                 self.acc_im[k] += xr[k] * hi[k] + xi[k] * hr[k];
@@ -384,7 +444,40 @@ impl Partitioned {
         for (o, v) in output.iter_mut().zip(&self.re[BLOCK..]) {
             *o = v * scale;
         }
-        self.position = (self.position + 1) % parts;
+    }
+}
+
+/// Second-order sections of a Butterworth high-pass (bilinear transform).
+pub(crate) struct HighPass {
+    sections: Vec<([f64; 5], [f64; 4])>,
+}
+
+impl HighPass {
+    /// Of `order` (even) at `cutoff` Hz.
+    pub(crate) fn new(order: usize, cutoff: f64, sample_rate: f64) -> Self {
+        let w = 2.0 * std::f64::consts::PI * cutoff / sample_rate;
+        let sections = (0..order / 2)
+            .map(|k| {
+                let q = 1.0 / (2.0 * (std::f64::consts::PI * (2 * k + 1) as f64 / (2 * order) as f64).sin());
+                let alpha = w.sin() / (2.0 * q);
+                let a0 = 1.0 + alpha;
+                let c = w.cos();
+                let b = [(1.0 + c) / 2.0 / a0, -(1.0 + c) / a0, (1.0 + c) / 2.0 / a0, -2.0 * c / a0, (1.0 - alpha) / a0];
+                (b, [0.0; 4])
+            })
+            .collect();
+        HighPass { sections }
+    }
+
+    pub(crate) fn f(&mut self, x: f32) -> f32 {
+        let mut v = x as f64;
+        for (c, s) in &mut self.sections {
+            // s: x[n-1], x[n-2], y[n-1], y[n-2]
+            let y = c[0] * v + c[1] * s[0] + c[2] * s[1] - c[3] * s[2] - c[4] * s[3];
+            *s = [v, s[0], y, s[2]];
+            v = y;
+        }
+        v as f32
     }
 }
 
@@ -465,6 +558,15 @@ struct Channel {
 
 pub struct Synthesizer {
     channels: Vec<Channel>,
+    /// With responses by flow (set_flow_responses): the flows (kg/s) they are for, and the
+    /// last channel then carries the flow rather than sound.
+    flow_levels: Vec<f64>,
+    flow_sum: f64,
+    /// Where the flow was among flow_levels at the end of the last block.
+    flow_position: f64,
+    /// Below hearing (and a car's speakers): the exhaust's flow changes radiate infrasound
+    /// that would only take the leveler's headroom.
+    hearing: HighPass,
     antialiasing: Butterworth<f32>,
     leveling: Leveling,
     pub params: AudioParameters,
@@ -513,6 +615,10 @@ impl Synthesizer {
         antialiasing.set_cutoff_frequency(audio_sample_rate * 0.45f32, audio_sample_rate);
         Synthesizer {
             channels,
+            flow_levels: Vec::new(),
+            flow_sum: 0.0,
+            flow_position: 0.0,
+            hearing: HighPass::new(4, 20.0, audio_sample_rate as f64),
             antialiasing,
             leveling: Leveling {
                 peak: 30000.0,
@@ -555,6 +661,33 @@ impl Synthesizer {
     /// renders in blocks of BLOCK samples, BLOCK samples late.
     pub fn set_impulse_response_f32(&mut self, index: usize, impulse: &[f32]) {
         self.channels[index].partitioned = Some(Partitioned::new(impulse));
+    }
+
+    /// Impulse responses at the audio rate for channel `index` at each of `levels` of the
+    /// exhaust's mass flow (kg/s, ascending), blended by the flow the last channel carries.
+    pub fn set_flow_responses(&mut self, index: usize, levels: &[f64], impulses: &[Vec<f32>]) {
+        assert_eq!(levels.len(), impulses.len());
+        self.flow_levels = levels.to_vec();
+        self.channels[index].partitioned = Some(Partitioned::blending(impulses));
+    }
+
+    /// Channels that carry sound (all but the flow's, if there is one).
+    fn sound_channels(&self) -> usize {
+        self.channels.len() - usize::from(!self.flow_levels.is_empty())
+    }
+
+    /// Where `flow` falls among flow_levels, as Partitioned::blend takes it.
+    fn flow_position(&self, flow: f64) -> f64 {
+        let l = &self.flow_levels;
+        if flow <= l[0] {
+            return 0.0;
+        }
+        for i in 1..l.len() {
+            if flow <= l[i] {
+                return (i - 1) as f64 + (flow - l[i - 1]) / (l[i] - l[i - 1]);
+            }
+        }
+        (l.len() - 1) as f64
     }
 
     pub fn set_input_sample_rate(&mut self, rate: f32) {
@@ -666,16 +799,26 @@ impl Synthesizer {
             }
         }
         let p = self.params;
+        let sound = self.sound_channels();
         for i in 0..n {
-            for c in 0..self.channels.len() {
+            for c in 0..sound {
                 let v_in = self.channel_input(c, i);
                 self.channels[c].block_in.push(v_in);
             }
+            if sound < self.channels.len() {
+                self.flow_sum += self.channels[sound].transfer[i] as f64;
+            }
             if self.channels[0].block_in.len() == BLOCK {
+                let x0 = self.flow_position;
+                if sound < self.channels.len() {
+                    self.flow_position = self.flow_position(self.flow_sum / BLOCK as f64);
+                    self.flow_sum = 0.0;
+                }
+                let x1 = self.flow_position;
                 self.block_mix.iter_mut().for_each(|v| *v = 0.0);
-                for ch in &mut self.channels {
+                for ch in &mut self.channels[..sound] {
                     match &mut ch.partitioned {
-                        Some(conv) => conv.process(&ch.block_in, &mut self.block_tmp),
+                        Some(conv) => conv.process_blended(&ch.block_in, &mut self.block_tmp, x0, x1),
                         None => self.block_tmp.copy_from_slice(&ch.block_in),
                     }
                     for (m, (&y, &x)) in self.block_mix.iter_mut().zip(self.block_tmp.iter().zip(&ch.block_in)) {
@@ -684,7 +827,7 @@ impl Synthesizer {
                     ch.block_in.clear();
                 }
                 for k in 0..BLOCK {
-                    let signal = self.antialiasing.f(self.block_mix[k]);
+                    let signal = self.hearing.f(self.antialiasing.f(self.block_mix[k]));
                     self.leveling.target = p.leveler_target;
                     let v = self.leveling.f(signal) * p.volume;
                     self.block_out.push_back(v.clamp(i16::MIN as f32, i16::MAX as f32) / 32768.0);
@@ -730,7 +873,7 @@ impl Synthesizer {
     fn render_sample(&mut self, input: usize) -> i16 {
         let p = self.params;
         let mut signal = 0.0f32;
-        for c in 0..self.channels.len() {
+        for c in 0..self.sound_channels() {
             let _r_0 = (2.0 * (self.rng.next() as f64 / RAND_MAX as f64) - 1.0) as f32;
             let ch = &mut self.channels[c];
             let jittered = ch.jitter.f(ch.transfer[input]);
@@ -822,6 +965,25 @@ mod tests {
         for n in 0..input.len() {
             let direct: f32 = (0..impulse.len().min(n + 1)).map(|k| impulse[k] * input[n - k]).sum();
             assert!((direct - fast[n]).abs() < 1e-3, "sample {n}: {direct} vs {}", fast[n]);
+        }
+    }
+
+    #[test]
+    fn blending_responses_is_convolving_with_their_blend() {
+        // Responses are blended linearly: half way between two is convolution with their
+        // mean.
+        let a: Vec<f32> = (0..700).map(|i| ((i as f32 * 0.21).sin() * (-(i as f32) / 200.0).exp())).collect();
+        let b: Vec<f32> = (0..900).map(|i| ((i as f32 * 0.05).cos() * (-(i as f32) / 400.0).exp())).collect();
+        let mean: Vec<f32> = (0..900).map(|i| 0.5 * (a.get(i).unwrap_or(&0.0) + b[i])).collect();
+        let input: Vec<f32> = (0..BLOCK * 20).map(|i| ((i * 7919) % 101) as f32 / 50.0 - 1.0).collect();
+        let (mut blended, mut direct) = (Partitioned::blending(&[a, b]), Partitioned::new(&mean));
+        let (mut x, mut y) = (vec![0.0; BLOCK], vec![0.0; BLOCK]);
+        for block in input.chunks(BLOCK) {
+            blended.process_blended(block, &mut x, 0.5, 0.5);
+            direct.process(block, &mut y);
+            for (p, q) in x.iter().zip(&y) {
+                assert!((p - q).abs() < 1e-3, "{p} vs {q}");
+            }
         }
     }
 }

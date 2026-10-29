@@ -18,7 +18,13 @@ import { hdrRendererOptions, setUpHdr } from "./tonemap";
 import { CarView, fetchModel } from "./carView";
 import { Input } from "./input";
 import { Car, type EscMode } from "./sim/car";
-import { bmwI4, vwBeetle, type CarConfig } from "./sim/config";
+import {
+  bmwI4,
+  ferrari488Pista,
+  vwBeetle,
+  withImpulseExhaust,
+  type CarConfig,
+} from "./sim/config";
 import { RoadView } from "./roadView";
 import { TerrainView } from "./terrainView";
 import { Vegetation } from "./vegetation";
@@ -143,6 +149,14 @@ let carSun = 1;
 /** -1 left view, 0 behind, +1 right view (smoothed). */
 let camSide = 0;
 
+/**
+ * ?exhaust=impulse: the engines heard through engine-sim's exhaust impulse response
+ * instead of the acoustics computed from each car's exhaust, to compare the two.
+ */
+const exhaust =
+  new URL(location.href).searchParams.get("exhaust") === "impulse"
+    ? withImpulseExhaust
+    : (cfg: CarConfig) => cfg;
 // C switches between these; the first is the one to start in.
 const models: {
   config: CarConfig;
@@ -155,9 +169,16 @@ const models: {
     headlights: { x: 0.7, y: 0.72, z: -2.05 },
   },
   {
-    config: vwBeetle,
+    config: exhaust(vwBeetle),
     url: "models/vw-beetle.glb",
     headlights: { x: 0.5, y: 0.78, z: -1.63 },
+  },
+  {
+    config: exhaust(ferrari488Pista),
+    url: "models/ferrari-488-pista.glb",
+    // At the cover, 0.16 m ahead of the projector lens: further in, the beam would light the
+    // bumper below from inside.
+    headlights: { x: 0.7, y: 0.57, z: -2.2 },
   },
 ];
 let model = 0;
@@ -242,7 +263,6 @@ function heading(): number {
 /** The current car's engine sound, once loaded; null for a silent (electric) car. */
 let engineSound: EngineSound | null = null;
 /** How closed the throttle is with the engine driven by the car, for the sound (0..1). */
-let overrun = 0;
 const engineSounds = new Map<EngineSpec, Promise<EngineSound | null>>();
 function simulatedEngine(of: Car): SimulatedEngine | null {
   return of.powerplant instanceof SimulatedEngine ? of.powerplant : null;
@@ -444,15 +464,10 @@ function frame(now: number): void {
   if (engine) {
     // The engine's exhaust signal of this frame's physics steps.
     const samples = engine.sim.takeAudio();
-    if (car.clutchEngagement > 0.5) {
-      // Follows the airflow rather than the pedal (throttle plate gamma 2).
-      const s = car.engineThrottle;
-      overrun = 1 - Math.sin((s * s * Math.PI) / 2);
-    } else overrun *= Math.exp(-dt / 0.2);
     if (engineSound) {
       const stopped = crashTime >= 0 || paused;
       engineSound.setVolume(stopped ? 0 : 1);
-      engineSound.push(samples, overrun);
+      engineSound.push(samples);
     }
   }
   view.update(crashTime >= 0 ? 1 : accumulator / DT);

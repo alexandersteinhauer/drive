@@ -8,7 +8,9 @@ use crate::rng::Rng;
 use crate::crank::Mechanism;
 use crate::solver::Body;
 use crate::spec::{CamSpec, EngineSpec, FuelSpec};
-use crate::units::{celcius, to_rpm, ATM, E, PI, ROOT_2};
+use crate::fastmath;
+use crate::turbo::{Turbo, TurboInputs};
+use crate::units::{celcius, to_rpm, AIR_MOLECULAR_MASS, ATM, E, PI, ROOT_2};
 use std::collections::VecDeque;
 
 const STATE_SAMPLES: usize = 256;
@@ -95,6 +97,9 @@ struct Intake {
     idle_throttle_plate_position: f64,
     runner_length: f64,
     velocity_decay: f64,
+    /// What the throttle draws from: the atmosphere, or the turbocharger's charge.
+    charge_pressure: f64,
+    charge_temperature: f64,
 }
 
 impl Intake {
@@ -123,10 +128,10 @@ impl Intake {
             cross_section_area_0: 10.0,
             cross_section_area_1: self.cross_section_area,
         };
-        self.atmosphere.reset(ATM, celcius(25.0), fuel_air_mix);
+        self.atmosphere.reset(self.charge_pressure, self.charge_temperature, fuel_air_mix);
         self.flow = GasSystem::flow(&params, &mut self.atmosphere, &mut self.system);
 
-        self.atmosphere.reset(ATM, celcius(25.0), fuel_mix);
+        self.atmosphere.reset(self.charge_pressure, self.charge_temperature, fuel_mix);
         params.k_flow = self.idle_flow_k;
         GasSystem::flow(&params, &mut self.atmosphere, &mut self.system);
 
@@ -143,8 +148,12 @@ struct Exhaust {
     collector_cross_section_area: f64,
     primary_flow_rate: f64,
     outlet_flow_rate: f64,
+    /// The turbine's opening (the spec's outlet), beside which a wastegate may open.
+    turbine_flow_rate: f64,
     audio_volume: f64,
     velocity_decay: f64,
+    /// Moles let out to the atmosphere in the last substep.
+    outflow: f64,
 }
 
 impl Exhaust {
@@ -159,7 +168,7 @@ impl Exhaust {
             cross_section_area_0: self.collector_cross_section_area,
             cross_section_area_1: 10.0,
         };
-        GasSystem::flow(&params, &mut self.atmosphere, &mut self.system);
+        self.outflow = -GasSystem::flow(&params, &mut self.atmosphere, &mut self.system);
         self.system.dissipate_excess_velocity();
         self.system.update_velocity(dt, self.velocity_decay);
     }
@@ -275,12 +284,36 @@ struct Cylinder {
     primary_to_collector_flow_rate: f64,
     cross_section_area: f64,
     exhaust_flow: f64,
+    /// The pressure of the wave the exhaust valve's flow launches into the runner, c m' / A,
+    /// integrated since the last audio sample (Pa s; negative for flow back into the
+    /// cylinder).
+    exhaust_wave: f64,
+    /// Moles through the exhaust valve since the last audio sample (out positive).
+    exhaust_moles: f64,
     pressure_history: [f64; STATE_SAMPLES],
     piston_speed_history: [f64; STATE_SAMPLES],
+    /// Combustion heat released so far (J).
+    released: f64,
+    /// Swept volume (m^3).
+    swept: f64,
+    /// The charge at intake valve closing: pressure, volume, temperature (for Woschni's
+    /// motored pressure); and whether the intake valve was open in the last step.
+    ivc: (f64, f64, f64),
+    intake_open: bool,
+    /// (V_ivc / V)^1.32, Woschni's motored compression, for the step (the piston holds
+    /// still over its substeps).
+    motored_ratio: f64,
+    /// 0.013 bore^-0.2, Woschni's constant part.
+    woschni_bore: f64,
 }
 
 /// Inputs read by the cylinders during a step that live elsewhere in the engine.
 struct Context<'a> {
+    /// Woschni's heat transfer to walls at this temperature (K); none: engine-sim's.
+    wall_temperature: Option<f64>,
+    /// With physics beyond engine-sim's, the crank speed (rad/s) the mean piston speed comes
+    /// from; none: engine-sim's average of the cycle's sampled piston speeds.
+    crank_speed: Option<f64>,
     banks: &'a [Bank],
     heads: &'a [Head],
     fuel: &'a Fuel,
@@ -301,6 +334,17 @@ impl Cylinder {
 
     fn piston_speed(&self) -> f64 {
         self.piston_v
+    }
+
+    /// The mean piston speed: 2 x stroke x revolutions per second. engine-sim averages the
+    /// piston speed sampled into 256 slots over the cycle, which reads low when a cycle
+    /// takes a whole number of steps short of 256 (160 at 7500 rpm): the slots it never
+    /// lands on keep stale values, and the burn, which scales with it, slows.
+    fn piston_speed_mean(&self, ctx: &Context) -> f64 {
+        match ctx.crank_speed {
+            Some(omega) => 2.0 * (self.swept / self.cross_section_area) * omega.abs() / (2.0 * PI),
+            None => self.mean_piston_speed(),
+        }
     }
 
     fn mean_piston_speed(&self) -> f64 {
@@ -337,7 +381,7 @@ impl Cylinder {
         self.lit = true;
 
         let fuel = ctx.fuel;
-        let turbulence = ctx.turbulence.sample_triangle(self.mean_piston_speed());
+        let turbulence = ctx.turbulence.sample_triangle(self.piston_speed_mean(ctx));
         let mixing_factor = 1.0
             - (clamp01(turbulence / fuel.max_turbulence_effect)
                 * clamp01(1.0 - dilution / fuel.max_dilution_effect));
@@ -348,6 +392,31 @@ impl Cylinder {
         self.flame.efficiency = efficiency_attenuation * fuel.max_burning_efficiency;
         self.flame.flame_speed =
             fuel.flame_speed(turbulence, afr, self.system.temperature(), self.system.pressure());
+    }
+
+    /// Woschni's heat transfer coefficient (W/m^2 K; Woschni, SAE 670931, 1967, in SI units
+    /// as Klein, Linköping 2004, gives it): from the gas pressure and temperature and a gas
+    /// speed from the piston's mean speed plus, once the valves are shut, the pressure the
+    /// burn adds over compression alone.
+    fn woschni(&self, piston: f64) -> f64 {
+        let p = self.system.pressure();
+        let t = self.system.temperature();
+        if p <= 0.0 || t <= 0.0 {
+            return 0.0;
+        }
+        let closed = self.intake_flow_rate == 0.0 && self.exhaust_flow_rate == 0.0;
+        let w = if closed {
+            let (p_ivc, v_ivc, t_ivc) = self.ivc;
+            // The motored pressure: the charge compressed polytropically from IVC.
+            let motored = p_ivc * self.motored_ratio;
+            2.28 * piston + 3.24e-3 * self.swept * t_ivc / (p_ivc * v_ivc) * (p - motored).max(0.0)
+        } else {
+            6.18 * piston
+        };
+        if w <= 0.0 {
+            return 0.0;
+        }
+        self.woschni_bore * fastmath::exp(0.8 * fastmath::ln(p * w) - 0.55 * fastmath::ln(t))
     }
 
     fn update(&mut self, ctx: &Context) {
@@ -370,6 +439,14 @@ impl Cylinder {
         self.exhaust_flow_rate = head
             .exhaust_port_flow
             .sample_triangle(head.exhaust_cam.valve_lift(self.index, ctx.crank_angle));
+        let intake_open = self.intake_flow_rate > 0.0;
+        if self.intake_open && !intake_open {
+            self.ivc = (self.system.pressure(), v, self.system.temperature());
+        }
+        self.intake_open = intake_open;
+        if ctx.wall_temperature.is_some() && !intake_open && self.exhaust_flow_rate == 0.0 {
+            self.motored_ratio = fastmath::pow(self.ivc.1 / v, 1.32);
+        }
     }
 
     fn flow(&mut self, dt: f64, ctx: &Context, intake: &mut Intake, exhaust: &mut Exhaust) {
@@ -381,8 +458,17 @@ impl Cylinder {
         let cylinder_surface_area =
             cylinder_height * PI * bank.bore + self.cross_section_area * 2.0;
 
-        let dt_temp = celcius(90.0) - self.system.temperature();
-        self.system.change_energy(dt_temp * cylinder_surface_area * 100.0 * dt);
+        match ctx.wall_temperature {
+            None => {
+                let dt_temp = celcius(90.0) - self.system.temperature();
+                self.system.change_energy(dt_temp * cylinder_surface_area * 100.0 * dt);
+            }
+            Some(wall) => {
+                let h = self.woschni(self.piston_speed_mean(ctx));
+                let t = self.system.temperature();
+                self.system.change_energy(-h * cylinder_surface_area * (t - wall) * dt);
+            }
+        }
 
         self.system.flow_env(self.blowby_k, dt, CRANKCASE_PRESSURE, celcius(25.0), &Mix::default());
 
@@ -425,6 +511,10 @@ impl Cylinder {
         }
 
         self.exhaust_flow = exhaust_flow;
+        self.exhaust_moles += exhaust_flow;
+        // A plane wave's pressure is rho c times its particle velocity: for a mass flow m'
+        // into a pipe of area A, c m' / A.
+        self.exhaust_wave += exhaust_flow * AIR_MOLECULAR_MASS * self.exhaust_runner.c() / head.exhaust_runner_area;
 
         if self.lit {
             let total_travel_x = bank.bore / 2.0;
@@ -447,6 +537,7 @@ impl Cylinder {
                 let fuel_burned = self.system.react(n * self.flame.efficiency, &global_mix);
                 let mass_fuel_burned = fuel_burned * ctx.fuel.molecular_mass;
                 self.system.change_energy(mass_fuel_burned * ctx.fuel.energy_density);
+                self.released += mass_fuel_burned * ctx.fuel.energy_density;
                 self.flame.lit_n += n;
                 self.flame.percentage_lit += lit_volume / volume;
             } else {
@@ -496,11 +587,20 @@ fn positive_mod(mut x: f64, m: f64) -> f64 {
 
 struct Ignition {
     timing: Function,
+    full_load: Option<crate::spec::FullLoadTiming>,
+    /// Manifold pressure as the ECU reads it (a ~10 ms average of the plenum's), for the
+    /// full-load blend.
+    map: f64,
+    /// Retard requested on top of the map (rad): the ECU's fast torque path.
+    retard: f64,
     rev_limit: f64,
     limiter_duration: f64,
     rev_limit_timer: f64,
     last_cycle_angle: f64,
     enabled: bool,
+    /// Fraction of sparks skipped, spread evenly (traction control's torque cut).
+    cut: f64,
+    cut_debt: f64,
 }
 
 /// The engine and everything it drives, stepped at the simulation frequency.
@@ -529,16 +629,35 @@ pub struct Engine {
     /// One audio channel per cylinder (its pulse at the valve, for acoustics.rs) instead of
     /// one per exhaust system (engine-sim's delayed, distance-scaled mix).
     per_cylinder_audio: bool,
+    /// The sound's source is the exhaust valves' volume velocity (AudioSource::Flow).
+    audio_flow: bool,
+    /// The audio is voice.rs's control stream (voice_channels).
+    voice: bool,
+    /// Each exhaust's temperature averaged over MEAN_FLOW_TIME (for the voice).
+    back_temperature: Vec<f64>,
+    /// Moles drawn through the throttles over the step, and that flow (kg/s) averaged.
+    air_moles: f64,
+    air_mass_flow: f64,
     /// Torque on the driven side (the load body), e.g. from the tyres.
     load_torque: f64,
     /// Sum of the clutch torque (forwards, on the load) over the steps since `set_load`.
     clutch_torque_sum: f64,
     clutch_steps: u32,
     staging: Vec<f64>,
+    /// Moles out of the exhausts' outlets over the step, and that flow (kg/s) averaged over
+    /// MEAN_FLOW_TIME: the computed acoustics' last channel, the flow their damping follows.
+    exhaust_moles: f64,
+    exhaust_mass_flow: f64,
     dyno_torque_samples: Vec<f64>,
     last_dyno_torque_sample: usize,
     pub impulse_responses: Vec<(String, f64)>,
     pub audio_params: (f64, f64, f64),
+    turbo: Option<Turbo>,
+    /// Physics beyond engine-sim's in use (any of the spec's `physics`).
+    physical: bool,
+    /// Each exhaust's wastegate, fully open (flow constant).
+    wastegate_flow_k: f64,
+    wall_temperature: Option<f64>,
 }
 
 impl Engine {
@@ -607,6 +726,8 @@ impl Engine {
                     idle_throttle_plate_position: s.idle_throttle_plate,
                     runner_length: s.runner_length,
                     velocity_decay: s.velocity_decay,
+                    charge_pressure: ATM,
+                    charge_temperature: celcius(25.0),
                 }
             })
             .collect();
@@ -629,8 +750,10 @@ impl Engine {
                     collector_cross_section_area: s.collector_area,
                     primary_flow_rate: s.primary_flow_k,
                     outlet_flow_rate: s.outlet_flow_k,
+                    turbine_flow_rate: s.outlet_flow_k,
                     audio_volume: s.audio_volume,
                     velocity_decay: s.velocity_decay,
+                    outflow: 0.0,
                 }
             })
             .collect();
@@ -700,8 +823,16 @@ impl Engine {
                     primary_to_collector_flow_rate: exhaust.primary_flow_rate,
                     cross_section_area,
                     exhaust_flow: 0.0,
+                    exhaust_wave: 0.0,
+                    exhaust_moles: 0.0,
                     pressure_history: [0.0; STATE_SAMPLES],
                     piston_speed_history: [0.0; STATE_SAMPLES],
+                    released: 0.0,
+                    swept: cross_section_area * 2.0 * cs.throw,
+                    ivc: (ATM, 1.0, celcius(25.0)),
+                    intake_open: false,
+                    motored_ratio: 1.0,
+                    woschni_bore: 0.013 * bank.bore.powf(-0.2),
                 });
             }
         }
@@ -723,11 +854,16 @@ impl Engine {
             turbulence,
             ignition: Ignition {
                 timing: spec.ignition.timing.clone(),
+                full_load: spec.ignition.full_load.clone(),
+                map: ATM,
+                retard: 0.0,
                 rev_limit: spec.ignition.rev_limit,
                 limiter_duration: spec.ignition.limiter_duration,
                 rev_limit_timer: 0.0,
                 last_cycle_angle: 0.0,
                 enabled: false,
+                cut: 0.0,
+                cut_debt: 0.0,
             },
             rng: Rng::new(1),
             crank_tdc: cs.tdc,
@@ -737,19 +873,20 @@ impl Engine {
             timestep: 1.0 / spec.simulation_frequency,
             fluid_steps: spec.fluid_steps,
             filtered_rpm: 0.0,
-            audio: vec![
-                Vec::new();
-                if spec.audio.acoustics.is_some() { spec.banks.iter().map(|b| b.cylinders.len()).sum() } else { spec.exhausts.len() }
-            ],
+            audio: vec![Vec::new(); audio_channels(spec)],
             collect_audio: true,
             per_cylinder_audio: spec.audio.acoustics.is_some(),
+            audio_flow: spec.audio.source == crate::spec::AudioSource::Flow,
+            voice: spec.audio.voice.is_some(),
+            back_temperature: vec![celcius(25.0); spec.exhausts.len()],
+            air_moles: 0.0,
+            air_mass_flow: 0.0,
             load_torque: 0.0,
             clutch_torque_sum: 0.0,
             clutch_steps: 0,
-            staging: vec![
-                0.0;
-                if spec.audio.acoustics.is_some() { spec.banks.iter().map(|b| b.cylinders.len()).sum() } else { spec.exhausts.len() }
-            ],
+            staging: vec![0.0; audio_channels(spec)],
+            exhaust_moles: 0.0,
+            exhaust_mass_flow: 0.0,
             dyno_torque_samples: vec![0.0; 512],
             last_dyno_torque_sample: 0,
             impulse_responses: spec
@@ -758,6 +895,10 @@ impl Engine {
                 .map(|e| (e.impulse_response.clone(), e.impulse_volume))
                 .collect(),
             audio_params: (spec.audio.hf_gain, spec.audio.noise, spec.audio.jitter),
+            turbo: spec.turbo.as_ref().map(|t| Turbo::new(t, spec.physics.real_gas)),
+            wastegate_flow_k: spec.turbo.as_ref().map_or(0.0, |t| t.wastegate_flow_k),
+            wall_temperature: spec.physics.wall_temperature,
+            physical: spec.physics.real_gas || spec.physics.wall_temperature.is_some(),
         };
 
         // Chambers filled with air at the placed pistons.
@@ -769,12 +910,29 @@ impl Engine {
             };
             engine.cylinders[i].system.initialize(ATM, v, celcius(25.0));
         }
+        if spec.physics.real_gas {
+            for i in &mut engine.intakes {
+                i.system.set_real(true);
+                i.atmosphere.set_real(true);
+            }
+            for e in &mut engine.exhausts {
+                e.system.set_real(true);
+                e.atmosphere.set_real(true);
+            }
+            for c in &mut engine.cylinders {
+                for s in [&mut c.system, &mut c.intake_runner, &mut c.exhaust_runner] {
+                    s.set_real(true);
+                }
+            }
+        }
         engine.ignition.last_cycle_angle = engine.cycle_angle();
         engine
     }
 
     fn context(&self) -> Context<'_> {
         Context {
+            wall_temperature: self.wall_temperature,
+                crank_speed: self.physical.then(|| self.mech.omega()),
             banks: &self.banks,
             heads: &self.heads,
             fuel: &self.fuel,
@@ -835,6 +993,24 @@ impl Engine {
 
     pub fn set_ignition(&mut self, on: bool) {
         self.ignition.enabled = on;
+    }
+
+    /// Skips this fraction of the sparks (0..1), spread evenly over the cylinders: a torque
+    /// cut that leaves the throttle, and a turbo's boost, as they are.
+    pub fn set_spark_cut(&mut self, cut: f64) {
+        self.ignition.cut = cut.clamp(0.0, 1.0);
+    }
+
+    /// Retards the spark from the map by `retard` (rad): the ECU's fast torque reduction.
+    pub fn set_spark_retard(&mut self, retard: f64) {
+        self.ignition.retard = retard.max(0.0);
+    }
+
+    /// Caps the turbocharger's boost target (gauge Pa), as an ECU limiting torque does.
+    pub fn set_boost_limit(&mut self, limit: f64) {
+        if let Some(t) = &mut self.turbo {
+            t.limit = limit;
+        }
     }
 
     pub fn set_dyno(&mut self, enabled: bool, hold: bool, speed: f64) {
@@ -914,8 +1090,39 @@ impl Engine {
         self.cylinders[i].system.volume()
     }
 
+    /// Combustion heat released in all cylinders so far (J).
+    pub fn combustion_energy(&self) -> f64 {
+        self.cylinders.iter().map(|c| c.released).sum()
+    }
+
+    /// The share of cylinder `i`'s charge the flame has reached since its last spark (0..1;
+    /// it holds its last value once the burn ends).
+    pub fn cylinder_burned(&self, i: usize) -> f64 {
+        let f = &self.cylinders[i].flame;
+        if f.total_n > 0.0 {
+            f.lit_n / f.total_n
+        } else {
+            0.0
+        }
+    }
+
     pub fn exhaust_runner_pressure(&self, i: usize) -> f64 {
         self.cylinders[i].exhaust_runner.pressure()
+    }
+
+    pub fn exhaust_runner_temperature(&self, i: usize) -> f64 {
+        self.cylinders[i].exhaust_runner.temperature()
+    }
+
+    /// Pressure behind the throttle, in the (first) intake plenum.
+    pub fn manifold_pressure(&self) -> f64 {
+        self.intakes.first().map_or(ATM, |i| i.system.pressure())
+    }
+
+    /// The turbocharger's boost over the atmosphere (Pa) and shaft speed (rad/s); zero
+    /// without one.
+    pub fn turbo_state(&self) -> (f64, f64) {
+        self.turbo.as_ref().map_or((0.0, 0.0), |t| (t.charge_pressure - ATM, t.omega))
     }
 
     /// One simulation step (Simulator::simulateStep).
@@ -984,10 +1191,19 @@ impl Engine {
     fn update_ignition(&mut self, dt: f64) {
         let cycle_angle = self.cycle_angle();
         let v_theta = self.crank_speed();
+        let manifold = self.intakes.first().map_or(ATM, |i| i.system.pressure());
         let ign = &mut self.ignition;
+        if ign.full_load.is_some() {
+            ign.map += (manifold - ign.map) * (dt / 0.01).min(1.0);
+        }
         if ign.enabled && ign.rev_limit_timer == 0.0 {
             let four_pi = 4.0 * PI;
-            let advance = ign.timing.sample_triangle(-v_theta);
+            let mut advance = ign.timing.sample_triangle(-v_theta);
+            if let Some(full) = &ign.full_load {
+                let load = ((ign.map - ATM) / (full.pressure - ATM)).clamp(0.0, 1.0);
+                advance += load * (full.timing.sample_triangle(-v_theta) - advance);
+            }
+            advance -= ign.retard;
             for c in &mut self.cylinders {
                 let mut adjusted_angle = positive_mod(c.firing_angle - advance, four_pi);
                 let r0 = ign.last_cycle_angle;
@@ -1007,6 +1223,13 @@ impl Engine {
                     }
                     if adjusted_angle >= r1 && adjusted_angle < r0 {
                         c.ignition_event = true;
+                    }
+                }
+                if c.ignition_event && ign.cut > 0.0 {
+                    ign.cut_debt += ign.cut;
+                    if ign.cut_debt >= 1.0 {
+                        ign.cut_debt -= 1.0;
+                        c.ignition_event = false;
                     }
                 }
             }
@@ -1029,6 +1252,8 @@ impl Engine {
         {
             let (crank_angle, cycle_angle) = (self.crank_angle(), self.cycle_angle());
             let ctx = Context {
+                wall_temperature: self.wall_temperature,
+                crank_speed: self.physical.then(|| self.mech.omega()),
                 banks: &self.banks,
                 heads: &self.heads,
                 fuel: &self.fuel,
@@ -1046,14 +1271,24 @@ impl Engine {
         }
 
         let fluid_dt = dt / self.fluid_steps as f64;
+        // What passes the throttles and leaves the exhausts over the step, for the turbo.
+        let (mut air, mut outflow, mut outflow_energy) = (0.0, 0.0, 0.0);
         for _ in 0..self.fluid_steps {
             for e in &mut self.exhausts {
                 e.process(fluid_dt);
+                self.exhaust_moles += e.outflow;
+                if self.turbo.is_some() && e.outflow > 0.0 {
+                    outflow += e.outflow;
+                    outflow_energy += e.outflow * e.system.temperature();
+                }
             }
             for i in &mut self.intakes {
                 i.process(fluid_dt);
+                air += i.flow;
             }
             let ctx = Context {
+                wall_temperature: self.wall_temperature,
+                crank_speed: self.physical.then(|| self.mech.omega()),
                 banks: &self.banks,
                 heads: &self.heads,
                 fuel: &self.fuel,
@@ -1070,25 +1305,67 @@ impl Engine {
             c.ignition_event = false;
         }
         self.cylinders = cylinders;
+        self.air_moles += air;
+
+        if let Some(turbo) = &mut self.turbo {
+            let n = self.exhausts.len() as f64;
+            let exhaust_pressure = self.exhausts.iter().map(|e| e.system.pressure()).sum::<f64>() / n;
+            let exhaust_temperature = if outflow > 0.0 { outflow_energy / outflow } else { 0.0 };
+            let manifold = self.intakes.first().map_or(ATM, |i| i.system.pressure());
+            // The flow splits between turbine and wastegate by their openings.
+            let wastegate_k = self.wastegate_flow_k * turbo.wastegate;
+            let turbine_share = self.exhausts.first().map_or(1.0, |e| {
+                e.turbine_flow_rate / (e.turbine_flow_rate + wastegate_k).max(1e-30)
+            });
+            turbo.update(
+                dt,
+                &TurboInputs {
+                    air: air / dt,
+                    exhaust: outflow * turbine_share / dt,
+                    exhaust_temperature,
+                    exhaust_pressure,
+                    manifold,
+                    crank: self.mech.omega(),
+                },
+            );
+            for i in &mut self.intakes {
+                i.charge_pressure = turbo.charge_pressure;
+                i.charge_temperature = turbo.charge_temperature;
+            }
+            let wastegate_k = self.wastegate_flow_k * turbo.wastegate;
+            for e in &mut self.exhausts {
+                e.outlet_flow_rate = e.turbine_flow_rate + wastegate_k;
+            }
+        }
     }
 
     /// The exhaust pulses as the synthesizer's input (writeToSynthesizer).
     fn write_audio(&mut self) {
+        if self.voice {
+            return self.write_voice();
+        }
         for s in &mut self.staging {
             *s = 0.0;
         }
         let attenuation = self.filtered_rpm.abs().min(40.0) / 40.0;
         let attenuation_3 = attenuation * attenuation * attenuation;
         let count = self.cylinders.len() as f64;
+        let dt = self.timestep;
         for (i, c) in self.cylinders.iter_mut().enumerate() {
+            c.exhaust_moles = 0.0;
             let exhaust = &self.exhausts[c.exhaust];
             let exhaust_length = c.primary_length + exhaust.length;
             let runner = &c.exhaust_runner;
-            let exhaust_flow = attenuation_3
-                * 1600.0
-                * (1.0 * (runner.pressure() - ATM)
-                    + 0.1 * runner.dynamic_pressure(1.0, 0.0)
-                    + 0.1 * runner.dynamic_pressure(-1.0, 0.0));
+            let exhaust_flow = if self.audio_flow {
+                attenuation_3 * 1600.0 * c.exhaust_wave / dt
+            } else {
+                attenuation_3
+                    * 1600.0
+                    * (1.0 * (runner.pressure() - ATM)
+                        + 0.1 * runner.dynamic_pressure(1.0, 0.0)
+                        + 0.1 * runner.dynamic_pressure(-1.0, 0.0))
+            };
+            c.exhaust_wave = 0.0;
             if self.per_cylinder_audio {
                 // The pulse as it leaves the valve: the exhaust's acoustics do the rest.
                 self.staging[i] = c.sound_attenuation * (exhaust.audio_volume * exhaust_flow / count);
@@ -1099,6 +1376,61 @@ impl Engine {
                 * (exhaust.audio_volume * delayed / count)
                 * (1.0 / (exhaust_length * exhaust_length));
         }
+        if self.per_cylinder_audio {
+            let flow = self.exhaust_moles * AIR_MOLECULAR_MASS / dt;
+            self.exhaust_mass_flow += (flow - self.exhaust_mass_flow) * (dt / MEAN_FLOW_TIME).min(1.0);
+            let last = self.staging.len() - 1;
+            self.staging[last] = self.exhaust_mass_flow;
+        }
+        self.exhaust_moles = 0.0;
+        if self.collect_audio {
+            for (out, s) in self.audio.iter_mut().zip(&self.staging) {
+                out.push(*s as f32);
+            }
+        }
+    }
+
+    /// voice.rs's control stream for the step: each cylinder's exhaust valve flow, then the
+    /// state the voice's other sources follow (crate::voice::Global).
+    fn write_voice(&mut self) {
+        let dt = self.timestep;
+        let mean = (dt / MEAN_FLOW_TIME).min(1.0);
+        for (i, e) in self.exhausts.iter().enumerate() {
+            self.back_temperature[i] += (e.system.temperature() - self.back_temperature[i]) * mean;
+        }
+        // Each valve's flow over the step, as a volume velocity in its runner (at the
+        // runner's pressure and the gas's temperature): what the exhaust's acoustics take.
+        // Its low frequencies are the simulation's prediction, waves in the runners and all;
+        // the voice makes its high ones (voice.rs).
+        for (i, c) in self.cylinders.iter_mut().enumerate() {
+            let n = c.exhaust_moles / dt;
+            c.exhaust_moles = 0.0;
+            let runner = &c.exhaust_runner;
+            let t = if n > 0.0 { c.system.temperature() } else { runner.temperature() };
+            self.staging[i] = n * crate::units::R * t / runner.pressure();
+        }
+        let flow = self.exhaust_moles * AIR_MOLECULAR_MASS / dt;
+        self.exhaust_mass_flow += (flow - self.exhaust_mass_flow) * mean;
+        self.exhaust_moles = 0.0;
+        let air = self.air_moles * AIR_MOLECULAR_MASS / dt;
+        self.air_mass_flow += (air - self.air_mass_flow) * mean;
+        self.air_moles = 0.0;
+        use crate::voice::Global as G;
+        let manifold = self.manifold_pressure();
+        let g = &mut self.staging[self.cylinders.len()..];
+        let n = self.exhausts.len() as f64;
+        g[G::CrankSpeed as usize] = self.mech.omega().abs();
+        g[G::ExhaustFlow as usize] = self.exhaust_mass_flow;
+        g[G::ExhaustTemperature as usize] = self.back_temperature.iter().sum::<f64>() / n;
+        g[G::AirFlow as usize] = self.air_mass_flow;
+        g[G::Manifold as usize] = manifold;
+        g[G::Throttle as usize] = self.speed_control;
+        let (charge, shaft, vented, wastegate) =
+            self.turbo.as_ref().map_or((ATM, 0.0, 0.0, 0.0), |t| (t.charge_pressure, t.omega, t.vented(), t.wastegate));
+        g[G::Charge as usize] = charge;
+        g[G::TurboSpeed as usize] = shaft;
+        g[G::Vented as usize] = vented;
+        g[G::Wastegate as usize] = wastegate;
         if self.collect_audio {
             for (out, s) in self.audio.iter_mut().zip(&self.staging) {
                 out.push(*s as f32);
@@ -1109,5 +1441,22 @@ impl Engine {
     /// The last step's exhaust signal per exhaust system, at full precision.
     pub fn staging(&self) -> &[f64] {
         &self.staging
+    }
+}
+
+/// Averaging time of the exhaust's mean flow for its acoustics' damping: a few engine cycles.
+const MEAN_FLOW_TIME: f64 = 0.03;
+
+/// The engine's audio channels: with a voice, its control stream (each cylinder's exhaust
+/// valve flow, then crate::voice::GLOBALS of state); with computed acoustics, one per
+/// cylinder (the pulse at its valve) and last the exhaust's mean mass flow (kg/s); else one
+/// per exhaust system.
+pub fn audio_channels(spec: &EngineSpec) -> usize {
+    if spec.audio.voice.is_some() {
+        spec.banks.iter().map(|b| b.cylinders.len()).sum::<usize>() + crate::voice::GLOBALS
+    } else if spec.audio.acoustics.is_some() {
+        spec.banks.iter().map(|b| b.cylinders.len()).sum::<usize>() + 1
+    } else {
+        spec.exhausts.len()
     }
 }

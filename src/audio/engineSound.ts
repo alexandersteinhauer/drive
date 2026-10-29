@@ -2,7 +2,7 @@
 // oxlint-disable-next-line import/default
 import workletUrl from "./engineWorklet.ts?worker&url";
 import wasmUrl from "../sim/engine.wasm?url";
-import type { EngineSpec } from "../sim/engineSpec";
+import { audioChannels, type EngineSpec } from "../sim/engineSpec";
 import type {
   EngineInput,
   EngineMessage,
@@ -10,9 +10,9 @@ import type {
 } from "./engineWorklet";
 
 /**
- * The combustion engine's sound: the game simulates the engine and hands over its exhaust
- * signal each frame (`push`); engine-sim's synthesizer turns it into audio on the audio
- * thread.
+ * The combustion engine's sound: the game simulates the engine and hands over its audio
+ * channels each frame (`push`); the voice (engine/src/voice.rs), or engine-sim's
+ * synthesizer for specs without one, turns them into audio on the audio thread.
  */
 export class EngineSound {
   /** Buffered sound (s) and the synthesizer's share of real time. */
@@ -56,9 +56,8 @@ export class EngineSound {
       spec: new TextEncoder().encode(JSON.stringify(spec))
         .buffer as ArrayBuffer,
       frequency: spec.simulationFrequency,
-      channels: spec.audio.acoustics
-        ? spec.banks.reduce((n, b) => n + b.cylinders.length, 0)
-        : spec.exhausts.length,
+      channels: audioChannels(spec),
+      voice: !!spec.audio.voice,
       impulses,
     };
     const node = new AudioWorkletNode(context, "engine-sim", {
@@ -85,10 +84,10 @@ export class EngineSound {
       void this.context.resume();
   }
 
-  /** The steps simulated since the last call, and how closed the throttle is on overrun. */
-  push(samples: Float32Array[], overrun: number): void {
+  /** The steps simulated since the last call (the engine's audio channels). */
+  push(samples: Float32Array[]): void {
     if (!samples[0]?.length) return;
-    const input: EngineInput = { samples, overrun };
+    const input: EngineInput = { samples };
     this.node.port.postMessage(
       input,
       samples.map((s) => s.buffer as ArrayBuffer),

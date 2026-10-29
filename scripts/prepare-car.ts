@@ -2,6 +2,7 @@
  * Turns a downloaded car GLB into a game-ready asset:
  *   bun scripts/prepare-car.ts bmw-i4 <source.glb> public/models/bmw-i4.glb
  *   bun scripts/prepare-car.ts vw-beetle <source.glb> public/models/vw-beetle.glb
+ *   bun scripts/prepare-car.ts ferrari-488-pista <scene.gltf> public/models/ferrari-488-pista.glb
  *
  * - drops parts the game doesn't show (the BMW's interior and licence plate)
  * - bakes all transforms, scales to metres (by overall length) and turns the car to face -Z
@@ -113,6 +114,53 @@ const PROFILES: Record<string, Profile> = {
             prim.setMaterial(glass);
     },
   },
+  // 488 Pista, 4605 mm long. Sketchfab's export names its parts by their parent node
+  // ("Mesh81_..."); each wheel's tyre, rim, disc and caliper is a part of its own.
+  "ferrari-488-pista": {
+    length: 4.605,
+    drop: () => false,
+    tyre: (n) => /^Mesh(78|80|81|88)_/.test(n),
+    wheel: (n) => /^Mesh(78|79|80|81|82|83|84|85|86|87|88|89)_/.test(n),
+    steerOnly: (n) => /^Mesh(66|67|69|70|72|73|75|76)_/.test(n),
+    wheelOnly: (n) => /^Mesh(7[89]|8[0-9])_/.test(n),
+    simplify: false,
+    padTextures: false,
+    materials: (doc) => {
+      const root = doc.getRoot();
+      for (const m of root.listMaterials())
+        m.setName(
+          m.getName().replace("Ferrari_488Pista_2019_Modified__CSB_", ""),
+        );
+      // The windows' dark tint also covers the headlamps and the rear lamps, which it hid;
+      // those covers (all beyond the cabin, |z| > 1.5 m) get a clear glass of their own.
+      const tinted = root
+        .listMaterials()
+        .find((m) => m.getName() === "GlassMtl")!;
+      const clear = tinted
+        .clone()
+        .setName("LampGlass")
+        .setBaseColorFactor([1, 1, 1, 0.1]);
+      for (const mesh of root.listMeshes())
+        for (const prim of mesh.listPrimitives()) {
+          if (prim.getMaterial() !== tinted) continue;
+          // Split parts are unindexed: triangle t is vertices 3t..3t+2.
+          const pos = prim.getAttribute("POSITION")!;
+          const v = [0, 0, 0];
+          const lamps: number[] = [];
+          const windows: number[] = [];
+          for (let t = 0; t < pos.getCount() / 3; t++) {
+            let z = 0;
+            for (let k = 0; k < 3; k++) z += pos.getElement(t * 3 + k, v)[2]!;
+            (Math.abs(z / 3) > 1.5 ? lamps : windows).push(t);
+          }
+          if (!lamps.length) continue;
+          mesh.removePrimitive(prim);
+          mesh.addPrimitive(extract(prim, windows));
+          mesh.addPrimitive(extract(prim, lamps).setMaterial(clear));
+          prim.dispose();
+        }
+    },
+  },
 };
 
 const [profileName, srcPath, outPath] = process.argv.slice(2);
@@ -133,6 +181,10 @@ const io = new NodeIO()
 const doc = await io.read(srcPath);
 const root = doc.getRoot();
 const scene = root.listScenes()[0]!;
+// Sketchfab's exports put each mesh on a node "Object_<n>" under the part's named node.
+for (const node of root.listNodes())
+  if (node.getMesh() && /^Object_\d+$/.test(node.getName()))
+    node.setName(node.getParentNode()?.getName() ?? node.getName());
 
 // Bake every node's world transform into its geometry, so all positions share one frame.
 await doc.transform(flatten());

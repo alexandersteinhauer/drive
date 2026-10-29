@@ -109,47 +109,145 @@ export interface EngineSpec {
   ignition: {
     /** Crank speed (rad/s) to spark advance (rad). */
     timing: SampledFunction;
+    /**
+     * The advance at full load, by crank speed, and the manifold pressure (Pa) it holds from:
+     * the advance blends from `timing` at atmospheric pressure to this, as an ECU's spark
+     * table by speed and load (best-torque timing at part load, knock-limited under boost).
+     */
+    fullLoad?: { timing: SampledFunction; pressure: number };
     revLimit: number;
     limiterDuration: number;
     /** Firing angle per cylinder, banks in order. */
     firing: number[];
   };
   audio: {
+    /**
+     * The synthesizer's derivative path, mixed against its direct one (engine-sim's 0.01:
+     * nearly all of the signal above ~16 Hz). With the flow source and a recorded impulse
+     * response, it is the tailpipe's radiation; computed acoustics include that (0).
+     */
     hfGain: number;
+    /** Noise multiplying the direct path (engine-sim's "air noise"). */
     noise: number;
     jitter: number;
+    /**
+     * What drives the sound (engine/src/spec.rs AudioSource): "pressure", engine-sim's,
+     * each exhaust runner's pressure above the atmosphere's; "flow", each exhaust valve's
+     * flow as the pressure of the wave it launches into the runner (c m' / A), whose steady
+     * part makes no sound (nor does a turbine's back-pressure).
+     */
+    source?: "pressure" | "flow";
     /**
      * The exhaust's acoustics, computed from its geometry (engine/src/acoustics.rs): one
      * impulse response per cylinder in place of the exhausts' recorded ones.
      */
     acoustics?: Acoustics;
+    /**
+     * The sound as engine/src/voice.rs makes it, in place of engine-sim's synthesizer
+     * (and the fields above but `acoustics`): from each exhaust valve's flow, event by
+     * event, through the acoustics (or, without them, the exhausts' recorded responses),
+     * with the noise and the other sources a car makes.
+     */
+    voice?: VoiceSpec;
   };
+  /** A turbocharger feeding every intake from every exhaust (engine/src/turbo.rs). */
+  turbo?: TurboSpec;
+  /** Physics beyond engine-sim's (engine/README.md); absent: engine-sim's own. */
+  physics?: {
+    /** Heat capacity ratio falling with temperature, and flows carrying enthalpy. */
+    realGas?: boolean;
+    /** Woschni's heat transfer to cylinder walls at this mean temperature (K). */
+    wallTemperature?: number;
+  };
+}
+
+/**
+ * engine/src/voice.rs's sources beyond the exhaust valves' flow, and its output level
+ * (engine/src/spec.rs VoiceSpec). Each level multiplies the source's physical estimate; 0
+ * or absent leaves it out.
+ */
+export interface VoiceSpec {
+  /** Sound pressure (Pa) at the listener that is full scale. */
+  fullScale: number;
+  /** Mean exhaust mass flow (kg/s) the acoustics' flow losses are fixed at. */
+  acousticFlow?: number;
+  /** Each blowdown's random strength beyond the simulation's (standard deviation). */
+  variation?: number;
+  /** Turbulence of the valve jets, through the acoustics. */
+  portNoise?: number;
+  /** The tailpipe jets' noise (Lighthill's), pulsing with their flow. */
+  tailNoise?: number;
+  /** The engine bay: manifold and turbine shells ringing with the pulses. */
+  bay?: number;
+  /** Valves seating; direct injectors ticking. */
+  valvetrain?: number;
+  injectors?: number;
+  /** Turbocharger: compressor noise, its blade-pass whine (with the blade count). */
+  whoosh?: number;
+  whistle?: number;
+  compressorBlades?: number;
+  /** The blow-off valve venting boost as the throttle shuts. */
+  blowOff?: number;
+  /** Scales recorded impulse responses (without acoustics) to the computed level. */
+  impulseGain?: number;
+}
+
+/** Twin turbos count as one, with their flows and inertias summed. */
+export interface TurboSpec {
+  /** Compressor wheel tip radius (m). */
+  compressorRadius: number;
+  /** Rotating assemblies' moment of inertia (kg m^2). */
+  inertia: number;
+  compressorEfficiency: number;
+  turbineEfficiency: number;
+  /** Gauge boost the wastegate holds (Pa), by crank speed (rad/s). */
+  boost: SampledFunction;
+  /** Bearing losses, W per (rad/s)^2 of shaft speed. */
+  friction: number;
+  /** Intercooler effectiveness, 0..1. */
+  intercooler: number;
+  /** Air the compressor pumps through the open blow-off valve at full boost speed (kg/s). */
+  ventFlow: number;
+  /**
+   * Flow constant of each exhaust's wastegate, fully open: it bypasses the turbine (the
+   * exhaust's outlet), opened by a boost controller as the shaft reaches its target.
+   */
+  wastegateFlowK: number;
+}
+
+/** A pipe between two junctions of an exhaust's acoustics. */
+export interface AcousticPipe {
+  a: string;
+  b: string;
+  length: number;
+  diameter: number;
+  temperature: number;
+  /** Wall losses as a multiple of a smooth pipe's. */
+  damping?: number;
+  /** Absorption of a lining (a perforated pipe in packing), Np/m per kHz. */
+  absorption?: number;
+}
+
+/**
+ * A perforated cone, baffle or cap: gas mass through `area` over `length`, resistance in
+ * units of the characteristic impedance there without flow; the flow through adds its
+ * jet's loss, by the discharge coefficient (default 0.65).
+ */
+export interface AcousticOrifice {
+  a: string;
+  b: string;
+  area: number;
+  length: number;
+  resistance: number;
+  temperature: number;
+  discharge?: number;
 }
 
 /** The exhaust as an acoustic network of named junctions. Temperatures in K. */
 export interface Acoustics {
-  pipes: {
-    a: string;
-    b: string;
-    length: number;
-    diameter: number;
-    temperature: number;
-    /** Wall losses as a multiple of a smooth pipe's. */
-    damping?: number;
-    /** Absorption of a lining (a perforated pipe in packing), Np/m per kHz. */
-    absorption?: number;
-  }[];
-  /** Perforated cones, baffles, caps: gas mass through `area` over `length`, resistance in
-   * units of the characteristic impedance there. */
-  orifices?: {
-    a: string;
-    b: string;
-    area: number;
-    length: number;
-    resistance: number;
-    temperature: number;
-  }[];
-  /** Volumes small against the wavelength (a cylinder behind its open valve). */
+  pipes: AcousticPipe[];
+  orifices?: AcousticOrifice[];
+  /** Volumes small against the wavelength (a turbine's volute, a small chamber). */
   volumes?: { node: string; volume: number; temperature: number }[];
   /** The junction behind each cylinder's exhaust valve, in cylinder order. */
   ports: string[];
@@ -158,6 +256,23 @@ export interface Acoustics {
   listenerDistance: number;
   /** Scales the impulse responses, against the synthesizer's fixed gain. */
   gain: number;
+  /**
+   * Pipes the pulses steepen in, crests outrunning troughs (engine/src/voice.rs): from
+   * each exhaust system's junction in `nodes` (exhaust order; the only way on from its
+   * cylinders), along `length` of pipe at `temperature`.
+   */
+  nonlinear?: { nodes?: string[]; length: number; temperature: number };
+  /**
+   * Valves an ECU opens (a silencer's bypass): the elements opening them adds, and the
+   * crank speeds (rad/s) or pedal positions they open between, whichever is further. The
+   * voice blends the responses closed and open.
+   */
+  valves?: {
+    pipes?: AcousticPipe[];
+    orifices?: AcousticOrifice[];
+    speed: [number, number];
+    throttle: [number, number];
+  };
 }
 
 export interface CamSpec {
@@ -185,6 +300,7 @@ export const u = (() => {
   const kPa = 1000.0;
   const inHg = 3386.3886666666713;
   return {
+    bar: 100000.0,
     pi,
     N,
     lbf,
@@ -238,6 +354,23 @@ function flowConstant(
 }
 
 /** Flow constant passing `cfm` at a carburettor's 1.5 inHg. */
+/** The engine state engine/src/voice.rs's control stream carries after the cylinders. */
+export const VOICE_GLOBALS = 10;
+
+/**
+ * The engine's audio channels (engine/src/engine.rs audio_channels): with a voice, its
+ * control stream (each cylinder's exhaust valve flow, then VOICE_GLOBALS of state); with
+ * computed acoustics, one per cylinder and last the exhaust's mean mass flow, which their
+ * damping follows; else one per exhaust system.
+ */
+export function audioChannels(spec: EngineSpec): number {
+  const cylinders = spec.banks.reduce((n, b) => n + b.cylinders.length, 0);
+  if (spec.audio.voice) return cylinders + VOICE_GLOBALS;
+  return spec.audio.acoustics
+    ? spec.banks.reduce((n, b) => n + b.cylinders.length, 0) + 1
+    : spec.exhausts.length;
+}
+
 export function kCarb(cfm: number): number {
   return flowConstant(cfm * u.scfm, 1.0 * u.atm, 1.5 * u.inHg, u.celcius(25));
 }
@@ -304,6 +437,14 @@ export function harmonicCamLobe(p: {
   }
   return sampled(step, samples);
 }
+
+/** Gasoline's lower heating value (Heywood, Internal Combustion Engine Fundamentals, App. D). */
+export const GASOLINE_LHV = (44.0 * u.kJ) / u.g;
+/**
+ * Mean cylinder wall temperature for Woschni's heat transfer, fired (Klein, "Single-zone
+ * cylinder pressure modeling", Linköping 2004).
+ */
+export const WALL_TEMPERATURE = 440;
 
 /** engine-sim's default fuel (gasoline). */
 export function gasoline(

@@ -16,6 +16,9 @@ interface Exports {
   engine_set_throttle(e: number, pedal: number): void;
   engine_set_ignition(e: number, on: number): void;
   engine_set_starter(e: number, on: number): void;
+  engine_set_spark_cut(e: number, cut: number): void;
+  engine_set_spark_retard(e: number, retard: number): void;
+  engine_set_boost_limit(e: number, limit: number): void;
   engine_set_dyno(
     e: number,
     enabled: number,
@@ -35,6 +38,9 @@ interface Exports {
   ): void;
   engine_clutch_torque(e: number): number;
   engine_load_speed(e: number): number;
+  engine_boost(e: number): number;
+  engine_turbo_speed(e: number): number;
+  engine_manifold_pressure(e: number): number;
   engine_set_audio(e: number, on: number): void;
   engine_audio_len(e: number): number;
   engine_audio_channels(e: number): number;
@@ -64,6 +70,20 @@ interface Exports {
   synth_drop_input(s: number, keep: number): void;
   synth_render(s: number, frames: number): number;
   synth_rendered(): number;
+  voice_for_engine(ptr: number, len: number): number;
+  voice_free(v: number): void;
+  voice_set_impulse_wav(
+    v: number,
+    index: number,
+    ptr: number,
+    len: number,
+    volume: number,
+  ): number;
+  voice_set_input_rate(v: number, rate: number): void;
+  voice_write(v: number, ptr: number, steps: number, channels: number): void;
+  voice_input_available(v: number): number;
+  voice_drop_input(v: number, keep: number): void;
+  voice_render(v: number, frames: number): number;
 }
 
 /** One instance of the WebAssembly module (its own memory). */
@@ -157,6 +177,21 @@ export class EngineSim {
     this.module.exports.engine_set_starter(this.e, on ? 1 : 0);
   }
 
+  /** Fraction of sparks skipped, spread evenly over the cylinders (0..1). */
+  set sparkCut(cut: number) {
+    this.module.exports.engine_set_spark_cut(this.e, cut);
+  }
+
+  /** Spark retard from the map (rad): the ECU's fast torque reduction. */
+  set sparkRetard(retard: number) {
+    this.module.exports.engine_set_spark_retard(this.e, retard);
+  }
+
+  /** Cap on the turbo's boost target (gauge Pa). */
+  set boostLimit(limit: number) {
+    this.module.exports.engine_set_boost_limit(this.e, limit);
+  }
+
   /** Crank speed, rad/s. */
   get speed(): number {
     return this.module.exports.engine_speed(this.e);
@@ -198,6 +233,21 @@ export class EngineSim {
       torque,
       capacity,
     );
+  }
+
+  /** Turbocharger boost over the atmosphere (Pa); 0 without one. */
+  get boost(): number {
+    return this.module.exports.engine_boost(this.e);
+  }
+
+  /** Turbocharger shaft speed (rad/s). */
+  get turboSpeed(): number {
+    return this.module.exports.engine_turbo_speed(this.e);
+  }
+
+  /** Pressure behind the throttle (Pa). */
+  get manifoldPressure(): number {
+    return this.module.exports.engine_manifold_pressure(this.e);
   }
 
   /** Clutch torque on the driven side, averaged over the steps since `setLoad` (N m). */

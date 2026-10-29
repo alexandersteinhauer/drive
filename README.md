@@ -6,8 +6,9 @@ A relaxing endless drive through rolling hills and forests, right in your browse
 
 ![Drifting through a corner in the hills on a sunny afternoon](.github/screenshot.jpg)
 
-Drive with WASD or the arrow keys, pause with Escape, switch cars with C. The VW Beetle's
-engine is simulated piston by piston, and it is what you hear: see [engine/](engine/).
+Drive with WASD or the arrow keys, pause with Escape, switch cars with C (a BMW i4, a 1963
+VW Beetle and a Ferrari 488 Pista). The Beetle's flat four and the Ferrari's twin-turbo V8
+are simulated piston by piston, and they are what you hear: see [engine/](engine/).
 
 ## Run locally
 

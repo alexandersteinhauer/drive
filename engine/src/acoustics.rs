@@ -11,8 +11,29 @@
 //! - outlets: tailpipe ends radiating into the open (unflanged pipe radiation load), heard as
 //!   monopoles at `listener_distance`.
 //!
+//! The source is each exhaust valve's volume velocity (AudioSource::Flow), so these
+//! responses are what the synthesizer should convolve its input with unchanged: without its
+//! derivative path ("hf gain" 0), which would differentiate the radiation a second time.
+//!
+//! The exhaust's mean flow damps it, the more the more flows (the quasi-steady theory, valid
+//! below a Strouhal number of about one, where an exhaust's low modes are: Durrieu,
+//! Hirschberg, Peters et al., JASA 110, 2001). A restriction losing the pressure
+//! dp = K rho u^2 / 2 to its flow resists a small change of it by d(dp)/dQ = K rho u / A:
+//!
+//! - orifices: their jet's dynamic pressure, lost (K = 1 at the jet's area, the orifice's
+//!   times its discharge coefficient): m' / (Cd^2 A^2);
+//! - outlets: the same for the jet leaving the tailpipe, m' / A^2, which takes ~4 M of a
+//!   wave's energy at each reflection, as measured for an open pipe with flow at low
+//!   Strouhal numbers (Peters, Hirschberg et al., J. Fluid Mech. 256, 1993);
+//! - pipes: turbulent wall friction (Blasius), an attenuation of xi M / (2 D).
+//!
+//! The flow divides between parallel paths by their areas (a steady estimate, exact for the
+//! single paths most exhausts are). impulse_responses takes the exhaust's mass flow; the
+//! synthesizer blends responses computed at FLOW_LEVELS by the engine's.
+//!
 //! Solved per frequency for the pressure at every junction (nodal admittance), then turned
-//! into impulse responses at the audio rate.
+//! into impulse responses at the audio rate, up to MAX_FREQUENCY (the synthesizer's input
+//! has nothing above its 1.9 kHz filter's tail).
 
 use crate::spec::AcousticsSpec;
 use std::collections::HashMap;
@@ -141,6 +162,56 @@ const PRANDTL: f64 = 0.7;
 const AMBIENT: f64 = 293.15;
 /// Samples ahead of the first arrival.
 const PRE_DELAY: f64 = 128.0;
+/// The exhaust mass flows (kg/s) responses are computed at, for the synthesizer to blend:
+/// from none (an engine stopped, or off the throttle at idle) to a big turbo engine's.
+pub const FLOW_LEVELS: [f64; 6] = [0.0, 0.01, 0.03, 0.08, 0.2, 0.6];
+/// Responses are computed up to here, tapering from TAPER_FROM (Hz).
+const MAX_FREQUENCY: f64 = 8000.0;
+const TAPER_FROM: f64 = 6000.0;
+
+/// Each element's share of the exhaust's mean flow (pipes, orifices, outlets in spec
+/// order), with every port taking an equal share in: a steady network whose conductances
+/// are the elements' areas (over their lengths, for pipes).
+fn flow_shares(spec: &AcousticsSpec, index: &dyn Fn(&str) -> usize, n: usize) -> (Vec<f64>, Vec<f64>, Vec<f64>) {
+    let mut g = vec![0.0; n * n];
+    let mut add = |a: usize, b: usize, c: f64| {
+        g[a * n + a] += c;
+        g[b * n + b] += c;
+        g[a * n + b] -= c;
+        g[b * n + a] -= c;
+    };
+    let pipe_g = |p: &crate::spec::AcousticPipe| std::f64::consts::PI * p.diameter * p.diameter / 4.0 / p.length.max(1e-3);
+    // Orifices and outlets: as a short pipe of their area (outlets to the atmosphere).
+    let short = 0.05;
+    for p in &spec.pipes {
+        add(index(&p.a), index(&p.b), pipe_g(p));
+    }
+    for o in &spec.orifices {
+        add(index(&o.a), index(&o.b), o.area / short);
+    }
+    let mut a = vec![C::ZERO; n * n];
+    for (i, v) in g.iter().enumerate() {
+        a[i] = C::new(*v, 0.0);
+    }
+    for o in &spec.outlets {
+        let i = index(&o.node);
+        a[i * n + i] += C::new(std::f64::consts::PI * o.diameter * o.diameter / 4.0 / short, 0.0);
+    }
+    let mut q = vec![C::ZERO; n];
+    for p in &spec.ports {
+        q[index(p)] += C::new(1.0 / spec.ports.len() as f64, 0.0);
+    }
+    solve(&mut a, &mut q, n, 1);
+    let p = |name: &str| q[index(name)].re;
+    let pipes = spec.pipes.iter().map(|e| (pipe_g(e) * (p(&e.a) - p(&e.b))).abs()).collect();
+    let orifices = spec.orifices.iter().map(|e| (e.area / short * (p(&e.a) - p(&e.b))).abs()).collect();
+    let outlets = spec
+        .outlets
+        .iter()
+        .map(|o| std::f64::consts::PI * o.diameter * o.diameter / 4.0 / short * p(&o.node))
+        .collect();
+    (pipes, orifices, outlets)
+}
 
 fn gas(temperature: f64, gamma: f64) -> Gas {
     let density = crate::units::ATM / (R_SPECIFIC * temperature);
@@ -157,8 +228,99 @@ enum Element {
 }
 
 /// Impulse responses (one per port, at `sample_rate`, `length` samples) of the radiated
-/// pressure to a unit volume-velocity impulse at that port, scaled by `spec.gain`.
-pub fn impulse_responses(spec: &AcousticsSpec, sample_rate: f64, length: usize) -> Vec<Vec<f32>> {
+/// pressure to a unit volume-velocity impulse at that port, scaled by `spec.gain`, with
+/// `mass_flow` (kg/s) through the exhaust.
+pub fn impulse_responses(spec: &AcousticsSpec, sample_rate: f64, length: usize, mass_flow: f64) -> Vec<Vec<f32>> {
+    impulse_responses_to(spec, sample_rate, length, mass_flow, MAX_FREQUENCY, TAPER_FROM)
+}
+
+/// impulse_responses, computed up to `max_frequency` (tapering from `taper_from`).
+pub fn impulse_responses_to(
+    spec: &AcousticsSpec,
+    sample_rate: f64,
+    length: usize,
+    mass_flow: f64,
+    max_frequency: f64,
+    taper_from: f64,
+) -> Vec<Vec<f32>> {
+    let m = spec.ports.len();
+    let ports: Vec<&str> = spec.ports.iter().map(|p| p.as_str()).collect();
+    let band = Band { sample_rate, length, max_frequency, taper_from };
+    responses(spec, &band, mass_flow, &ports, &|s| (0..m).map(|i| s.listener(i)).collect())
+}
+
+/// The exhaust's responses split where its waves turn nonlinear (`nodes`, one per exhaust
+/// system, after its turbine), for the voice to steepen them there (voice.rs): each port's
+/// volume velocity to the pressure at its exhaust's node (`port_node` its index), then
+/// each node's pressure to the radiated pressure (Pa per Pa). Chained, they are
+/// impulse_responses': the second is the listener's pressure over the node's when the
+/// sound comes from upstream of it, which holds for any source there while the node is the
+/// only way through.
+pub fn split_responses(
+    spec: &AcousticsSpec,
+    band: &Band,
+    mass_flow: f64,
+    nodes: &[String],
+    port_node: &[usize],
+) -> (Vec<Vec<f32>>, Vec<Vec<f32>>) {
+    let m = spec.ports.len();
+    let injections: Vec<&str> = spec.ports.iter().chain(nodes).map(|p| p.as_str()).collect();
+    let all = responses(spec, band, mass_flow, &injections, &|s| {
+        let mut out: Vec<C> = (0..m).map(|i| s.pressure(i, &nodes[port_node[i]])).collect();
+        for (k, node) in nodes.iter().enumerate() {
+            out.push(s.listener(m + k) / s.pressure(m + k, node));
+        }
+        out
+    });
+    let (ports, splits) = all.split_at(m);
+    (ports.to_vec(), splits.to_vec())
+}
+
+/// The band and length impulse responses are computed for.
+pub struct Band {
+    pub sample_rate: f64,
+    /// Samples.
+    pub length: usize,
+    pub max_frequency: f64,
+    pub taper_from: f64,
+}
+
+/// One frequency's solution: the pressure at every node for a unit volume velocity into
+/// each injection.
+pub struct Solution<'a> {
+    columns: usize,
+    pressures: &'a [C],
+    index: &'a dyn Fn(&str) -> usize,
+    radiation: &'a [(usize, C)],
+}
+
+impl Solution<'_> {
+    pub fn pressure(&self, column: usize, node: &str) -> C {
+        self.pressures[(self.index)(node) * self.columns + column]
+    }
+
+    /// At the listener.
+    pub fn listener(&self, column: usize) -> C {
+        let mut h = C::ZERO;
+        for &(node, radiation) in self.radiation {
+            h += self.pressures[node * self.columns + column] * radiation;
+        }
+        h
+    }
+}
+
+/// Impulse responses of what `observe` takes from each frequency's solution, with unit
+/// volume velocities into the `injections` (junction names), scaled by `spec.gain`.
+pub fn responses(
+    spec: &AcousticsSpec,
+    band: &Band,
+    mass_flow: f64,
+    injections: &[&str],
+    observe: &dyn Fn(&Solution) -> Vec<C>,
+) -> Vec<Vec<f32>> {
+    let Band { sample_rate, length, .. } = *band;
+    let max_frequency = band.max_frequency.min(sample_rate / 2.0);
+    let taper_from = band.taper_from.min(max_frequency);
     let mut nodes: HashMap<String, usize> = HashMap::new();
     let node = |name: &str, nodes: &mut HashMap<String, usize>| {
         let n = nodes.len();
@@ -183,21 +345,33 @@ pub fn impulse_responses(spec: &AcousticsSpec, sample_rate: f64, length: usize) 
     }
     let n = nodes.len();
     let index = |name: &str| nodes[name];
-    let ports: Vec<usize> = spec.ports.iter().map(|p| index(p)).collect();
+    let (pipe_flow, orifice_flow, outlet_flow) = flow_shares(spec, &index, n);
+    let scale_flow = |shares: &[f64]| shares.iter().map(|s| s * mass_flow).collect::<Vec<f64>>();
+    let (pipe_flow, orifice_flow, outlet_flow) = (scale_flow(&pipe_flow), scale_flow(&orifice_flow), scale_flow(&outlet_flow));
+    let ports: Vec<usize> = injections.iter().map(|p| index(p)).collect();
 
     // Room for the tail beyond `length` to decay before it would wrap around.
     let n_fft = length.next_power_of_two() * 4;
     let bins = n_fft / 2;
-    let mut spectra = vec![vec![C::ZERO; n_fft]; ports.len()];
+    let mut spectra: Vec<Vec<C>> = Vec::new();
     let air = gas(AMBIENT, 1.4);
 
     let mut elements = Vec::new();
     let mut matrix = vec![C::ZERO; n * n];
     let mut rhs = vec![C::ZERO; n * ports.len()];
     for bin in 1..=bins {
-        let omega = 2.0 * std::f64::consts::PI * bin as f64 * sample_rate / n_fft as f64;
+        let frequency = bin as f64 * sample_rate / n_fft as f64;
+        if frequency > max_frequency {
+            break;
+        }
+        let taper = if frequency > taper_from {
+            0.5 + 0.5 * (std::f64::consts::PI * (frequency - taper_from) / (max_frequency - taper_from)).cos()
+        } else {
+            1.0
+        };
+        let omega = 2.0 * std::f64::consts::PI * frequency;
         elements.clear();
-        for p in &spec.pipes {
+        for (p, &flow) in spec.pipes.iter().zip(&pipe_flow) {
             let g = gas(p.temperature, GAMMA_EXHAUST);
             let radius = p.diameter / 2.0;
             let area = std::f64::consts::PI * radius * radius;
@@ -206,7 +380,8 @@ pub fn impulse_responses(spec: &AcousticsSpec, sample_rate: f64, length: usize) 
                 * (1.0 + (GAMMA_EXHAUST - 1.0) / PRANDTL.sqrt())
                 * p.damping
                 // Absorptive lining (a perforated pipe in packing): rising with frequency.
-                + p.absorption * omega / (2.0 * std::f64::consts::PI * 1000.0);
+                + p.absorption * omega / (2.0 * std::f64::consts::PI * 1000.0)
+                + friction(flow, p.diameter, &g);
             let k = C::new(omega / g.c, -alpha);
             let kl = k.scale(p.length);
             let y0 = area / (g.density * g.c);
@@ -215,10 +390,11 @@ pub fn impulse_responses(spec: &AcousticsSpec, sample_rate: f64, length: usize) 
             let y12 = -denominator.inv();
             elements.push(Element::TwoPort { a: index(&p.a), b: index(&p.b), y: [y11, y12, y11] });
         }
-        for o in &spec.orifices {
+        for (o, &flow) in spec.orifices.iter().zip(&orifice_flow) {
             let g = gas(o.temperature, GAMMA_EXHAUST);
             let z0 = g.density * g.c / o.area;
-            let z = C::new(o.resistance * z0, omega * g.density * o.length / o.area);
+            let jet = flow / (o.discharge * o.discharge * o.area * o.area);
+            let z = C::new(o.resistance * z0 + jet, omega * g.density * o.length / o.area);
             let y = z.inv();
             elements.push(Element::TwoPort { a: index(&o.a), b: index(&o.b), y: [y, -y, y] });
         }
@@ -228,11 +404,11 @@ pub fn impulse_responses(spec: &AcousticsSpec, sample_rate: f64, length: usize) 
             elements.push(Element::Shunt { node: index(&v.node), y });
         }
         let mut outlet_terms = Vec::new();
-        for o in &spec.outlets {
+        for (o, &flow) in spec.outlets.iter().zip(&outlet_flow) {
             let radius = o.diameter / 2.0;
             let area = std::f64::consts::PI * radius * radius;
             let ka = omega / air.c * radius;
-            let z = C::new(0.25 * ka * ka, 0.6133 * ka).scale(air.density * air.c / area);
+            let z = C::new(0.25 * ka * ka, 0.6133 * ka).scale(air.density * air.c / area) + C::new(flow / (area * area), 0.0);
             elements.push(Element::Shunt { node: index(&o.node), y: z.inv() });
             // Radiated pressure per unit node pressure: j w rho U / (4 pi r), U = p / z.
             let radiation = C::j(omega * air.density / (4.0 * std::f64::consts::PI * spec.listener_distance)) / z;
@@ -263,12 +439,12 @@ pub fn impulse_responses(spec: &AcousticsSpec, sample_rate: f64, length: usize) 
         // latency; a few samples' delay leave room for the ringing of the band limit ahead
         // of a sharp arrival.
         let delay = C::j(-omega * PRE_DELAY / sample_rate).exp();
-        for i in 0..m {
-            let mut h = C::ZERO;
-            for &(node, radiation) in &outlet_terms {
-                h += rhs[node * m + i] * radiation;
+        let solution = Solution { columns: m, pressures: &rhs, index: &index, radiation: &outlet_terms };
+        for (i, h) in observe(&solution).into_iter().enumerate() {
+            if spectra.len() <= i {
+                spectra.push(vec![C::ZERO; n_fft]);
             }
-            spectra[i][bin] = h * delay;
+            spectra[i][bin] = (h * delay).scale(taper);
         }
     }
 
@@ -297,6 +473,19 @@ pub fn impulse_responses(spec: &AcousticsSpec, sample_rate: f64, length: usize) 
                 .collect()
         })
         .collect()
+}
+
+/// Attenuation (Np/m) by turbulent wall friction for `mass_flow` (kg/s) through a pipe of
+/// `diameter` in `gas`: xi M / (2 D), xi by Blasius (smooth pipe; laminar below Re 2300).
+fn friction(mass_flow: f64, diameter: f64, gas: &Gas) -> f64 {
+    if mass_flow <= 0.0 {
+        return 0.0;
+    }
+    let area = std::f64::consts::PI * diameter * diameter / 4.0;
+    let u = mass_flow / (gas.density * area);
+    let re = u * diameter / gas.viscosity;
+    let xi = if re < 2300.0 { 64.0 / re.max(1.0) } else { 0.316 * re.powf(-0.25) };
+    xi * (u / gas.c) / (2.0 * diameter)
 }
 
 /// Gaussian elimination with partial pivoting: solves `a x = b` for `m` columns of `b`
@@ -381,8 +570,10 @@ mod tests {
             outlets: vec![AcousticOutlet { node: "end".into(), diameter: 0.03 }],
             listener_distance: 1.0,
             gain: 1.0,
+            nonlinear: None,
+            valves: None,
         };
-        let ir = &impulse_responses(&spec, 44100.0, 4096)[0];
+        let ir = &impulse_responses(&spec, 44100.0, 4096, 0.0)[0];
         let c = gas(AMBIENT, GAMMA_EXHAUST).c;
         let expected = 1.0 / c * 44100.0 + PRE_DELAY;
         let peak = ir.iter().enumerate().max_by(|a, b| a.1.abs().total_cmp(&b.1.abs())).unwrap().0;
@@ -392,6 +583,58 @@ mod tests {
         let early: f32 = ir[..(expected as usize - 60)].iter().map(|v| v * v).sum();
         let total: f32 = ir.iter().map(|v| v * v).sum();
         assert!(early < 1e-3 * total, "energy before arrival {:.2e}", early / total);
+    }
+
+    /// Q of the strongest mode below `below` Hz in a response, by its half-power width.
+    fn mode_q(ir: &[f32], below: f64) -> (f64, f64) {
+        let n = 1 << 17;
+        let mut s: Vec<C> = (0..n).map(|i| C::new(ir.get(i).copied().unwrap_or(0.0) as f64, 0.0)).collect();
+        fft(&mut s, false);
+        let df = 44100.0 / n as f64;
+        let top = (below / df) as usize;
+        let (peak, _) = (1..top).map(|i| (i, s[i].abs())).max_by(|a, b| a.1.total_cmp(&b.1)).unwrap();
+        let half = s[peak].abs() / 2f64.sqrt();
+        let (mut lo, mut hi) = (peak, peak);
+        while s[lo].abs() > half {
+            lo -= 1;
+        }
+        while s[hi].abs() > half {
+            hi += 1;
+        }
+        (peak as f64 * df, peak as f64 / (hi - lo) as f64)
+    }
+
+    #[test]
+    fn outflow_damps_a_pipe_as_its_jet_takes_energy() {
+        // A quarter-wave pipe: a wave loses ~4 M of its energy to the jet at each reflection,
+        // |R| = (1 - M) / (1 + M), so its first mode's Q is pi / (-2 ln |R|): 7.8 at M 0.1.
+        // The losses add as 1 / Q: with the pipe's own (its Q without flow) and the wall
+        // friction the flow brings (attenuation alpha: Q = omega / (2 alpha c)).
+        let (d, l) = (0.05, 1.0);
+        let spec = |_: ()| AcousticsSpec {
+            pipes: vec![pipe("port", "end", l, d)],
+            orifices: vec![],
+            volumes: vec![],
+            ports: vec!["port".into()],
+            outlets: vec![AcousticOutlet { node: "end".into(), diameter: d }],
+            listener_distance: 1.0,
+            gain: 1.0,
+            nonlinear: None,
+            valves: None,
+        };
+        let air = gas(AMBIENT, 1.4);
+        let area = std::f64::consts::PI * d * d / 4.0;
+        let mach = 0.1;
+        let flow = mach * air.density * air.c * area;
+        let (_, q_still) = mode_q(&impulse_responses(&spec(()), 44100.0, 1 << 15, 0.0)[0], 150.0);
+        let (f, q_flow) = mode_q(&impulse_responses(&spec(()), 44100.0, 1 << 15, flow)[0], 150.0);
+        let r = (1.0 - mach) / (1.0 + mach);
+        let q_end = std::f64::consts::PI / (-2.0 * f64::ln(r));
+        let g = gas(AMBIENT, GAMMA_EXHAUST);
+        let q_friction = 2.0 * std::f64::consts::PI * f / (2.0 * friction(flow, d, &g) * g.c);
+        let theory = 1.0 / (1.0 / q_end + 1.0 / q_still + 1.0 / q_friction);
+        assert!(q_still > 4.0 * q_end, "still: Q {q_still:.1}");
+        assert!((q_flow / theory - 1.0).abs() < 0.05, "{f:.0} Hz: Q {q_flow:.2} against {theory:.2}");
     }
 
     #[test]
@@ -420,10 +663,12 @@ mod tests {
                 outlets: vec![AcousticOutlet { node: "end".into(), diameter: d }],
                 listener_distance: 1.0,
                 gain: 1.0,
+                nonlinear: None,
+                valves: None,
             }
         };
         let spectrum = |spec: &AcousticsSpec| {
-            let mut ir: Vec<C> = impulse_responses(spec, 44100.0, 1 << 15)[0]
+            let mut ir: Vec<C> = impulse_responses(spec, 44100.0, 1 << 15, 0.0)[0]
                 .iter()
                 .map(|&v| C::new(v as f64, 0.0))
                 .collect();

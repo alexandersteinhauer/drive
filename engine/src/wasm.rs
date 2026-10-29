@@ -5,6 +5,7 @@
 use crate::engine::Engine;
 use crate::spec::EngineSpec;
 use crate::synth::{read_wav, AudioParameters, Synthesizer};
+use crate::voice::Voice;
 
 #[no_mangle]
 pub extern "C" fn alloc(len: usize) -> *mut u8 {
@@ -67,6 +68,12 @@ engine_fns! {
     fn engine_set_throttle(e, pedal: f64) { e.set_speed_control(pedal) }
     fn engine_set_ignition(e, on: u32) { e.set_ignition(on != 0) }
     fn engine_set_starter(e, on: u32) { e.set_starter(on != 0) }
+    /// Fraction of sparks to skip (traction control).
+    fn engine_set_spark_cut(e, cut: f64) { e.set_spark_cut(cut) }
+    /// Spark retard from the map (rad).
+    fn engine_set_spark_retard(e, retard: f64) { e.set_spark_retard(retard) }
+    /// Cap on the turbo's boost target (gauge Pa).
+    fn engine_set_boost_limit(e, limit: f64) { e.set_boost_limit(limit) }
     /// Holds (or, without `hold`, only drives) the crank at `speed` rad/s.
     fn engine_set_dyno(e, enabled: u32, hold: u32, speed: f64) { e.set_dyno(enabled != 0, hold != 0, speed) }
     fn engine_dyno_torque(e) -> f64 { e.dyno_torque() }
@@ -81,6 +88,12 @@ engine_fns! {
     /// Average clutch torque on the driven side since engine_set_load.
     fn engine_clutch_torque(e) -> f64 { e.clutch_torque() }
     fn engine_load_speed(e) -> f64 { e.load_speed() }
+    /// Turbocharger boost over the atmosphere (Pa); 0 without one.
+    fn engine_boost(e) -> f64 { e.turbo_state().0 }
+    /// Turbocharger shaft speed (rad/s).
+    fn engine_turbo_speed(e) -> f64 { e.turbo_state().1 }
+    /// Pressure behind the throttle (Pa).
+    fn engine_manifold_pressure(e) -> f64 { e.manifold_pressure() }
     /// Whether to keep the exhaust signal for the sound.
     fn engine_set_audio(e, on: u32) {
         e.collect_audio = on != 0;
@@ -102,7 +115,8 @@ engine_fns! {
 }
 
 /// The synthesizer for an engine (JSON spec): with acoustics, one channel per cylinder with
-/// its computed impulse response; without, one per exhaust system, whose recorded impulse
+/// its computed impulse responses (by the exhaust's flow, which comes last; as the engine
+/// writes them, engine::audio_channels); without, one per exhaust system, whose recorded impulse
 /// responses are then loaded with synth_set_impulse_wav. Null if the spec doesn't parse.
 ///
 /// # Safety
@@ -122,10 +136,17 @@ pub unsafe extern "C" fn synth_for_engine(ptr: *const u8, len: usize) -> *mut Sy
     let rate = spec.simulation_frequency as f32;
     let synth = match &a.acoustics {
         Some(acoustics) => {
-            let responses = crate::acoustics::impulse_responses(acoustics, 44100.0, IMPULSE_LENGTH);
-            let mut s = Synthesizer::new(responses.len(), rate, 44100.0, params);
-            for (i, r) in responses.iter().enumerate() {
-                s.set_impulse_response_f32(i, r);
+            // Per flow level, per cylinder; the last channel carries the flow.
+            let levels = crate::acoustics::FLOW_LEVELS;
+            let by_flow: Vec<Vec<Vec<f32>>> = levels
+                .iter()
+                .map(|&flow| crate::acoustics::impulse_responses(acoustics, 44100.0, IMPULSE_LENGTH, flow))
+                .collect();
+            let cylinders = by_flow[0].len();
+            let mut s = Synthesizer::new(cylinders + 1, rate, 44100.0, params);
+            for i in 0..cylinders {
+                let sets: Vec<Vec<f32>> = by_flow.iter().map(|r| r[i].clone()).collect();
+                s.set_flow_responses(i, &levels, &sets);
             }
             s
         }
@@ -151,7 +172,7 @@ pub unsafe extern "C" fn acoustic_impulses(ptr: *const u8, len: usize) -> *mut f
     let Some(acoustics) = &spec.audio.acoustics else {
         return std::ptr::null_mut();
     };
-    let all = crate::acoustics::impulse_responses(acoustics, 44100.0, IMPULSE_LENGTH).concat().into_boxed_slice();
+    let all = crate::acoustics::impulse_responses(acoustics, 44100.0, IMPULSE_LENGTH, 0.0).concat().into_boxed_slice();
     Box::into_raw(all) as *mut f32
 }
 
@@ -240,4 +261,75 @@ thread_local! {
 #[no_mangle]
 pub extern "C" fn synth_rendered() -> usize {
     RENDERED.with(|r| r.get())
+}
+
+/// voice.rs's voice for an engine (JSON spec with `audio.voice`; its acoustics' responses
+/// are computed here); null without one.
+///
+/// # Safety
+/// `ptr`/`len` must be a valid byte range.
+#[no_mangle]
+pub unsafe extern "C" fn voice_for_engine(ptr: *const u8, len: usize) -> *mut Voice {
+    match serde_json::from_slice::<EngineSpec>(bytes(ptr, len)).ok().and_then(|s| Voice::new(&s)) {
+        Some(v) => Box::into_raw(Box::new(v)),
+        None => std::ptr::null_mut(),
+    }
+}
+
+macro_rules! voice_fns {
+    ($($(#[$m:meta])* fn $name:ident($s:ident $(, $a:ident: $t:ty)*) $(-> $r:ty)? $body:block)*) => {
+        $(
+            $(#[$m])*
+            /// # Safety
+            /// `v` must come from `voice_for_engine` and not be freed.
+            #[no_mangle]
+            pub unsafe extern "C" fn $name(v: *mut Voice $(, $a: $t)*) $(-> $r)? {
+                let $s = &mut *v;
+                $body
+            }
+        )*
+    };
+}
+
+voice_fns! {
+    fn voice_free(s) {
+        drop(Box::from_raw(s as *mut Voice));
+    }
+    /// Loads the recorded impulse response for exhaust `index` from a 16-bit WAV file; 0 if
+    /// it can't.
+    fn voice_set_impulse_wav(s, index: usize, ptr: *const u8, len: usize, volume: f32) -> u32 {
+        match read_wav(bytes(ptr, len)) {
+            Some(samples) => {
+                s.set_impulse_response(index, &samples, volume);
+                1
+            }
+            None => 0,
+        }
+    }
+    fn voice_set_input_rate(s, rate: f32) { s.set_input_rate(rate as f64) }
+    /// Writes `steps` frames of the control stream, channel after channel.
+    fn voice_write(s, ptr: *const f32, steps: usize, channels: usize) {
+        let data = std::slice::from_raw_parts(ptr, steps * channels);
+        let mut frame = vec![0.0f32; channels];
+        for i in 0..steps {
+            for (c, f) in frame.iter_mut().enumerate() {
+                *f = data[c * steps + i];
+            }
+            s.write_input(&frame);
+        }
+    }
+    fn voice_input_available(s) -> usize { s.input_available() }
+    fn voice_drop_input(s, keep: usize) { s.drop_input(keep) }
+    /// Renders up to `frames` samples; returns a pointer to them (valid until the next call)
+    /// and leaves their count in `synth_rendered`.
+    fn voice_render(s, frames: usize) -> *const f32 {
+        OUT.with(|out| {
+            let mut out = out.borrow_mut();
+            out.clear();
+            out.resize(frames, 0.0);
+            let n = s.render(&mut out);
+            RENDERED.with(|r| r.set(n));
+            out.as_ptr()
+        })
+    }
 }

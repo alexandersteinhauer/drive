@@ -31,6 +31,20 @@ textures padded outside their UV islands, resized and converted to WebP. Generat
 Volkswagen and Beetle are trademarks of Volkswagen AG. This project is not affiliated with or
 endorsed by Volkswagen.
 
+### ferrari-488-pista.glb
+
+"Ferrari 488 Pista" by Outlaw Games™ (https://sketchfab.com/Outlaw_Games), licensed under
+CC BY-NC 4.0 (https://creativecommons.org/licenses/by-nc/4.0/): it may not be used
+commercially.
+Source: https://sketchfab.com/3d-models/ferrari-488-pista-dc4283bb1644413a9afd968ebd6e5097
+
+Changes: scaled, reoriented and re-centred; wheels split per corner; the lamps' cover glass
+given a clear material of its own (it shared the windows' dark tint); meshes merged and
+compressed; textures converted to WebP. Generated with `scripts/prepare-car.ts`.
+
+Ferrari and 488 Pista are trademarks of Ferrari S.p.A. This project is not affiliated with or
+endorsed by Ferrari.
+
 ### nature.glb
 
 Trees and bushes generated with EZ-Tree by Daniel Greenheck, MIT licence

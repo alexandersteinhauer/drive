@@ -1,7 +1,12 @@
 import { expect, test } from "bun:test";
 import { Quaternion, Vector3 } from "three";
 import { Car } from "../sim/car";
-import { bmwI4, vwBeetle, type CarConfig } from "../sim/config";
+import {
+  bmwI4,
+  ferrari488Pista,
+  vwBeetle,
+  type CarConfig,
+} from "../sim/config";
 import { Landscape } from "./landscape";
 
 const DT = 1 / 480;
@@ -103,6 +108,7 @@ function drive(cfg: CarConfig, seconds: number, targetKmh: number) {
 for (const [name, cfg] of [
   ["beetle", vwBeetle],
   ["electric", bmwI4],
+  ["488 pista", ferrari488Pista],
 ] as const)
   test(`${name} car follows the road over the hills`, () => {
     const r = drive(cfg, 90, 90);
@@ -114,7 +120,8 @@ for (const [name, cfg] of [
     expect(r.distance).toBeGreaterThan(1800);
     expect(r.maxOff).toBeLessThan(1.5);
     expect(r.airborne).toBeLessThan(0.05);
-    // A simulated engine (engine/) runs ~21 of its steps per car step.
+    // A simulated engine (engine/) runs ~21 of its steps per car step; the V8 twice the
+    // Beetle's four cylinders.
     const simulated =
       cfg.powertrain.type === "combustion" &&
       cfg.powertrain.engine.type === "simulated";

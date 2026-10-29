@@ -24,6 +24,25 @@ pub struct EngineSpec {
     pub exhausts: Vec<ExhaustSpec>,
     pub ignition: IgnitionSpec,
     pub audio: AudioSpec,
+    /// A turbocharger feeding every intake from every exhaust (turbo.rs); none: aspirated.
+    #[serde(default)]
+    pub turbo: Option<TurboSpec>,
+    /// Physics beyond engine-sim's (all off: engine-sim's own, step for step).
+    #[serde(default)]
+    pub physics: PhysicsSpec,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PhysicsSpec {
+    /// Real gases (gas.rs): heat capacity ratio falling with temperature, and flows carrying
+    /// enthalpy. Without: engine-sim's constant 1.4 and internal energy only.
+    #[serde(default)]
+    pub real_gas: bool,
+    /// Woschni's heat transfer from the cylinder gas to walls at this mean temperature (K).
+    /// Without: engine-sim's fixed coefficient towards 90 C walls.
+    #[serde(default)]
+    pub wall_temperature: Option<f64>,
 }
 
 fn default_fluid_steps() -> usize {
@@ -166,11 +185,40 @@ pub struct ExhaustSpec {
     pub impulse_volume: f64,
 }
 
+/// A turbocharger (turbo.rs); twin turbos as one, with their flows and inertias summed.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TurboSpec {
+    /// Compressor wheel tip radius (m).
+    pub compressor_radius: f64,
+    /// Rotating assemblies' moment of inertia (kg m^2).
+    pub inertia: f64,
+    pub compressor_efficiency: f64,
+    pub turbine_efficiency: f64,
+    /// Gauge boost the wastegate holds (Pa), by crank speed (rad/s).
+    pub boost: Function,
+    /// Bearing losses, W per (rad/s)^2 of shaft speed.
+    pub friction: f64,
+    /// Intercooler effectiveness, 0..1.
+    pub intercooler: f64,
+    /// Air the compressor pumps through the open blow-off valve at full boost speed (kg/s).
+    pub vent_flow: f64,
+    /// Flow constant of each exhaust's wastegate, fully open; the turbine is the exhaust's
+    /// outlet (`outlet_flow_k`).
+    pub wastegate_flow_k: f64,
+}
+
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct IgnitionSpec {
     /// Crank speed (rad/s) to advance (rad).
     pub timing: Function,
+    /// The advance at full load, by crank speed, and the manifold pressure (Pa) it holds
+    /// from: the advance blends from `timing` at atmospheric pressure to this, as an ECU's
+    /// spark table by speed and load does (best-torque timing at part load, knock-limited
+    /// under boost). None: `timing` alone, as in engine-sim.
+    #[serde(default)]
+    pub full_load: Option<FullLoadTiming>,
     pub rev_limit: f64,
     pub limiter_duration: f64,
     /// Firing angle per cylinder (in bank order).
@@ -179,14 +227,95 @@ pub struct IgnitionSpec {
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct FullLoadTiming {
+    pub timing: Function,
+    pub pressure: f64,
+}
+
+/// The exhaust sound's source.
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub enum AudioSource {
+    /// engine-sim's: each exhaust runner's pressure above the atmosphere's. Without a turbo
+    /// the runners sit near atmospheric, so this is mostly the pulses; with one they sit at
+    /// the turbine's back-pressure, many times the pulses, and its swings (whenever
+    /// combustion stops or resumes) come out as thumps.
+    #[default]
+    Pressure,
+    /// The flow through each exhaust valve, as the pressure of the wave it launches into the
+    /// runner, c m' / A (the plane-wave relation; Pa, on engine-sim's scale). Flow is what
+    /// drives an exhaust's acoustics. Its steady part, the mean flow, makes no sound: a
+    /// tailpipe radiates the rate of change of its volume velocity (a monopole). The computed
+    /// acoustics include that (hf gain 0); through a recorded impulse response the
+    /// synthesizer's derivative path takes it (engine-sim's hf gain, 0.01, makes it nearly
+    /// all of the signal above ~16 Hz).
+    Flow,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct AudioSpec {
     pub hf_gain: f64,
     pub noise: f64,
     pub jitter: f64,
+    /// What the exhaust's sound is driven by.
+    #[serde(default)]
+    pub source: AudioSource,
     /// The exhaust's acoustics (acoustics.rs). Without them, engine-sim's sound: each
     /// exhaust system's pulses through its recorded impulse response.
     #[serde(default)]
     pub acoustics: Option<AcousticsSpec>,
+    /// The sound as voice.rs makes it, in place of engine-sim's synthesizer: the engine then
+    /// writes voice.rs's control stream (each exhaust valve's flow and the state the other
+    /// sources follow) rather than an exhaust signal.
+    #[serde(default)]
+    pub voice: Option<VoiceSpec>,
+}
+
+/// voice.rs's sources beyond the exhaust valves' flow, and its output level. Each level is
+/// a multiple of the source's physical estimate (voice.rs), 0 leaving it out.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VoiceSpec {
+    /// Sound pressure (Pa) at the listener that is full scale.
+    pub full_scale: f64,
+    /// The exhaust's mean mass flow (kg/s) its acoustics' flow losses are computed for:
+    /// one fixed damping (voice.rs explains why not the engine's own).
+    #[serde(default)]
+    pub acoustic_flow: f64,
+    /// Cycle-to-cycle variation of the blowdowns beyond the simulation's (its combustion
+    /// is the same every cycle but for the flame's): the standard deviation of each one's
+    /// strength, relative.
+    #[serde(default)]
+    pub variation: f64,
+    /// Turbulence of the exhaust valves' jets, carried through the exhaust's acoustics.
+    #[serde(default)]
+    pub port_noise: f64,
+    /// Noise of the jets leaving the tailpipes (Lighthill's), with their pulsing velocity.
+    #[serde(default)]
+    pub tail_noise: f64,
+    /// The engine bay, heard through its cover: the exhaust manifolds' and turbine
+    /// housings' thin shells ringing with the pulses inside.
+    #[serde(default)]
+    pub bay: f64,
+    /// Valves seating, and direct injectors ticking.
+    #[serde(default)]
+    pub valvetrain: f64,
+    #[serde(default)]
+    pub injectors: f64,
+    /// Turbocharger: the compressor's broadband flow noise, its blade-pass whine, and the
+    /// blow-off valve venting boost when the throttle shuts.
+    #[serde(default)]
+    pub whoosh: f64,
+    #[serde(default)]
+    pub whistle: f64,
+    #[serde(default)]
+    pub compressor_blades: f64,
+    #[serde(default)]
+    pub blow_off: f64,
+    /// Scales recorded impulse responses (used without acoustics) to the computed level.
+    #[serde(default = "one")]
+    pub impulse_gain: f64,
 }
 
 /// The exhaust as an acoustic network of named junctions (acoustics.rs). Temperatures in K.
@@ -204,6 +333,53 @@ pub struct AcousticsSpec {
     pub listener_distance: f64,
     /// Scales the impulse responses (sets the level against engine-sim's synthesizer).
     pub gain: f64,
+    /// Where the pulses turn nonlinear, for the voice (voice.rs) to steepen them there.
+    #[serde(default)]
+    pub nonlinear: Option<NonlinearSpec>,
+    /// Valves (a silencer's bypass) that open with the exhaust's flow.
+    #[serde(default)]
+    pub valves: Option<ValvesSpec>,
+}
+
+/// What opening an exhaust's valves adds to its network (a silencer's bypass: a straight
+/// pipe past its chambers), and when an ECU opens them: between the crank speeds (rad/s)
+/// in `speed`, or the pedal positions in `throttle`, whichever is further. The voice blends
+/// the responses closed and open.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ValvesSpec {
+    #[serde(default)]
+    pub pipes: Vec<AcousticPipe>,
+    #[serde(default)]
+    pub orifices: Vec<AcousticOrifice>,
+    pub speed: [f64; 2],
+    pub throttle: [f64; 2],
+}
+
+impl AcousticsSpec {
+    /// The network with its valves open (unchanged without any).
+    pub fn opened(&self) -> AcousticsSpec {
+        let mut s = self.clone();
+        if let Some(v) = &self.valves {
+            s.pipes.extend(v.pipes.iter().cloned());
+            s.orifices.extend(v.orifices.iter().cloned());
+        }
+        s
+    }
+}
+
+/// Pipes in which the exhaust's pulses steepen as they travel, their crests outrunning
+/// their troughs: from each exhaust system's junction in `nodes` (exhaust order; the only
+/// way on from its cylinders), or from each port, along `length` of pipe at `temperature`.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NonlinearSpec {
+    /// None: in each cylinder's own pipe, from its port (an exhaust without one junction
+    /// all its pulses pass, as a turbine is).
+    #[serde(default)]
+    pub nodes: Vec<String>,
+    pub length: f64,
+    pub temperature: f64,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -227,7 +403,8 @@ fn one() -> f64 {
 }
 
 /// A perforated cone, baffle or cap: a mass of gas through `area` over `length` (with end
-/// corrections), and a resistance in units of the gas's characteristic impedance there.
+/// corrections), and a resistance in units of the gas's characteristic impedance there,
+/// without flow; the flow through it adds its jet's (acoustics.rs).
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AcousticOrifice {
@@ -237,6 +414,13 @@ pub struct AcousticOrifice {
     pub length: f64,
     pub resistance: f64,
     pub temperature: f64,
+    /// Discharge coefficient: the jet's area over `area` (0.6-0.7 for sharp holes).
+    #[serde(default = "default_discharge")]
+    pub discharge: f64,
+}
+
+fn default_discharge() -> f64 {
+    0.65
 }
 
 /// A volume small against the wavelength, at a junction.

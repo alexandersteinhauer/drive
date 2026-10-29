@@ -1,12 +1,15 @@
-//! Times the Beetle's engine: cargo run --release --example bench
+//! Times an engine: cargo run --release --example bench [spec.json]
+//! (default: the Beetle as engine-sim built it, tests/vw1200.json)
 use engine_sim::engine::Engine;
 use engine_sim::spec::EngineSpec;
 use engine_sim::units::rpm;
 use std::time::Instant;
 
 fn main() {
-    let spec: EngineSpec =
-        serde_json::from_str(include_str!("../tests/vw1200.json")).unwrap();
+    let spec: EngineSpec = match std::env::args().nth(1) {
+        Some(path) => serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap(),
+        None => serde_json::from_str(include_str!("../tests/vw1200.json")).unwrap(),
+    };
     // CONSTRAINED=1: engine-sim's constrained bodies instead of the reduced crank.
     let mut e = if std::env::var("CONSTRAINED").is_ok() { Engine::constrained(&spec) } else { Engine::new(&spec) };
     e.set_crank_speed(-spec.starter_speed);
@@ -24,7 +27,7 @@ fn main() {
         for a in &mut e.audio {
             a.clear();
         }
-        println!("{r} rpm, throttle {thr}: {:.1} % of real time, {:.1} Nm", s / 2.0 * 100.0, e.filtered_dyno_torque());
+        println!("{r} rpm, throttle {thr}: {:.1} % of real time, {} Nm", s / 2.0 * 100.0, if std::env::var("EXACT").is_ok() { format!("{:.15e}", e.filtered_dyno_torque()) } else { format!("{:.1}", e.filtered_dyno_torque()) });
     }
     println!("total {:.2} s for 8 s", total);
 }

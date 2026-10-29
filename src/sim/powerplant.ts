@@ -96,6 +96,26 @@ export class MappedEngine implements Powerplant {
   dispose(): void {}
 }
 
+/**
+ * The ECU's spark efficiency: engine torque relative to the map's, by spark retard from it
+ * (degrees), as measured on the simulated engines (engine/examples/calibrate.rs: the F154
+ * at 2500-7000 rpm, part and full load, within a few percent of one curve, as Bosch finds
+ * for real engines).
+ */
+const SPARK_EFFICIENCY: [number, number][] = [
+  [0, 1],
+  [10, 0.91],
+  [20, 0.79],
+  [30, 0.66],
+];
+/** Retard beyond which the burn is too late to be stable and the exhaust too hot. */
+const MAX_RETARD = 30;
+/**
+ * The ECU's model of the charge path: how fast torque follows the throttle (actuator,
+ * manifold, boost): "several 100 ms at low engine speeds" (Bosch, ME7).
+ */
+const CHARGE_TIME = 0.15;
+
 /** Engine speed below which it has stalled, and at which the starter lets go. */
 const STALL_RPM = 300;
 /** Idling time before a new engine is handed over (s). */
@@ -113,14 +133,31 @@ export class SimulatedEngine implements Powerplant {
   private cranking = false;
   /** Throttle as the driver's foot has it (eased: a foot, not a switch). */
   private pedal = 0;
+  /**
+   * The torque asked of the engine as a fraction of the driver's (traction and stability
+   * control), realised as Bosch's torque-based ECUs do (ME7): the throttle closes with it
+   * (the charge path: slow, the manifold and turbo empty), and until the charge has fallen,
+   * spark retard makes up the difference within the next combustion, fuel cut beyond what
+   * retard can.
+   */
+  torqueRequest = 1;
+  /**
+   * The torque a gear change asks for (a fraction of the driver's), by the fast path alone:
+   * the throttle, and a turbo's boost, stay as they are, the spark retards and beyond what
+   * retard can, cylinders are cut, as a dual-clutch's upshift has it (the charge kept for
+   * the next gear).
+   */
+  shiftTorque = 1;
+  /** The torque the charge path gives as the ECU models it (a fraction of the driver's). */
+  private charge = 1;
 
   constructor(readonly cfg: SimulatedEngineConfig) {
     this.sim = new EngineSim(cfg.spec);
     this.sim.ignition = true;
     this.reset();
-    // Let it settle into its idle: just started, it stumbles for a second.
-    this.sim.setLoad(1, 0, 0, 0);
-    this.sim.step(Math.round(SETTLE * this.sim.frequency));
+    // Let it settle into its idle (just started, it stumbles for a second), cranking it
+    // again if it dies, as the driver would.
+    for (let t = 0; t < SETTLE; t += 1 / 480) this.step(1 / 480, 0, null, null);
   }
 
   get omega(): number {
@@ -144,7 +181,27 @@ export class SimulatedEngine implements Powerplant {
       target = clamp((revTarget * RPM - rpm) / 600, 0, 0.7);
     const tau = target < this.pedal ? 0.03 : 0.06;
     this.pedal += (target - this.pedal) * (1 - Math.exp(-dt / tau));
-    this.sim.throttle = this.pedal;
+    const request = clamp(this.torqueRequest, 0, 1);
+    this.sim.throttle = this.pedal * request;
+    // The fast path: what the charge still gives beyond the request, taken by retard, the
+    // rest by fuel cut (the simulation burns nothing a cut cylinder gets, so cutting its
+    // spark is the same).
+    this.charge += (request - this.charge) * (1 - Math.exp(-dt / CHARGE_TIME));
+    const fast = request * clamp(this.shiftTorque, 0, 1);
+    const efficiency = fast / Math.max(this.charge, fast, 1e-6);
+    const floor = interpolate(SPARK_EFFICIENCY, MAX_RETARD);
+    const retard =
+      efficiency >= 1
+        ? 0
+        : interpolate(
+            SPARK_EFFICIENCY.map(
+              ([d, e]) => [e, d] as [number, number],
+            ).reverse(),
+            Math.max(efficiency, floor),
+          );
+    this.sim.sparkRetard = (retard * Math.PI) / 180;
+    const fuelCut = efficiency < floor ? 1 - efficiency / floor : 0;
+    this.sim.sparkCut = fuelCut;
 
     if (load)
       this.sim.setLoad(load.inertia, load.speed, load.torque, load.capacity);
@@ -154,6 +211,11 @@ export class SimulatedEngine implements Powerplant {
     this.stepDebt -= steps;
     this.sim.step(steps);
     return load ? this.sim.clutchTorque : 0;
+  }
+
+  /** Cap on the turbo's boost target (gauge Pa); Infinity: the engine's own map. */
+  set boostLimit(limit: number) {
+    this.sim.boostLimit = limit;
   }
 
   /** The pedal as the engine has it (eased), 0..1. */
@@ -183,7 +245,8 @@ function clamp(v: number, lo: number, hi: number): number {
   return Math.min(hi, Math.max(lo, v));
 }
 
-function interpolate(table: [number, number][], x: number): number {
+/** Linear in a table of [x, y] sorted by x, held flat beyond its ends. */
+export function interpolate(table: [number, number][], x: number): number {
   const first = table[0]!;
   if (x <= first[0]) return first[1];
   for (let i = 1; i < table.length; i++) {
