@@ -351,9 +351,11 @@ const ACOUSTICS: Acoustics = (() => {
         length: scroll(i) === "A" ? 0.41 : 0.4,
         diameter: 0.036,
         temperature: 1100,
-        // The pulses here are large (near a bar) and lose energy to their own flow, at
-        // the bends and where the primaries meet: losses linear acoustics leave out.
-        damping: 4,
+        // The pulses here are large (near a bar) and lose much of their energy to their
+        // own flow, at the bends and where the primaries meet: losses linear acoustics
+        // leave out, which would ring the primaries between the valve and the turbine
+        // (~700 Hz) as the real car's recordings don't. Fitted to them.
+        damping: 40,
       })),
       ...banks.flatMap((b, k) => [
         {
@@ -459,6 +461,22 @@ const ACOUSTICS: Acoustics = (() => {
       speed: [3000 * u.rpm, 3800 * u.rpm],
       throttle: [0.3, 0.6],
     },
+    // The wastegates, in the turbine housings: open, a way round the wheel into the
+    // downpipe, for each scroll. They open with the boost controller, half way at full
+    // throttle and 6000 rpm, and then let the pulses past, far less blocked than through
+    // the turbine (the opening wastegate changes the spectrum: Kabral et al., ETC 2017).
+    wastegate: banks.flatMap((b) =>
+      ["A", "B"].map((sc) => ({
+        a: `${b} scroll ${sc}`,
+        b: `${b} turbine`,
+        // Half the engine's wastegate area (wastegateArea) each, as the simulation has it.
+        area: 6 * u.cm2,
+        discharge: 0.8,
+        length: 0.04,
+        resistance: 1,
+        temperature: 1000,
+      })),
+    ),
     // Past the turbines, the pulses steepen down the downpipes and on to the silencer.
     nonlinear: {
       nodes: banks.map((b) => `${b} turbine`),
@@ -469,20 +487,20 @@ const ACOUSTICS: Acoustics = (() => {
 })();
 
 /**
- * The voice (engine/src/voice.rs). Its noise levels were fitted with the acoustics above;
- * the turbochargers' whoosh kept low, as the Pista's compressors breathe through ducts in
- * its flanks.
+ * The voice (engine/src/voice.rs). The flow noise near its physical estimates (fitted
+ * with the acoustics above: at full throttle the real car is mostly harmonics up to
+ * ~1.5 kHz, 75-90 % of the energy there, noise only above); the turbochargers' whoosh kept
+ * low, as the Pista's compressors breathe through ducts in its flanks.
  */
 const VOICE: VoiceSpec = {
-  // Full throttle near the limiter (~100 dB(A) at the chase camera) a little below full
-  // scale.
-  fullScale: 4,
+  // Full throttle's peaks near the limiter a little below full scale.
+  fullScale: 2,
   // About half full power's: the losses with the engine working hard.
   acousticFlow: 0.25,
   variation: 0.02,
-  portNoise: 0.3,
-  tailNoise: 100,
-  bay: 3e-4,
+  portNoise: 0.03,
+  tailNoise: 3,
+  bay: 3e-5,
   valvetrain: 1,
   injectors: 3,
   whoosh: 0.1,

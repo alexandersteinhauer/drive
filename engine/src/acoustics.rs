@@ -572,6 +572,7 @@ mod tests {
             gain: 1.0,
             nonlinear: None,
             valves: None,
+            wastegate: vec![],
         };
         let ir = &impulse_responses(&spec, 44100.0, 4096, 0.0)[0];
         let c = gas(AMBIENT, GAMMA_EXHAUST).c;
@@ -621,6 +622,7 @@ mod tests {
             gain: 1.0,
             nonlinear: None,
             valves: None,
+            wastegate: vec![],
         };
         let air = gas(AMBIENT, 1.4);
         let area = std::f64::consts::PI * d * d / 4.0;
@@ -665,6 +667,7 @@ mod tests {
                 gain: 1.0,
                 nonlinear: None,
                 valves: None,
+                wastegate: vec![],
             }
         };
         let spectrum = |spec: &AcousticsSpec| {

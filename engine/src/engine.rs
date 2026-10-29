@@ -1398,16 +1398,18 @@ impl Engine {
         for (i, e) in self.exhausts.iter().enumerate() {
             self.back_temperature[i] += (e.system.temperature() - self.back_temperature[i]) * mean;
         }
-        // Each valve's flow over the step, as a volume velocity in its runner (at the
-        // runner's pressure and the gas's temperature): what the exhaust's acoustics take.
-        // Its low frequencies are the simulation's prediction, waves in the runners and all;
-        // the voice makes its high ones (voice.rs).
+        // Each valve's flow over the step, as the volume velocity the exhaust's acoustics
+        // take: they are linear, at the atmosphere's density, so the flow at that density
+        // (at the gas's temperature), which launches the wave of the pressure the real flow
+        // does, c m' / A, whatever the runner's mean pressure. (As a volume velocity at the
+        // runner's pressure, a turbo engine's back-pressure would shrink its full-throttle
+        // pulses by itself.) Its low frequencies are the simulation's prediction, waves in
+        // the runners and all; the voice makes its high ones (voice.rs).
         for (i, c) in self.cylinders.iter_mut().enumerate() {
             let n = c.exhaust_moles / dt;
             c.exhaust_moles = 0.0;
-            let runner = &c.exhaust_runner;
-            let t = if n > 0.0 { c.system.temperature() } else { runner.temperature() };
-            self.staging[i] = n * crate::units::R * t / runner.pressure();
+            let t = if n > 0.0 { c.system.temperature() } else { c.exhaust_runner.temperature() };
+            self.staging[i] = n * crate::units::R * t / ATM;
         }
         let flow = self.exhaust_moles * AIR_MOLECULAR_MASS / dt;
         self.exhaust_mass_flow += (flow - self.exhaust_mass_flow) * mean;

@@ -86,8 +86,6 @@ const JET_STROUHAL: f64 = 0.2;
 const TAIL_ROLL_OFF: f64 = 4000.0;
 /// The acoustics' responses' lead ahead of their first arrival (acoustics::PRE_DELAY).
 const PRE_DELAY: usize = 128;
-/// Nonlinear propagation's base delay (samples): room for crests to arrive early.
-const STEEPENING_DELAY: f64 = 64.0;
 /// Exhaust gas: heat capacity ratio and specific gas constant (J/kg K).
 const GAMMA_EXHAUST: f64 = 1.35;
 const R_EXHAUST: f64 = 287.0;
@@ -97,6 +95,10 @@ const PRIMARY_TEMPERATURE: f64 = 1000.0;
 /// The engine bay's walls (thin steel, then the engine cover) pass the manifolds' sound
 /// falling 6 dB per octave above this (Hz), as a wall's mass law has it.
 const BAY_WALL: f64 = 300.0;
+/// The output fades in over this long at first (s).
+const FADE_IN: f64 = 0.3;
+/// The wastegate openings (of their full area) the manifolds' responses are computed at.
+const WASTEGATE_OPENINGS: [f64; 4] = [0.0, 0.25, 0.5, 1.0];
 /// How much more combustion varies with the manifold empty than at full load.
 const LIGHT_LOAD_VARIATION: f64 = 2.0;
 /// Exhaust valve actuators' time constant (s).
@@ -219,16 +221,27 @@ struct Group {
 }
 
 /// Nonlinear propagation down a pipe (Burgers'): a wave's crest travels faster than its
-/// trough, at c + (gamma + 1)/2 u for a particle velocity u = p / (rho c), so after a
-/// length L a sample of pressure p arrives kappa p = L (gamma + 1)/2 p / (rho c^3) earlier.
-/// Where crests would overtake troughs, a shock forms: the arrivals held in order, the
-/// samples between leaving a jump. How large exhaust pulses (a tenth of a bar or more)
-/// gain the high harmonics no linear pipe makes, the more the larger (Selamet et al., SAE
-/// 880082; the brassiness of loud trombones: Msallam et al., Acustica 86, 2000).
+/// trough, at c + (gamma + 1)/2 u for a particle velocity u = p / (rho c), so over a length
+/// L a sample of pressure p arrives kappa p = L (gamma + 1)/2 p / (rho c^3) earlier. How
+/// large exhaust pulses (a tenth of a bar or more) gain the high harmonics no linear pipe
+/// makes, the more the larger (Selamet et al., SAE 880082; the brassiness of loud
+/// trombones: Msallam et al., Acustica 86, 2000). Solved as Pestorius's algorithm does
+/// (JASA 1973): the length in slices, each one warping the wave's time a little, and where
+/// a crest would overtake the trough ahead, a shock: the two merge, and the energy the
+/// steepening put into the jump is lost, as a real shock's is. So a wave saturates however
+/// loud: beyond a few shock-forming distances, a sawtooth whose amplitude no longer grows
+/// with the source's.
 struct Steepener {
-    /// Samples per pascal, and the most a sample may arrive early (within the base delay).
+    slices: Vec<Slice>,
+    /// Takes out the mean and the infrasound first: the back-pressure the mean flow keeps
+    /// up is no wave, and would only shift every sample alike, crowding the delay out.
+    mean: [Biquad; 2],
+}
+
+/// One slice of Steepener's pipe, SLICE_DELAY samples late.
+struct Slice {
+    /// Samples per pascal earlier, and the most (within the delay).
     kappa: f64,
-    limit: f64,
     /// The last input's arrival (samples) and value; inputs so far; the next output's time.
     arrival: f64,
     value: f32,
@@ -237,26 +250,21 @@ struct Steepener {
     out: VecDeque<f32>,
 }
 
-impl Steepener {
-    fn new(length: f64, temperature: f64) -> Self {
-        let c = (GAMMA_EXHAUST * R_EXHAUST * temperature).sqrt();
-        let rho = crate::units::ATM / (R_EXHAUST * temperature);
-        Steepener {
-            kappa: length * (GAMMA_EXHAUST + 1.0) / 2.0 / (rho * c * c * c) * RATE,
-            limit: STEEPENING_DELAY - 2.0,
-            arrival: -1.0,
-            value: 0.0,
-            time: 0.0,
-            next: 0.0,
-            out: VecDeque::new(),
-        }
-    }
+/// Below this (Hz), a Steepener's input is taken out (4th-order Butterworth).
+const STEEPENER_HIGH_PASS: f64 = 20.0;
+/// Slices of a Steepener, and each one's delay (samples).
+const SLICES: usize = 8;
+const SLICE_DELAY: f64 = 8.0;
 
-    /// A block through the pipe, STEEPENING_DELAY late.
-    fn process(&mut self, input: &[f32], output: &mut [f32]) {
-        for &p in input {
-            let early = (self.kappa * p as f64).clamp(-self.limit, self.limit);
-            let a = (self.time + STEEPENING_DELAY - early).max(self.arrival + 0.01);
+impl Slice {
+    fn push(&mut self, p: f32) {
+        let early = (self.kappa * p as f64).clamp(-(SLICE_DELAY - 1.0), SLICE_DELAY - 1.0);
+        let a = self.time + SLICE_DELAY - early;
+        if a <= self.arrival {
+            // Overtaking the sample ahead: a shock. They go on as one, at its arrival,
+            // with their mean.
+            self.value = 0.5 * (self.value + p);
+        } else {
             while self.next <= a {
                 let f = ((self.next - self.arrival) / (a - self.arrival)) as f32;
                 self.out.push_back(self.value + (p - self.value) * f);
@@ -264,10 +272,51 @@ impl Steepener {
             }
             self.arrival = a;
             self.value = p;
-            self.time += 1.0;
         }
-        for o in output {
-            *o = self.out.pop_front().unwrap_or(self.value);
+        self.time += 1.0;
+    }
+
+    fn pop(&mut self) -> f32 {
+        self.out.pop_front().unwrap_or(self.value)
+    }
+}
+
+impl Steepener {
+    fn new(length: f64, temperature: f64) -> Self {
+        let c = (GAMMA_EXHAUST * R_EXHAUST * temperature).sqrt();
+        let rho = crate::units::ATM / (R_EXHAUST * temperature);
+        let kappa = length * (GAMMA_EXHAUST + 1.0) / 2.0 / (rho * c * c * c) * RATE;
+        let slice = || Slice {
+            kappa: kappa / SLICES as f64,
+            arrival: SLICE_DELAY - 1.0,
+            value: 0.0,
+            time: 0.0,
+            next: 0.0,
+            out: VecDeque::new(),
+        };
+        Steepener {
+            slices: (0..SLICES).map(|_| slice()).collect(),
+            mean: [Biquad::high_pass(STEEPENER_HIGH_PASS, 0.54), Biquad::high_pass(STEEPENER_HIGH_PASS, 1.31)],
+        }
+    }
+
+    /// The whole pipe's base delay (samples).
+    fn delay() -> usize {
+        SLICES * SLICE_DELAY as usize
+    }
+
+    /// A block through the pipe, delay() late.
+    fn process(&mut self, input: &[f32], output: &mut [f32]) {
+        for (o, &x) in output.iter_mut().zip(input) {
+            let mut v = chain(&mut self.mean, x);
+            for s in &mut self.slices {
+                s.push(v);
+                v = s.pop();
+            }
+            *o = v;
+        }
+        for f in &mut self.mean {
+            f.flush();
         }
     }
 }
@@ -348,6 +397,10 @@ pub struct Voice {
     tail_volume: f64,
     tail_filters: [Biquad; 2],
 
+    /// The wastegate openings the manifolds' responses are for (none without wastegates),
+    /// and where the engine's was among them at the end of the last block.
+    wastegates: Vec<f64>,
+    wastegate: f64,
     /// Exhaust valves: the crank speeds and pedal positions they open between, and how far
     /// open they were at the end of the last block.
     valves: Option<([f64; 2], [f64; 2])>,
@@ -364,6 +417,9 @@ pub struct Voice {
     bay: Vec<f32>,
     tmp: Vec<f32>,
     hearing: HighPass,
+    /// Fading in at first (0..1): the voice starts against an exhaust already flowing,
+    /// which its filters, from rest, would hear as a step.
+    fade: f32,
     out: VecDeque<f32>,
 }
 
@@ -374,8 +430,8 @@ impl Voice {
         let v = spec.audio.voice.clone()?;
         let port_exhaust: Vec<usize> = spec.banks.iter().flat_map(|b| b.cylinders.iter().map(|c| c.exhaust)).collect();
         let cylinders = port_exhaust.len();
-        let group = |impulse: &[f32]| Group {
-            convolution: Partitioned::new(impulse),
+        let group = |sets: &[Vec<f32>]| Group {
+            convolution: Partitioned::blending(sets),
             input: vec![0.0; BLOCK],
             noise: 0.0,
             noise_filter: Biquad::high_pass(500.0, 0.7),
@@ -392,8 +448,10 @@ impl Voice {
         let discrete = |r: Vec<Vec<f32>>| -> Vec<Vec<f32>> {
             r.into_iter().map(|r| r.into_iter().map(|h| h / RATE as f32).collect()).collect()
         };
+        let one_set = |r: Vec<Vec<f32>>| -> Vec<Vec<Vec<f32>>> { r.into_iter().map(|r| vec![r]).collect() };
         let mut splits = Vec::new();
         let mut ports = Vec::new();
+        let mut wastegates: Vec<f64> = Vec::new();
         let (groups, port_group, recorded, listener, outlets, outlet_diameter) = match &spec.audio.acoustics {
             Some(a) => {
                 let responses = match &a.nonlinear {
@@ -409,14 +467,14 @@ impl Voice {
                                 });
                             }
                         }
-                        discrete(crate::acoustics::impulse_responses_to(
+                        one_set(discrete(crate::acoustics::impulse_responses_to(
                             a,
                             RATE,
                             IMPULSE_LENGTH,
                             v.acoustic_flow,
                             MAX_FREQUENCY,
                             TAPER_FROM,
-                        ))
+                        )))
                     }
                     Some(nl) => {
                         let (manifolds, rest) = crate::acoustics::split_responses(
@@ -455,37 +513,57 @@ impl Voice {
                             });
                         }
                         // The manifolds ring briefly: their responses, shortened (faded out
-                        // over their last eighth).
+                        // over their last eighth). With wastegates, at each of their
+                        // openings: an open one lets the pulses past the turbine.
                         let fade = MANIFOLD_LENGTH / 8;
-                        discrete(manifolds)
-                            .into_iter()
-                            .map(|r| {
-                                (0..MANIFOLD_LENGTH)
-                                    .map(|i| {
-                                        let w = (MANIFOLD_LENGTH - i).min(fade) as f32 / fade as f32;
-                                        r[i] * (0.5 - 0.5 * (PI as f32 * w).cos())
-                                    })
-                                    .collect()
-                            })
+                        let shorten = |r: Vec<Vec<f32>>| -> Vec<Vec<f32>> {
+                            discrete(r)
+                                .into_iter()
+                                .map(|r| {
+                                    (0..MANIFOLD_LENGTH)
+                                        .map(|i| {
+                                            let w = (MANIFOLD_LENGTH - i).min(fade) as f32 / fade as f32;
+                                            r[i] * (0.5 - 0.5 * (PI as f32 * w).cos())
+                                        })
+                                        .collect()
+                                })
+                                .collect()
+                        };
+                        let mut by_opening = vec![shorten(manifolds)];
+                        if !a.wastegate.is_empty() {
+                            wastegates = WASTEGATE_OPENINGS.to_vec();
+                            for &opening in &WASTEGATE_OPENINGS[1..] {
+                                let (m, _) = crate::acoustics::split_responses(
+                                    &a.with_wastegate(opening),
+                                    &band(IMPULSE_LENGTH),
+                                    v.acoustic_flow,
+                                    &nl.nodes,
+                                    &port_exhaust,
+                                );
+                                by_opening.push(shorten(m));
+                            }
+                        }
+                        (0..by_opening[0].len())
+                            .map(|port| by_opening.iter().map(|set| set[port].clone()).collect())
                             .collect()
                     }
-                    None => discrete(crate::acoustics::impulse_responses_to(
+                    None => one_set(discrete(crate::acoustics::impulse_responses_to(
                         a,
                         RATE,
                         IMPULSE_LENGTH,
                         v.acoustic_flow,
                         MAX_FREQUENCY,
                         TAPER_FROM,
-                    )),
+                    ))),
                 };
                 // Ports whose responses are the same (a symmetric manifold's) share one
                 // convolution.
                 let mut distinct: Vec<usize> = Vec::new();
                 let mut port_group = Vec::new();
-                for (i, r) in responses.iter().enumerate() {
-                    let peak = r.iter().fold(0.0f32, |m, x| m.max(x.abs()));
+                for (i, sets) in responses.iter().enumerate() {
+                    let peak = sets.iter().flatten().fold(0.0f32, |m, x| m.max(x.abs()));
                     let same = distinct.iter().position(|&j| {
-                        responses[j].iter().zip(r).all(|(a, b)| (a - b).abs() <= 1e-5 * peak)
+                        responses[j].iter().flatten().zip(sets.iter().flatten()).all(|(a, b)| (a - b).abs() <= 1e-5 * peak)
                     });
                     port_group.push(same.unwrap_or_else(|| {
                         distinct.push(i);
@@ -510,7 +588,7 @@ impl Voice {
                         });
                     }
                 }
-                let groups = spec.exhausts.iter().map(|_| group(&[1.0])).collect();
+                let groups = spec.exhausts.iter().map(|_| group(&[vec![1.0]])).collect();
                 for _ in 0..exhausts {
                     splits.push(Split {
                         input: vec![0.0; BLOCK],
@@ -527,7 +605,7 @@ impl Voice {
             .map(|g| port_exhaust[port_group.iter().position(|&x| x == g).unwrap_or(0)])
             .collect();
         // The direct sources wait for the exhaust: its responses' leads and the steepening.
-        let steepening = if splits.iter().all(|s| s.steepener.is_none()) && ports.is_empty() { 0 } else { STEEPENING_DELAY as usize };
+        let steepening = if splits.iter().all(|s| s.steepener.is_none()) && ports.is_empty() { 0 } else { Steepener::delay() };
         let delay = match (&spec.audio.acoustics, splits.is_empty()) {
             (Some(_), true) => PRE_DELAY + steepening,
             (Some(_), false) => 2 * PRE_DELAY + steepening,
@@ -541,6 +619,8 @@ impl Voice {
             group_exhaust,
             splits,
             ports,
+            wastegates,
+            wastegate: 0.0,
             valves: spec.audio.acoustics.as_ref().and_then(|a| a.valves.as_ref()).map(|v| (v.speed, v.throttle)),
             valve: 0.0,
             recorded,
@@ -575,6 +655,7 @@ impl Voice {
             bay: vec![0.0; BLOCK],
             tmp: vec![0.0; BLOCK],
             hearing: HighPass::new(4, 20.0, RATE),
+            fade: 0.0,
             // The output runs a block behind the input (the convolution's).
             out: std::iter::repeat_n(0.0, BLOCK).collect(),
             spec: v,
@@ -772,6 +853,17 @@ impl Voice {
     /// late, matching the responses' lead) and queues the result.
     fn finish_block(&mut self) {
         self.exhaust.iter_mut().for_each(|v| *v = 0.0);
+        let (wastegate0, wastegate1) = if self.wastegates.is_empty() {
+            (0.0, 0.0)
+        } else {
+            let opening = self.controls[Global::Wastegate as usize] / BLOCK as f64;
+            let w = &self.wastegates;
+            let x = (1..w.len())
+                .find(|&i| opening <= w[i])
+                .map_or((w.len() - 1) as f64, |i| (i - 1) as f64 + (opening - w[i - 1]) / (w[i] - w[i - 1]));
+            (self.wastegate, x.max(0.0))
+        };
+        self.wastegate = wastegate1;
         for (i, p) in self.ports.iter_mut().enumerate() {
             let z = p.impedance;
             p.input.iter_mut().for_each(|v| *v *= z);
@@ -782,7 +874,7 @@ impl Voice {
             }
         }
         for (i, g) in self.groups.iter_mut().enumerate() {
-            g.convolution.process(&g.input, &mut self.tmp);
+            g.convolution.process_blended(&g.input, &mut self.tmp, wastegate0, wastegate1);
             let target = match self.splits.get_mut(self.group_exhaust[i]) {
                 Some(s) => &mut s.input,
                 None => &mut self.exhaust,
@@ -877,10 +969,13 @@ impl Voice {
         }
         let scale = (1.0 / self.spec.full_scale) as f32;
         self.direct_delay.extend(self.direct.iter());
+        let fade_step = (1.0 / (FADE_IN * RATE)) as f32;
         for k in 0..BLOCK {
             let direct = self.direct_delay.pop_front().unwrap_or(0.0);
             let v = self.hearing.f(self.exhaust[k] + self.bay[k] + direct) * scale;
-            self.out.push_back(v);
+            self.fade = (self.fade + fade_step).min(1.0);
+            let f = self.fade * self.fade * (3.0 - 2.0 * self.fade);
+            self.out.push_back(v * f);
         }
         self.bay.iter_mut().for_each(|v| *v = 0.0);
         for f in self
@@ -936,9 +1031,36 @@ mod tests {
         let loud = steepened(1e4, 400.0);
         let (b1, b2) = (amplitude(&loud, 400.0), amplitude(&loud, 800.0));
         let s = Steepener::new(2.0, 900.0);
-        let shock = RATE / (2.0 * PI * 400.0 * s.kappa * 1e4); // in units of the 2 m
+        let kappa: f64 = s.slices.iter().map(|x| x.kappa).sum();
+        let shock = RATE / (2.0 * PI * 400.0 * kappa * 1e4); // in units of the 2 m
         let expected = 1.0 / (2.0 * shock);
         assert!((b2 / b1 - expected).abs() < 0.2 * expected, "B2/B1 {} against {expected}", b2 / b1);
+    }
+
+    #[test]
+    fn shocks_take_energy_and_never_stall() {
+        // Far beyond the shock-forming distance (a bar of pressure at 500 Hz), a pulse train
+        // with its mean: the output keeps time and loses energy to its shocks.
+        let mut s = Steepener::new(2.5, 900.0);
+        let n = 44100;
+        let input: Vec<f32> = (0..n)
+            .map(|i| {
+                let ph = (500.0 * i as f64 / RATE).fract();
+                (1e5 * (-ph * 12.0).exp() + 3e4) as f32
+            })
+            .collect();
+        let mut out = vec![0.0f32; n];
+        for (i, o) in input.chunks(BLOCK).zip(out.chunks_mut(BLOCK)) {
+            s.process(i, o);
+        }
+        let ac = |x: &[f32]| {
+            let m = x.iter().map(|&v| v as f64).sum::<f64>() / x.len() as f64;
+            (x.iter().map(|&v| (v as f64 - m).powi(2)).sum::<f64>() / x.len() as f64).sqrt()
+        };
+        assert!(ac(&out[4410..]) < ac(&input[4410..]));
+        for sl in &s.slices {
+            assert!(sl.out.len() < 2 * SLICE_DELAY as usize + 2, "queue {}", sl.out.len());
+        }
     }
 
     #[test]

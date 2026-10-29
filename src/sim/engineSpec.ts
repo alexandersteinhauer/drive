@@ -273,6 +273,12 @@ export interface Acoustics {
     speed: [number, number];
     throttle: [number, number];
   };
+  /**
+   * A turbocharger's wastegates, fully open: orifices around the turbines (to the
+   * junctions of `nonlinear.nodes`). The voice blends the manifolds' responses by the
+   * engine's wastegate opening.
+   */
+  wastegate?: AcousticOrifice[];
 }
 
 export interface CamSpec {

@@ -430,12 +430,12 @@ const STOCK_ACOUSTICS: Acoustics = {
 const VOICE: VoiceSpec = {
   // Physically some 10 dB quieter than the Ferrari at full throttle: heard a little
   // quieter, as a game plays its cars.
-  fullScale: 2,
+  fullScale: 1.2,
   // About full throttle's exhaust flow (~35 g/s at 34 PS).
   acousticFlow: 0.03,
   variation: 0.04,
-  portNoise: 0.3,
-  tailNoise: 100,
+  portNoise: 0.03,
+  tailNoise: 3,
   valvetrain: 2,
   // engine-sim's recorded response (?exhaust=impulse) at about the computed level.
   impulseGain: 0.18,

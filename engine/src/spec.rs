@@ -336,9 +336,13 @@ pub struct AcousticsSpec {
     /// Where the pulses turn nonlinear, for the voice (voice.rs) to steepen them there.
     #[serde(default)]
     pub nonlinear: Option<NonlinearSpec>,
-    /// Valves (a silencer's bypass) that open with the exhaust's flow.
+    /// Valves (a silencer's bypass) an ECU opens.
     #[serde(default)]
     pub valves: Option<ValvesSpec>,
+    /// A turbocharger's wastegates, fully open: orifices around the turbines (to the
+    /// junctions of `nonlinear.nodes`), opened as the engine's wastegate is.
+    #[serde(default)]
+    pub wastegate: Vec<AcousticOrifice>,
 }
 
 /// What opening an exhaust's valves adds to its network (a silencer's bypass: a straight
@@ -363,6 +367,16 @@ impl AcousticsSpec {
         if let Some(v) = &self.valves {
             s.pipes.extend(v.pipes.iter().cloned());
             s.orifices.extend(v.orifices.iter().cloned());
+        }
+        s
+    }
+
+    /// The network with its wastegates `opening` (0..1) of the way open: their area so much
+    /// of its full.
+    pub fn with_wastegate(&self, opening: f64) -> AcousticsSpec {
+        let mut s = self.clone();
+        if opening > 0.0 {
+            s.orifices.extend(self.wastegate.iter().map(|o| AcousticOrifice { area: o.area * opening, ..o.clone() }));
         }
         s
     }
