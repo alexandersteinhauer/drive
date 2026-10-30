@@ -34,6 +34,8 @@ fn program(name: &str) -> Vec<Segment> {
         "hold3" => vec![(4.0, 3000.0, 3000.0, 1.0)],
         "diag6" => vec![(2.0, 6000.0, 6000.0, 1.0)],
         "idle" => vec![(3.0, 1000.0, 1000.0, 0.0)],
+        // Idling on its own (the dyno off: a negative speed).
+        "free" => vec![(3.0, -1000.0, -1000.0, 0.0)],
         // hold:<rpm>:<seconds>, full throttle.
         _ if name.starts_with("hold:") => {
             let v: Vec<f64> = name[5..].split(':').map(|x| x.parse().unwrap()).collect();
@@ -66,7 +68,7 @@ fn main() {
     e.collect_audio = false;
     e.set_ignition(true);
     let rpm = std::f64::consts::PI / 30.0;
-    e.set_crank_speed(-program[0].1 * rpm);
+    e.set_crank_speed(-program[0].1.abs() * rpm);
     let frame = 1.0 / 60.0;
     let per_frame = (spec.simulation_frequency * frame).round() as usize;
     let mut log = String::new();
@@ -99,7 +101,7 @@ fn main() {
         let mut s = 0.0;
         while s < dur - 1e-9 {
             let r = r0 + (r1 - r0) * (s / dur);
-            e.set_dyno(true, true, r * rpm);
+            e.set_dyno(r > 0.0, true, r.abs() * rpm);
             e.set_speed_control(thr);
             for _ in 0..per_frame {
                 e.step();

@@ -43,8 +43,18 @@ export async function useNativeEngine(repo: string): Promise<void> {
     engine_duct_exits_ptr: [[p], p],
     engine_duct_clear: [[p], T.void],
   };
+  // A library older than the sources would run the old simulation, silently ignoring
+  // spec fields it doesn't know.
+  const { statSync, readdirSync } = await import("node:fs");
+  const path = `${repo}/engine/target/release/libengine_sim.dylib`;
+  const built = statSync(path).mtimeMs;
+  const stale = readdirSync(`${repo}/engine/src`).filter(
+    (f) => statSync(`${repo}/engine/src/${f}`).mtimeMs > built,
+  );
+  if (stale.length)
+    throw new Error(`${path} is older than engine/src/${stale.join(", ")}: cargo build --release --lib in engine/`);
   const lib = dlopen(
-    `${repo}/engine/target/release/libengine_sim.dylib`,
+    path,
     Object.fromEntries(Object.entries(sig).map(([k, [args, returns]]) => [k, { args, returns }])),
   );
   const exports: Record<string, unknown> = {};
