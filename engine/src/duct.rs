@@ -216,13 +216,12 @@ fn hllc(l: &Prim, r: &Prim) -> [f64; NQ] {
     }
 }
 
-/// The value at the face between `c` and `d` from the cells `a` to `e` (upwind of it: `c`'s
-/// side): fifth-order WENO-Z (Borges, Carmona, Costa and Don, J. Comput. Phys. 227, 2008).
+/// The values at the faces either side of cell `c` from the cells `a` to `e` around it:
+/// fifth-order WENO-Z (Borges, Carmona, Costa and Don, J. Comput. Phys. 227, 2008), at the
+/// face between `b` and `c`, and at the face between `c` and `d`. Both take the same three
+/// stencils, mirrored, so their smoothness indicators are worked out once.
 #[inline]
-fn weno5z(a: f64, b: f64, c: f64, d: f64, e: f64) -> f64 {
-    let q0 = (2.0 * a - 7.0 * b + 11.0 * c) / 6.0;
-    let q1 = (-b + 5.0 * c + 2.0 * d) / 6.0;
-    let q2 = (2.0 * c + 5.0 * d - e) / 6.0;
+fn weno5z(a: f64, b: f64, c: f64, d: f64, e: f64) -> (f64, f64) {
     let s = |x: f64, y: f64, z: f64| 13.0 / 12.0 * (x - 2.0 * y + z).powi(2);
     let b0 = s(a, b, c) + 0.25 * (a - 4.0 * b + 3.0 * c).powi(2);
     let b1 = s(b, c, d) + 0.25 * (b - d).powi(2);
@@ -230,9 +229,15 @@ fn weno5z(a: f64, b: f64, c: f64, d: f64, e: f64) -> f64 {
     let tau = (b0 - b2).abs();
     // Small against the variable's own scale: the weights are ideal where it is smooth.
     let eps = 1e-30 * (c * c + 1e-30);
-    let w = |d: f64, b: f64| d * (1.0 + (tau / (b + eps)).powi(2));
-    let (w0, w1, w2) = (w(0.1, b0), w(0.6, b1), w(0.3, b2));
-    (w0 * q0 + w1 * q1 + w2 * q2) / (w0 + w1 + w2)
+    let r = |b: f64| 1.0 + (tau / (b + eps)).powi(2);
+    let (r0, r1, r2) = (r(b0), r(b1), r(b2));
+    // Towards d: the stencils ending at c, centred on it, starting from it (ideal weights
+    // 0.1, 0.6, 0.3); towards b, mirrored.
+    let (w0, w1, w2) = (0.1 * r0, 0.6 * r1, 0.3 * r2);
+    let right = (w0 * (2.0 * a - 7.0 * b + 11.0 * c) + w1 * (-b + 5.0 * c + 2.0 * d) + w2 * (2.0 * c + 5.0 * d - e)) / (6.0 * (w0 + w1 + w2));
+    let (w0, w1, w2) = (0.1 * r2, 0.6 * r1, 0.3 * r0);
+    let left = (w0 * (2.0 * e - 7.0 * d + 11.0 * c) + w1 * (-d + 5.0 * c + 2.0 * b) + w2 * (2.0 * c + 5.0 * b - a)) / (6.0 * (w0 + w1 + w2));
+    (left, right)
 }
 
 /// A pipe's ends: A at x = 0, B at x = length.
@@ -285,6 +290,10 @@ pub struct Pipe {
     rate: Vec<[f64; NQ]>,
     pub prim: Vec<Prim>,
     padded: Vec<[f64; NQ]>,
+    /// `padded` by variable, for WENO along the cells.
+    columns: Vec<f64>,
+    /// WENO's values at the cells' faces: by variable, at their left faces and at their right.
+    faces: Vec<f64>,
     /// Per face where the section steps, where its solution starts (`solve_step`'s hint).
     step_flow: Vec<f64>,
     /// The cells' own values at the faces (first order), for a substep done again.
@@ -419,6 +428,8 @@ impl Pipe {
             rate: vec![[0.0; NQ]; n],
             prim: vec![state; n],
             padded: Vec::with_capacity(n + 6),
+            columns: vec![0.0; NQ * (n + 6)],
+            faces: vec![0.0; 2 * NQ * n],
             step_flow: vec![0.0; n + 1],
             first_order: false,
             face: [[0.0; NQ]; 2],
@@ -515,20 +526,38 @@ impl Pipe {
                 }
             }
         }
+        let m = n + 6;
+        for (i, x) in v.iter().enumerate() {
+            for k in 0..NQ {
+                self.columns[k * m + i] = x[k];
+            }
+        }
+        let (left, right) = self.faces.split_at_mut(NQ * n);
+        for k in 0..NQ {
+            let x = &self.columns[k * m..(k + 1) * m];
+            let (l, r) = (&mut left[k * n..(k + 1) * n], &mut right[k * n..(k + 1) * n]);
+            // Cell i is x[i + 3].
+            for i in 0..n {
+                (l[i], r[i]) = weno5z(x[i + 1], x[i + 2], x[i + 3], x[i + 4], x[i + 5]);
+            }
+        }
+    }
+
+    /// WENO's values at cell i's left face (`side` 0) or right face (1).
+    #[inline]
+    fn face_value(&self, i: usize, side: usize) -> [f64; NQ] {
+        let n = self.prim.len();
+        std::array::from_fn(|k| self.faces[(side * NQ + k) * n + i])
     }
 
     /// The gas at an end (reconstructed at the end itself, from inside), its velocity along
     /// the outward normal.
     fn end(&self, side: Side) -> EndGas {
         let n = self.prim.len();
-        let v = &self.padded;
-        let mut x = [0.0; NQ];
-        for k in 0..NQ {
-            x[k] = match side {
-                Side::A => weno5z(v[5][k], v[4][k], v[3][k], v[2][k], v[1][k]),
-                Side::B => weno5z(v[n][k], v[n + 1][k], v[n + 2][k], v[n + 3][k], v[n + 4][k]),
-            };
-        }
+        let x = match side {
+            Side::A => self.face_value(0, 0),
+            Side::B => self.face_value(n - 1, 1),
+        };
         let cell = match side {
             Side::A => self.prim[0],
             Side::B => self.prim[n - 1],
@@ -565,12 +594,8 @@ impl Pipe {
         for i in 0..n - 1 {
             // Face i + 1/2: cell i is padded[i + 3].
             let v = &self.padded[i + 1..i + 7];
-            let mut l = [0.0; NQ];
-            let mut r = [0.0; NQ];
-            for k in 0..NQ {
-                l[k] = weno5z(v[0][k], v[1][k], v[2][k], v[3][k], v[4][k]);
-                r[k] = weno5z(v[5][k], v[4][k], v[3][k], v[2][k], v[1][k]);
-            }
+            let mut l = self.face_value(i, 1);
+            let mut r = self.face_value(i + 1, 0);
             // Where the reconstruction would leave a vacuum (never in smooth flow), the
             // cells' own values.
             if l[0] <= 0.0 || l[2] <= 0.0 || self.first_order {
@@ -800,7 +825,7 @@ fn solve_end(s: &EndGas, area: f64, cda: f64, res: &Reservoir, z: f64, hint: f64
     // The residual falls as the end pressure rises: a bracket near last time's, which also
     // shows the end isn't choked; else from the sonic pressure up.
     let near = if hint > p_sonic { bracket_near(|p| eval(p).0, hint, p_sonic, f64::INFINITY, false) } else { None };
-    let (mut a, mut ra, mut b, mut rb) = match near {
+    let (a, ra, b, rb) = match near {
         Some(x) => x,
         None => {
             let (r_lo, f_lo) = eval(p_sonic);
@@ -817,36 +842,19 @@ fn solve_end(s: &EndGas, area: f64, cda: f64, res: &Reservoir, z: f64, hint: f64
             (p_sonic, r_lo, hi, r_hi)
         }
     };
-    // Illinois: regula falsi, halving a stuck end's residual.
-    let mut best = (EndFlow::default(), 0.0);
-    let mut side = 0;
-    for _ in 0..100 {
-        let c = (a * rb - b * ra) / (rb - ra);
-        let (rc, fc) = eval(c);
-        best = (fc, c);
-        if rc == 0.0 || (b - a).abs() <= 1e-12 * c {
-            break;
-        }
-        if rc > 0.0 {
-            a = c;
-            ra = rc;
-            if side == 1 {
-                rb *= 0.5;
-            }
-            side = 1;
-        } else {
-            b = c;
-            rb = rc;
-            if side == -1 {
-                ra *= 0.5;
-            }
-            side = -1;
-        }
-        if (b - a).abs() <= 1e-10 * c {
-            break;
-        }
-    }
-    best
+    // (Illinois takes a rising function.)
+    let (c, f) = illinois(
+        |p| {
+            let (r, f) = eval(p);
+            (-r, f)
+        },
+        a,
+        -ra,
+        b,
+        -rb,
+        1e-10,
+    );
+    (f, c)
 }
 
 /// Gas accelerated isentropically from rest at `p0`, `t0` (enthalpy `h0`) to static pressure
@@ -884,25 +892,27 @@ fn inflow_state(g: f64, p: f64, h0: f64, t0: f64) -> (f64, f64) {
 
 /// inflow_state, given the sonic state (`sonic_state`, the same for every pressure).
 fn inflow_state_with(g: f64, p: f64, h0: f64, t0: f64, (ts, vs): (f64, f64)) -> (f64, f64) {
-    let rho_at = |v: f64| {
-        let h = (h0 - 0.5 * v * v).max(1e-3 * h0);
-        p / (RS * temperature_of_enthalpy(h, t0))
-    };
+    // At rest the gas is at its stagnation temperature.
+    let rho0 = p / (RS * t0);
     if g <= 0.0 {
-        return (0.0, rho_at(0.0));
+        return (0.0, rho0);
     }
     let rho_s = p / (RS * ts);
     if g >= rho_s * vs {
         return (vs, rho_s);
     }
-    // The mass flux rises with the velocity up to the sonic point.
+    // Newton's method for the mass flux rho v = g over the velocity. The flux rises with the
+    // velocity up to the sonic point, concave: from below the root (v = g / rho0, rho falling
+    // as v rises), each step lands below it again, closer. d(rho v)/dv = rho (1 - v^2 / (cp
+    // T)), as dT/dv = -v / cp. The temperature from the last one's (Newton's method again).
+    // (Kept to a bracket, halved should a step leave it, as round-off near the sonic point
+    // could make it.)
     let (mut lo, mut hi) = (0.0, vs);
-    let mut v = g / rho_at(0.0);
+    let (mut v, mut t, mut rho) = (g / rho0, t0, rho0);
     for _ in 0..60 {
-        if !(v > lo && v < hi) {
-            v = 0.5 * (lo + hi);
-        }
-        let r = rho_at(v) * v - g;
+        t = temperature_of_enthalpy((h0 - 0.5 * v * v).max(1e-3 * h0), t);
+        rho = p / (RS * t);
+        let r = rho * v - g;
         if r.abs() <= 1e-12 * g {
             break;
         }
@@ -911,10 +921,12 @@ fn inflow_state_with(g: f64, p: f64, h0: f64, t0: f64, (ts, vs): (f64, f64)) -> 
         } else {
             lo = v;
         }
-        // Fixed point (rho falls as v rises): a good next guess.
-        v = g / rho_at(v);
+        v -= r / (rho * (1.0 - v * v / (cp(t) * t)));
+        if !(v > lo && v < hi) {
+            v = 0.5 * (lo + hi);
+        }
     }
-    (v, rho_at(v))
+    (v, rho)
 }
 
 /// DUCTCHECK set: every stage's flows are checked, the first not finite reported with what
@@ -977,22 +989,26 @@ fn bracket_near(f: impl Fn(f64) -> f64, x0: f64, lo: f64, hi: f64, rising: bool)
     None
 }
 
-/// Illinois's regula falsi for `f` rising through zero on [a, b] (f(a) < 0 < f(b) given), to
-/// a bracket `tol` of its size.
-fn illinois(f: impl Fn(f64) -> f64, mut a: f64, mut fa: f64, mut b: f64, mut fb: f64, tol: f64) -> f64 {
+/// Illinois's regula falsi for `f` rising through zero on [a, b] (f(a) < 0 < f(b) given):
+/// the root, and what `f` gave with it there. To `tol` of it: till a step moves it less (as
+/// the steps converge superlinearly, its error is then far less), or the bracket is so small.
+fn illinois<T>(f: impl Fn(f64) -> (f64, T), mut a: f64, mut fa: f64, mut b: f64, mut fb: f64, tol: f64) -> (f64, T) {
     let mut side = 0;
-    let mut c = a;
-    for _ in 0..100 {
-        c = (a * fb - b * fa) / (fb - fa);
+    let mut last = f64::NAN;
+    let mut i = 0;
+    loop {
+        let mut c = (a * fb - b * fa) / (fb - fa);
         // Where the secant is undefined or leaves the bracket (residuals alike, as near no
         // flow), halve it.
         if !(c > a.min(b) && c < a.max(b)) {
             c = 0.5 * (a + b);
         }
-        let fc = f(c);
-        if fc == 0.0 || (b - a).abs() <= tol * (a.abs() + b.abs()) {
-            break;
+        let (fc, out) = f(c);
+        i += 1;
+        if fc == 0.0 || (c - last).abs() <= tol * c.abs() || (b - a).abs() <= tol * (a.abs() + b.abs()) || i == 100 {
+            return (c, out);
         }
+        last = c;
         if fc < 0.0 {
             a = c;
             fa = fc;
@@ -1009,7 +1025,6 @@ fn illinois(f: impl Fn(f64) -> f64, mut a: f64, mut fa: f64, mut b: f64, mut fb:
             side = -1;
         }
     }
-    c
 }
 
 /// Flow through a sudden change of section between two pipes' ends (or within a pipe): gas
@@ -1091,25 +1106,37 @@ fn step_from(up: &EndGas, area_up: f64, down: &EndGas, area_down: f64, rest: f64
             };
             let critical = p0 * (2.0 / (g0 + 1.0)).powf(g0 / (g0 - 1.0));
             let (rc, vc) = state(critical);
-            let p_d = if g_down >= rc * vc {
-                critical
+            if g_down >= rc * vc {
+                (critical, vc, rc)
+            } else if g_down <= 0.0 {
+                (p0, 0.0, p0 / (RS * t0))
             } else {
-                illinois(
-                    |p| {
-                        let (r, v) = state(p);
-                        g_down - r * v
-                    },
-                    critical,
-                    g_down - rc * vc,
-                    p0,
-                    g_down,
-                    // Near no flow its dynamic head is ~1e-9 of the pressure.
-                    1e-12,
-                )
-            };
-            // The velocity from the mass flux (near no flow the enthalpy's drop is round-off).
-            let (rho_d, v_d) = state(p_d);
-            (p_d, if g_down < rho_d * v_d { g_down / rho_d } else { v_d }, rho_d)
+                // Newton's method over the velocity, as inflow_state_with: the flux rises with
+                // it, concave, to the critical point. Along the isentrope rho ~ T^(1 / (g0 -
+                // 1)), so d(rho v)/dv = rho (1 - v^2 / ((g0 - 1) cp T)).
+                let rho0 = p0 / (RS * t0);
+                let (mut lo, mut hi) = (0.0, vc);
+                let (mut v, mut t, mut rho) = (g_down / rho0, t0, rho0);
+                for _ in 0..60 {
+                    t = temperature_of_enthalpy(h0 - 0.5 * v * v, t);
+                    rho = rho0 * (t / t0).powf(1.0 / (g0 - 1.0));
+                    let r = rho * v - g_down;
+                    if r.abs() <= 1e-12 * g_down {
+                        break;
+                    }
+                    if r > 0.0 {
+                        hi = v;
+                    } else {
+                        lo = v;
+                    }
+                    v -= r / (rho * (1.0 - v * v / ((g0 - 1.0) * cp(t) * t)));
+                    if !(v > lo && v < hi) {
+                        v = 0.5 * (lo + hi);
+                    }
+                }
+                // (The velocity carrying the flux exactly.)
+                (rho * RS * t, g_down / rho, rho)
+            }
         };
         let residual = wave(down, p_d).0 + v_d;
         let fu = EndFlow { m, energy: m * h0, yf: up.yf, yo: up.yo, p: p_u, un: un_u, rho: rho_u };
@@ -1132,8 +1159,17 @@ fn step_from(up: &EndGas, area_up: f64, down: &EndGas, area_down: f64, rest: f64
     };
     // (Illinois takes a rising function.)
     // (To 1e-10 of the pressure, as solve_end: ~1e-5 Pa.)
-    let p = illinois(|p| -solve(p).0, lo, -r_lo, hi, -r_hi, 1e-10);
-    let (_, fu, fd) = solve(p);
+    let (p, (fu, fd)) = illinois(
+        |p| {
+            let (r, fu, fd) = solve(p);
+            (-r, (fu, fd))
+        },
+        lo,
+        -r_lo,
+        hi,
+        -r_hi,
+        1e-10,
+    );
     (fu, fd, p)
 }
 

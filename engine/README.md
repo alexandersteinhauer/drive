@@ -126,8 +126,9 @@ order, so the result is the same to the bit): 4.4 times as fast on 6 threads of 
 Mac.
 
 - Each pipe is a column of finite volumes of the one-dimensional Euler equations with the
-  gas's composition, fifth order in space (WENO-Z) and third in time (SSP Runge-Kutta), HLLC
-  fluxes, in the cylinders' real gas (so energy passes between them exactly). Cells are sized
+  gas's composition, fifth order in space (WENO-Z, a cell's values at both its faces from one
+  set of smoothness indicators, by variable along the pipe) and third in time (SSP
+  Runge-Kutta), HLLC fluxes, in the cylinders' real gas (so energy passes between them exactly). Cells are sized
   for 30 to the wavelength at 3 kHz in each pipe's gas: numerical damping ~0.02 dB/m there.
 - A pipe is a run of sections: straight, cones (the area varying cell to cell, the walls
   pushing on the gas by p dA), a catalyst's monolith (its channels' open area and hydraulic
@@ -153,9 +154,14 @@ Mac.
   from its mass flux is ill-conditioned near sonic, and rang at kilohertz there); a wall is
   exact, nothing passing. Each end's and each step's solution is found within a bracket about
   its last (0.1 % either side, widened fourfold until it holds; else over the whole range),
-  to 1e-10 of the pressure (~1e-5 Pa); a step's over its upstream end's pressure, whose wave
+  by Illinois's regula falsi till a step moves it less than 1e-10 of the pressure (~1e-5 Pa;
+  against bisection to 1e-15 it is then within 1e-8, where waiting for the bracket itself to
+  close took a third more evaluations); a step's over its upstream end's pressure, whose wave
   curve gives the mass flow directly. (Searching over the mass flow instead, each trial
-  inverted the wave curve: twice the work.)
+  inverted the wave curve: twice the work.) The states carrying a given mass flux (into a pipe
+  through a narrower opening; into a step's narrower side) by Newton's method over the
+  velocity: the flux is concave in it below sonic, so from rest each step lands below the
+  root, closer.
 - Where a strong rarefaction outruns the high-order scheme (a stage would leave a cell
   without internal energy), the substep is done again in halves, at the last with
   first-order fluxes, which HLLC keeps positive.
