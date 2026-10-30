@@ -151,7 +151,11 @@ Mac.
   supersonically, as through a nozzle's diverging part. Through the pipe's own section the
   inflow is isentropic, its face sonic at the critical pressure once it chokes (finding it
   from its mass flux is ill-conditioned near sonic, and rang at kilohertz there); a wall is
-  exact, nothing passing.
+  exact, nothing passing. Each end's and each step's solution is found within a bracket about
+  its last (0.1 % either side, widened fourfold until it holds; else over the whole range),
+  to 1e-10 of the pressure (~1e-5 Pa); a step's over its upstream end's pressure, whose wave
+  curve gives the mass flow directly. (Searching over the mass flow instead, each trial
+  inverted the wave curve: twice the work.)
 - Where a strong rarefaction outruns the high-order scheme (a stage would leave a cell
   without internal energy), the substep is done again in halves, at the last with
   first-order fluxes, which HLLC keeps positive.

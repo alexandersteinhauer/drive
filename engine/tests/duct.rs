@@ -456,8 +456,8 @@ fn step_sweep() {
                     for &ub in &[-150.0, -60.0, -0.05, 0.0, 1.0, 60.0, 150.0] {
                         for &(ta, tb) in &[(600.0, 600.0), (1000.0, 700.0)] {
                             let (a, b) = (mk(pa, ua, ta), mk(pb, ub, tb));
-                            for hint in [0.0, 0.01, -0.01] {
-                                let (fa, fb) = solve_step(&a, 0.005, &b, 0.005 * ratio, hint);
+                            for hint in [0.0, 0.9 * pa, -0.9 * pb] {
+                                let (fa, fb, _) = solve_step(&a, 0.005, &b, 0.005 * ratio, hint);
                                 // Each side's flow is its own state's, rho u A, and that state lies on
                                 // its gas's wave curve (or the end is choked).
                                 let own = |f: &EndFlow, area: f64| (f.m - f.rho * f.un * area).abs() <= 1e-6 * f.m.abs() + 1e-8;

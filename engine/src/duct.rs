@@ -104,7 +104,8 @@ pub fn orifice(p0: f64, t0: f64, g: f64, p: f64) -> f64 {
     let critical = (2.0 / (g + 1.0)).powf(g / (g - 1.0));
     // (max and min, not clamp: a NaN passes through to be caught, rather than panicking.)
     let r = (p / p0).max(critical).min(1.0);
-    let psi = 2.0 * g / (g - 1.0) * (r.powf(2.0 / g) - r.powf((g + 1.0) / g));
+    let lr = r.ln();
+    let psi = 2.0 * g / (g - 1.0) * ((2.0 / g * lr).exp() - ((g + 1.0) / g * lr).exp());
     p0 / (RS * t0).sqrt() * psi.max(0.0).sqrt()
 }
 
@@ -284,14 +285,16 @@ pub struct Pipe {
     rate: Vec<[f64; NQ]>,
     pub prim: Vec<Prim>,
     padded: Vec<[f64; NQ]>,
-    /// Per face, the mass flow last solved across it where the section steps.
+    /// Per face where the section steps, where its solution starts (`solve_step`'s hint).
     step_flow: Vec<f64>,
     /// The cells' own values at the faces (first order), for a substep done again.
     first_order: bool,
     /// Flux (x-ward, per area) through end A and end B, set by what they meet.
     face: [[f64; NQ]; 2],
-    /// What last passed outward through end A and end B where a link solved it.
+    /// What last passed outward through end A and end B where a link solved it, and the end
+    /// pressure solved (where to start next time; 0: none).
     end_flow: [EndFlow; 2],
+    end_p: [f64; 2],
 }
 
 /// Commercial steel and stainless tube (m).
@@ -420,6 +423,7 @@ impl Pipe {
             first_order: false,
             face: [[0.0; NQ]; 2],
             end_flow: [EndFlow::default(); 2],
+            end_p: [0.0; 2],
         }
     }
 
@@ -584,8 +588,8 @@ impl Pipe {
             } else {
                 // A step: each side its own flux, the step's wall taking the difference.
                 let gas = |p: &Prim, sign: f64| EndGas { rho: p.rho, un: sign * p.u, p: p.p, t: p.t, g: p.g, c: p.c, yf: p.yf, yo: p.yo };
-                let (a, b) = solve_step(&gas(&l, 1.0), al, &gas(&r, -1.0), ar, self.step_flow[i + 1]);
-                self.step_flow[i + 1] = a.m;
+                let (a, b, hint) = solve_step(&gas(&l, 1.0), al, &gas(&r, -1.0), ar, self.step_flow[i + 1]);
+                self.step_flow[i + 1] = hint;
                 (end_flux(1.0, al, &a), end_flux(-1.0, ar, &b))
             };
             let (a, b) = (al / self.cell_area[i], ar / self.cell_area[i + 1]);
@@ -695,18 +699,29 @@ fn wave(s: &EndGas, p: f64) -> (f64, f64) {
         let k = (g - 1.0) / (g + 1.0);
         (s.un - f, s.rho * (r + k) / (k * r + 1.0))
     } else {
-        let r = p / s.p;
-        let f = 2.0 * s.c / (g - 1.0) * (r.powf((g - 1.0) / (2.0 * g)) - 1.0);
-        (s.un - f, s.rho * r.powf(1.0 / g))
+        let lr = (p / s.p).ln();
+        let f = 2.0 * s.c / (g - 1.0) * (lr * (g - 1.0) / (2.0 * g)).exp_m1();
+        (s.un - f, s.rho * (lr / g).exp())
     }
 }
 
 /// The flow through an end with gas `s`, of `area`, into a node `res` through an opening of
 /// effective area `cda`. `z`: the node's pressure rises by z per unit of outward velocity
 /// (an open end's radiation; 0 for a node).
-fn solve_end(s: &EndGas, area: f64, cda: f64, res: &Reservoir, z: f64) -> EndFlow {
+/// `hint`: the end pressure solved last time (0: none), to start from. Returns the flow and
+/// the end pressure solved (0 where none was).
+fn solve_end(s: &EndGas, area: f64, cda: f64, res: &Reservoir, z: f64, hint: f64) -> (EndFlow, f64) {
     let res_g = gamma(res.t);
     let res_h = enthalpy(res.t);
+    // The node's gas made sonic (the same at every end pressure): once, if needed.
+    let sonic = std::cell::Cell::new(None);
+    let sonic = || {
+        sonic.get().unwrap_or_else(|| {
+            let v = sonic_state(res_h, res.t);
+            sonic.set(Some(v));
+            v
+        })
+    };
     let eval = |p: f64| -> (f64, EndFlow) {
         let (un, rho_w) = wave(s, p);
         let pn = res.p + z * un;
@@ -744,7 +759,7 @@ fn solve_end(s: &EndGas, area: f64, cda: f64, res: &Reservoir, z: f64) -> EndFlo
                 isentropic_inflow(p, pn, res.t, res_h)
             } else {
                 let g = if p < pn { cda * orifice(pn, res.t, res_g, p) / area } else { 0.0 };
-                let (v, rho) = inflow_state(g, p, res_h, res.t);
+                let (v, rho) = inflow_state_with(g, p, res_h, res.t, sonic());
                 (v, rho, p)
             };
             let m = -rho * v * area;
@@ -755,7 +770,7 @@ fn solve_end(s: &EndGas, area: f64, cda: f64, res: &Reservoir, z: f64) -> EndFlo
     if cda == 0.0 && z == 0.0 {
         // A wall: nothing passes, the gas brought to rest against it.
         let p = rest_pressure(s);
-        return EndFlow { m: 0.0, energy: 0.0, yf: s.yf, yo: s.yo, p, un: 0.0, rho: wave(s, p).1 };
+        return (EndFlow { m: 0.0, energy: 0.0, yf: s.yf, yo: s.yo, p, un: 0.0, rho: wave(s, p).1 }, 0.0);
     }
     if s.un <= -s.c && res.p + z * s.un > s.p {
         // Supersonic inflow: nothing from inside reaches the end, the node sets it, choked
@@ -771,36 +786,44 @@ fn solve_end(s: &EndGas, area: f64, cda: f64, res: &Reservoir, z: f64) -> EndFlo
             (v, rho, s.p)
         };
         let m = -rho * v * area;
-        return EndFlow { m, energy: m * res_h, yf: res.yf, yo: res.yo, p, un: -v, rho };
+        return (EndFlow { m, energy: m * res_h, yf: res.yf, yo: res.yo, p, un: -v, rho }, 0.0);
     }
     if s.un >= s.c {
         // Supersonic outflow: nothing reaches the end from the node.
         let m = s.rho * s.un * area;
         let h0 = enthalpy(s.t) + 0.5 * s.un * s.un;
-        return EndFlow { m, energy: m * h0, yf: s.yf, yo: s.yo, p: s.p, un: s.un, rho: s.rho };
+        return (EndFlow { m, energy: m * h0, yf: s.yf, yo: s.yo, p: s.p, un: s.un, rho: s.rho }, 0.0);
     }
     let g = s.g;
     let x = (g - 1.0) / (g + 1.0) * (s.un / s.c) + 2.0 / (g + 1.0);
     let p_sonic = s.p * x.powf(2.0 * g / (g - 1.0));
-    let (r_lo, f_lo) = eval(p_sonic);
-    if r_lo <= 0.0 {
-        // The end chokes: more would pass the opening than the pipe can bring.
-        return f_lo;
-    }
-    let mut hi = s.p.max(res.p) * 1.5;
-    let (mut r_hi, mut f_hi) = eval(hi);
-    while r_hi > 0.0 {
-        hi *= 2.0;
-        (r_hi, f_hi) = eval(hi);
-    }
+    // The residual falls as the end pressure rises: a bracket near last time's, which also
+    // shows the end isn't choked; else from the sonic pressure up.
+    let near = if hint > p_sonic { bracket_near(|p| eval(p).0, hint, p_sonic, f64::INFINITY, false) } else { None };
+    let (mut a, mut ra, mut b, mut rb) = match near {
+        Some(x) => x,
+        None => {
+            let (r_lo, f_lo) = eval(p_sonic);
+            if r_lo <= 0.0 {
+                // The end chokes: more would pass the opening than the pipe can bring.
+                return (f_lo, p_sonic);
+            }
+            let mut hi = s.p.max(res.p) * 1.5;
+            let mut r_hi = eval(hi).0;
+            while r_hi > 0.0 {
+                hi *= 2.0;
+                r_hi = eval(hi).0;
+            }
+            (p_sonic, r_lo, hi, r_hi)
+        }
+    };
     // Illinois: regula falsi, halving a stuck end's residual.
-    let (mut a, mut ra, mut b, mut rb) = (p_sonic, r_lo, hi, r_hi);
-    let mut best = f_hi;
+    let mut best = (EndFlow::default(), 0.0);
     let mut side = 0;
     for _ in 0..100 {
         let c = (a * rb - b * ra) / (rb - ra);
         let (rc, fc) = eval(c);
-        best = fc;
+        best = (fc, c);
         if rc == 0.0 || (b - a).abs() <= 1e-12 * c {
             break;
         }
@@ -837,18 +860,9 @@ fn isentropic_inflow(p: f64, p0: f64, t0: f64, h0: f64) -> (f64, f64, f64) {
     (v, ps / (RS * t), ps)
 }
 
-/// The subsonic state carrying mass flux `g` (kg/s m^2) at static pressure `p` with total
-/// enthalpy `h0`: its velocity and density; the sonic state if `g` is more than the most it
-/// can carry. `t0` is a guess at the temperature (the stagnation temperature).
-fn inflow_state(g: f64, p: f64, h0: f64, t0: f64) -> (f64, f64) {
-    let rho_at = |v: f64| {
-        let h = (h0 - 0.5 * v * v).max(1e-3 * h0);
-        p / (RS * temperature_of_enthalpy(h, t0))
-    };
-    if g <= 0.0 {
-        return (0.0, rho_at(0.0));
-    }
-    // The sonic state: h(T) + gamma R T / 2 = h0.
+/// The sonic state of gas with total enthalpy `h0`: its temperature and velocity, h(T) +
+/// gamma R T / 2 = h0 (Newton's method from `t0`, the stagnation temperature).
+fn sonic_state(h0: f64, t0: f64) -> (f64, f64) {
     let mut ts = t0 * 0.85;
     for _ in 0..20 {
         let r = enthalpy(ts) + 0.5 * gamma(ts) * RS * ts - h0;
@@ -858,9 +872,28 @@ fn inflow_state(g: f64, p: f64, h0: f64, t0: f64) -> (f64, f64) {
             break;
         }
     }
-    let vs = (gamma(ts) * RS * ts).sqrt();
-    if g >= rho_at(vs) * vs {
-        return (vs, rho_at(vs));
+    (ts, (gamma(ts) * RS * ts).sqrt())
+}
+
+/// The subsonic state carrying mass flux `g` (kg/s m^2) at static pressure `p` with total
+/// enthalpy `h0`: its velocity and density; the sonic state if `g` is more than the most it
+/// can carry. `t0` is a guess at the temperature (the stagnation temperature).
+fn inflow_state(g: f64, p: f64, h0: f64, t0: f64) -> (f64, f64) {
+    inflow_state_with(g, p, h0, t0, sonic_state(h0, t0))
+}
+
+/// inflow_state, given the sonic state (`sonic_state`, the same for every pressure).
+fn inflow_state_with(g: f64, p: f64, h0: f64, t0: f64, (ts, vs): (f64, f64)) -> (f64, f64) {
+    let rho_at = |v: f64| {
+        let h = (h0 - 0.5 * v * v).max(1e-3 * h0);
+        p / (RS * temperature_of_enthalpy(h, t0))
+    };
+    if g <= 0.0 {
+        return (0.0, rho_at(0.0));
+    }
+    let rho_s = p / (RS * ts);
+    if g >= rho_s * vs {
+        return (vs, rho_s);
     }
     // The mass flux rises with the velocity up to the sonic point.
     let (mut lo, mut hi) = (0.0, vs);
@@ -908,8 +941,45 @@ fn rest_pressure(s: &EndGas) -> f64 {
     }
 }
 
-/// Illinois's regula falsi for `f` rising through zero on [a, b] (f(a) < 0 < f(b) given).
-fn illinois(f: impl Fn(f64) -> f64, mut a: f64, mut fa: f64, mut b: f64, mut fb: f64) -> f64 {
+/// A bracket [a, b] of the root of `f` near `x0`, within [lo, hi], `f` rising through it if
+/// `rising` (else falling): 0.1 % either side of x0, widened fourfold at a time towards it;
+/// with f there. None if not found so (the caller brackets it from scratch).
+fn bracket_near(f: impl Fn(f64) -> f64, x0: f64, lo: f64, hi: f64, rising: bool) -> Option<(f64, f64, f64, f64)> {
+    // Below the root: f negative if rising, positive if falling.
+    let below = |v: f64| if rising { v < 0.0 } else { v > 0.0 };
+    let mut d = 1e-3;
+    let (mut a, mut b) = ((x0 * (1.0 - d)).max(lo), (x0 * (1.0 + d)).min(hi));
+    if !(a < b) {
+        return None;
+    }
+    let (mut fa, mut fb) = (f(a), f(b));
+    for _ in 0..8 {
+        if below(fa) && !below(fb) {
+            return Some((a, fa, b, fb));
+        }
+        d *= 4.0;
+        if !below(fa) {
+            if a <= lo {
+                return None;
+            }
+            (b, fb) = (a, fa);
+            a = (x0 * (1.0 - d)).max(lo);
+            fa = f(a);
+        } else {
+            if b >= hi {
+                return None;
+            }
+            (a, fa) = (b, fb);
+            b = (x0 * (1.0 + d)).min(hi);
+            fb = f(b);
+        }
+    }
+    None
+}
+
+/// Illinois's regula falsi for `f` rising through zero on [a, b] (f(a) < 0 < f(b) given), to
+/// a bracket `tol` of its size.
+fn illinois(f: impl Fn(f64) -> f64, mut a: f64, mut fa: f64, mut b: f64, mut fb: f64, tol: f64) -> f64 {
     let mut side = 0;
     let mut c = a;
     for _ in 0..100 {
@@ -920,7 +990,7 @@ fn illinois(f: impl Fn(f64) -> f64, mut a: f64, mut fa: f64, mut b: f64, mut fb:
             c = 0.5 * (a + b);
         }
         let fc = f(c);
-        if fc == 0.0 || (b - a).abs() <= 1e-12 * (a.abs() + b.abs()) {
+        if fc == 0.0 || (b - a).abs() <= tol * (a.abs() + b.abs()) {
             break;
         }
         if fc < 0.0 {
@@ -949,27 +1019,30 @@ fn illinois(f: impl Fn(f64) -> f64, mut a: f64, mut fa: f64, mut b: f64, mut fb:
 /// Carnot: the momentum balance over the wider section); from the wider into the narrower,
 /// isentropically (the total pressure kept). Each side's state lies on its gas's wave curve.
 /// Returns what passes outward through each end.
-/// `hint`: the mass flow from `a` to `b` last time (to start from).
-pub fn solve_step(a: &EndGas, area_a: f64, b: &EndGas, area_b: f64, hint: f64) -> (EndFlow, EndFlow) {
+/// `hint`: where to start, as returned last time: the upstream end's pressure, positive with
+/// the flow from `a` to `b`, negative from `b` to `a` (0: none).
+pub fn solve_step(a: &EndGas, area_a: f64, b: &EndGas, area_b: f64, hint: f64) -> (EndFlow, EndFlow, f64) {
     let rest_a = rest_pressure(a);
     if wave(b, rest_a).0 < 0.0 {
-        step_from(a, area_a, b, area_b, rest_a, hint.max(0.0))
+        let (fa, fb, p) = step_from(a, area_a, b, area_b, rest_a, hint.max(0.0));
+        (fa, fb, p)
     } else {
         let rest_b = rest_pressure(b);
         if wave(a, rest_b).0 < 0.0 {
-            let (fb, fa) = step_from(b, area_b, a, area_a, rest_b, (-hint).max(0.0));
-            (fa, fb)
+            let (fb, fa, p) = step_from(b, area_b, a, area_a, rest_b, (-hint).max(0.0));
+            (fa, fb, -p)
         } else {
             // Both at rest at the same pressure.
             let fa = EndFlow { m: 0.0, energy: 0.0, yf: a.yf, yo: a.yo, p: rest_a, un: 0.0, rho: wave(a, rest_a).1 };
             let fb = EndFlow { m: 0.0, energy: 0.0, yf: b.yf, yo: b.yo, p: rest_a, un: 0.0, rho: wave(b, rest_a).1 };
-            (fa, fb)
+            (fa, fb, 0.0)
         }
     }
 }
 
-/// solve_step with the flow from `up` into `down`; `rest` is where up's gas is at rest.
-fn step_from(up: &EndGas, area_up: f64, down: &EndGas, area_down: f64, rest: f64, hint: f64) -> (EndFlow, EndFlow) {
+/// solve_step with the flow from `up` into `down`; `rest` is where up's gas is at rest;
+/// `hint`, up's end pressure last time (0: none). Returns also up's end pressure.
+fn step_from(up: &EndGas, area_up: f64, down: &EndGas, area_down: f64, rest: f64, hint: f64) -> (EndFlow, EndFlow, f64) {
     let g = up.g;
     // The most `up` can pass: its end sonic (or its gas's own flux, already supersonic).
     let p_sonic = if up.un < up.c {
@@ -978,23 +1051,12 @@ fn step_from(up: &EndGas, area_up: f64, down: &EndGas, area_down: f64, rest: f64
     } else {
         up.p
     };
-    let flux = |p: f64| {
-        let (un, rho) = wave(up, p);
-        rho * un
-    };
-    let max = flux(p_sonic) * area_up;
-    // Given the mass flow: up's end, then down's, and how far down's wave curve is from it.
-    let solve = |m: f64| -> (f64, EndFlow, EndFlow) {
-        // Up's end pressure passing m: flux falls from the sonic point to rest.
-        let target = m / area_up;
-        let p_u = if m <= 0.0 {
-            rest
-        } else if m >= max {
-            p_sonic
-        } else {
-            illinois(|p| target - flux(p), p_sonic, target - flux(p_sonic), rest, target)
-        };
+    // Given up's end pressure, from its sonic point (passing all it can) to rest (nothing):
+    // the mass flow its wave curve brings there, down's end, and how far down's wave curve is
+    // from it (rising with the flow, so falling with up's end pressure).
+    let solve = |p_u: f64| -> (f64, EndFlow, EndFlow) {
         let (un_u, rho_u) = wave(up, p_u);
+        let m = if p_u >= rest { 0.0 } else { (rho_u * un_u * area_up).max(0.0) };
         let t_u = p_u / (rho_u * RS);
         let h0 = enthalpy(t_u) + 0.5 * un_u * un_u;
         let g_down = m / area_down;
@@ -1004,8 +1066,9 @@ fn step_from(up: &EndGas, area_up: f64, down: &EndGas, area_down: f64, rest: f64
             let mut p_d = p_u;
             let mut v_d = 0.0;
             let mut rho_d = rho_u;
+            let mut t_d = t_u;
             for _ in 0..30 {
-                let t_d = temperature_of_enthalpy(h0 - 0.5 * v_d * v_d, t_u);
+                t_d = temperature_of_enthalpy(h0 - 0.5 * v_d * v_d, t_d);
                 rho_d = p_d / (RS * t_d);
                 v_d = g_down / rho_d;
                 let next = p_u + g_down * (un_u - v_d);
@@ -1040,6 +1103,8 @@ fn step_from(up: &EndGas, area_up: f64, down: &EndGas, area_down: f64, rest: f64
                     g_down - rc * vc,
                     p0,
                     g_down,
+                    // Near no flow its dynamic head is ~1e-9 of the pressure.
+                    1e-12,
                 )
             };
             // The velocity from the mass flux (near no flow the enthalpy's drop is round-off).
@@ -1051,31 +1116,28 @@ fn step_from(up: &EndGas, area_up: f64, down: &EndGas, area_down: f64, rest: f64
         let fd = EndFlow { m: -m, energy: -m * h0, yf: up.yf, yo: up.yo, p: p_d, un: -v_d, rho: rho_d };
         (residual, fu, fd)
     };
-    let (r_max, fu, fd) = solve(max);
-    if r_max <= 0.0 {
-        // Choked: up passes all it can.
-        return (fu, fd);
-    }
-    // Bracket the root near last time's flow if it is still there, else over all of it.
-    let (mut lo, mut r_lo, mut hi, mut r_hi) = (0.0, f64::NAN, max, r_max);
-    if hint > 1e-6 * max && hint < max {
-        let (a, b) = (hint * 0.97, (hint * 1.03).min(max));
-        let (ra, rb) = (solve(a).0, solve(b).0);
-        if ra < 0.0 && rb > 0.0 {
-            (lo, r_lo, hi, r_hi) = (a, ra, b, rb);
-        } else if ra >= 0.0 {
-            (hi, r_hi) = (a, ra);
-        } else {
-            (lo, r_lo) = (b, rb);
+    // Bracket the root near last time's if it is still there (which also shows up isn't
+    // choked), else over all of it.
+    let near = if hint > p_sonic && hint < rest { bracket_near(|p| solve(p).0, hint, p_sonic, rest, false) } else { None };
+    let (lo, r_lo, hi, r_hi) = match near {
+        Some(x) => x,
+        None => {
+            let (r_max, fu, fd) = solve(p_sonic);
+            if r_max <= 0.0 {
+                // Choked: up passes all it can.
+                return (fu, fd, p_sonic);
+            }
+            (p_sonic, r_max, rest, solve(rest).0)
         }
-    }
-    if r_lo.is_nan() {
-        r_lo = solve(lo).0;
-    }
-    let m = illinois(|m| solve(m).0, lo, r_lo, hi, r_hi);
-    let (_, fu, fd) = solve(m);
-    (fu, fd)
+    };
+    // (Illinois takes a rising function.)
+    // (To 1e-10 of the pressure, as solve_end: ~1e-5 Pa.)
+    let p = illinois(|p| -solve(p).0, lo, -r_lo, hi, -r_hi, 1e-10);
+    let (_, fu, fd) = solve(p);
+    (fu, fd, p)
 }
+
+
 
 /// A lumped volume of gas at rest, or the atmosphere (fixed, without bounds).
 pub struct Node {
@@ -1595,7 +1657,9 @@ impl Network {
                         res.p -= r.resistance * r.ql;
                         z = r.resistance * area;
                     }
-                    let f = solve_end(&s, area, l.cda, &res, z);
+                    let side = (l.side == Side::B) as usize;
+                    let (f, p_end) = solve_end(&s, area, l.cda, &res, z, pipe.end_p[side]);
+                    pipe.end_p[side] = p_end;
                     if debug_checks() && !(f.m.is_finite() && f.energy.is_finite() && f.p.is_finite() && f.un.is_finite()) {
                         panic!("link pipe {} {:?} node {}: end {:?} reservoir {:?} area {area} cda {} z {z} -> {:?}", l.pipe, l.side, l.node, s, res, l.cda, f);
                     }
