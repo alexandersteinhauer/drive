@@ -301,17 +301,18 @@ is an additional provisional input-distribution gap, not a hidden driving-physic
 Model load/init/runtime failure creates a new original-voice worklet and changes the simulation stream atomically, with a visible warning.
 Cached audio nodes are muted/suspended and their histories cleared when cars switch.
 
-A separate **Retrained (preview)** option is available at
-`?car=pista&exhaust=surrogate-retrained` (`pista-retrained.json`, provenance alongside).
-It uses the corrected reference, stock upstream game settings, native 10 kHz/four-substep
-inputs and the exact runtime resampling path. It has six gates, 512 taps and ridge damping
-1; it is still a regression model, not a neural network. On a fresh 8.4 s confirmation
-drive, waveform correlation improved from 0.381 to 0.806 and bands above 400 Hz were within
-1.7 dB. However, 200–400 Hz was +7.84 dB versus the old pilot's +6.44 dB. It therefore
-**failed the strict no-bass-regression promotion gate** and remains an explicit preview,
-not a silent replacement of the existing pilot. No EQ, per-clip gain, new noise or physics
-changes conceal that limitation. Both models keep the same fixed 16 Pa/full-scale playback
-calibration and original-voice failure fallback.
+The **Retrained (preview)** option at `?car=pista&exhaust=surrogate-retrained` now
+uses `pista-coverage-candidate.json`, selected explicitly by the user after the data study
+below. It uses the corrected reference, stock upstream game settings, native 10 kHz/four-
+substep inputs and the exact runtime resampling path: six gates, 512 taps, ridge damping 1.
+It is pressure-only regression, not a neural network. On two fresh final tests, 200–400 Hz
+errors were +0.78/+3.97 dB versus the previous preview's +12.02/+10.62 dB, and pooled
+normalized waveform MSE improved from 0.248 to 0.123. Median absolute band-level error
+worsened from 1.06 to 1.83 dB, so the full automatic promotion gate still **failed**;
+the user chose this trade-off. Residual bass and higher-band errors remain disclosed.
+The previous `pista-retrained.json` weights and provenance are retained for reproducibility.
+No EQ, per-clip gain, new noise or physics changes conceal any limitation. All learned
+variants keep the same fixed 16 Pa/full-scale calibration and original-voice failure fallback.
 
 - `examples/abtrace.rs`: paired game/reference traces, crank trajectory held by the dyno,
   separate burn seeds for training, validation and test drives. `EXHAUST_ONLY=1` swaps only
@@ -362,7 +363,7 @@ while the teacher adds the corrected exhaust with 24 fluid substeps (240 kHz rad
 Training, validation and test have distinct trajectories and seeds. Model fitting uses
 validation for comparison; the final test is evaluated with frozen weights.
 
-The retrained preview's fixed fit settings can be reproduced with
+The previous retrained preview's fixed fit settings can be reproduced with
 `GATES=6 TAPS=512 DAMPING=1 ITERATIONS=400 PREEMPHASIS=0.9` before the command above.
 Its provenance also stores the independent confirmation program and all seeds; the shorter
 model was selected on validation, not on confirmation labels.
@@ -448,9 +449,11 @@ therefore selected the 38.15 s model before any final-test scoring.
 On two fresh frozen-model tests, bass error fell from +12.02/+10.62 dB to
 +0.78/+3.97 dB, and pooled normalized waveform MSE fell from 0.248 to 0.123.
 However, median absolute band-level error worsened from 1.06 to 1.83 dB, so the full
-no-regression gate **failed**. The weights are preserved separately as
-`public/audio/surrogate/pista-coverage-candidate.json`, with provenance alongside, but
-are **not wired into the game's selector**. Both existing models remain unchanged.
+no-regression gate **failed**. The weights are saved as
+`public/audio/surrogate/pista-coverage-candidate.json`, with provenance alongside. The user
+subsequently requested this candidate, so the existing **Retrained (preview)** selector now
+loads it. Original and old-pilot modes, plus the previous preview's archived weights, remain
+unchanged; the user override does not turn the failed spectral check into a pass.
 The candidate still uses 512 taps (25.6 ms history), the original calibration and loss,
 and no playback EQ. It fixes much, not all, of the bass generalization problem.
 

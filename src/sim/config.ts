@@ -611,7 +611,8 @@ export const ferrari488Pista: CarConfig = {
 
 /**
  * The Pista's opt-in learned exhaust models decode at 20 kHz. The retrained preview
- * uses the game's actual 10 kHz source; neither variant changes engine physics.
+ * uses the data-coverage candidate and the game's actual 10 kHz source; neither
+ * variant changes engine physics.
  * This is pressure/exhaust only, not the voice's bay, turbo or mechanical sources.
  */
 export function withPistaSurrogateExhaust(
@@ -623,7 +624,10 @@ export function withPistaSurrogateExhaust(
     out.powertrain.engine.type === "simulated"
   ) {
     out.powertrain.engine.spec.audio.surrogate = {
-      model: `audio/surrogate/pista-${variant}.json`,
+      model:
+        variant === "retrained"
+          ? "audio/surrogate/pista-coverage-candidate.json"
+          : "audio/surrogate/pista-pilot.json",
       fullScale: 16,
       flapSpeed: [261.7993875, 366.5191425],
       flapThrottle: [0.3, 0.6],

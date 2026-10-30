@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "status": "Full no-regression gate failed; existing game assets and selector unchanged.",
+  "status": "Full no-regression gate failed; user explicitly selected the candidate for Retrained (preview). Measurements and original/pilot modes are unchanged.",
   "question": "Does diverse training data reduce the 200-400 Hz generalization error?",
   "availableTrainingSeconds": 81.2,
   "selectedTrainingSeconds": 38.15,
@@ -228,7 +228,7 @@
   },
   "candidate": "public/audio/surrogate/pista-coverage-candidate.json",
   "candidateSha256": "38a215c1a3f2bf932709f19948b2bbdefd41eaef07297112eada9c82587b7f5b",
-  "candidateWiredIntoGame": false,
+  "candidateWiredIntoGame": true,
   "previousPreviewSha256": "555036c99f396a37a59e19f4c2b41711696be5c8929d6c980309d7e63d407a65",
   "limitations": [
     "The broader final test retains +3.97 dB at 200-400 Hz; matching that band is not established across all conditions.",
@@ -239,11 +239,18 @@
   ],
   "verification": {
     "pythonToolTests": 50,
-    "gameTests": 119,
+    "gameTests": 120,
     "gameFailures": 0,
-    "candidateSchema": "passed against unchanged game spec",
+    "candidateSchema": "passed against unchanged game physics and active retrained model route",
     "typecheck": "passed",
     "productionBuild": "passed",
-    "note": "Existing Vite chunk-size warning remains."
+    "note": "Existing Vite chunk-size warning remains.",
+    "deploymentTests": "passed: 32 audio tests, full game suite, typecheck, build, and dev-server model/route hashes"
+  },
+  "deployment": {
+    "mode": "surrogate-retrained",
+    "requestedByUser": true,
+    "automaticPromotion": false,
+    "spectralGatePassed": false
   }
 }

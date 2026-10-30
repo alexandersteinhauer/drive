@@ -101,13 +101,13 @@ describe("Pista exhaust selection", () => {
     },
   );
 
-  test("retrained status discloses the experimental pressure-only preview and strong bass", () => {
+  test("retrained status discloses the experimental pressure-only preview and residual errors", () => {
     for (const active of [undefined, true]) {
       const status = pistaExhaustStatus("surrogate-retrained", active);
       expect(status).toContain("pressure-only");
       expect(status).toContain("preview");
       expect(status).toContain("experimental");
-      expect(status).toContain("bass still too strong");
+      expect(status).toContain("residual bass and spectral errors");
     }
     expect(pistaExhaustStatus("surrogate-retrained", false)).toBe(
       "Retrained preview unavailable; original exhaust active.",
@@ -138,7 +138,7 @@ describe("Pista exhaust selection", () => {
     },
   );
 
-  test("factory defaults to the old pilot and retrained changes only its model URI", () => {
+  test("factory defaults to the old pilot and retrained selects the new coverage candidate", () => {
     const implicit = withPistaSurrogateExhaust();
     expect(implicit).toEqual(withPistaSurrogateExhaust("pilot"));
     const pilot = pistaSpec();
@@ -147,7 +147,7 @@ describe("Pista exhaust selection", () => {
       "audio/surrogate/pista-pilot.json",
     );
     expect(retrained.audio.surrogate?.model).toBe(
-      "audio/surrogate/pista-retrained.json",
+      "audio/surrogate/pista-coverage-candidate.json",
     );
     retrained.audio.surrogate!.model = pilot.audio.surrogate!.model;
     expect(retrained).toEqual(pilot);
@@ -190,10 +190,25 @@ describe("optional exhaust model asset", () => {
         await fetchSurrogateModel(pistaSpec(variant), "/game/", request),
       ).toEqual(bytes);
       expect(requested).toEqual([
-        `/game/audio/surrogate/pista-${variant}.json`,
+        variant === "retrained"
+          ? "/game/audio/surrogate/pista-coverage-candidate.json"
+          : "/game/audio/surrogate/pista-pilot.json",
       ]);
     },
   );
+
+  test("retrained selection loads the real coverage candidate with unchanged calibration", async () => {
+    const spec = pistaSpec("retrained");
+    const path = spec.audio.surrogate!.model;
+    const bytes = await Bun.file(`public/${path}`).arrayBuffer();
+    expect(() => validateSurrogateModel(bytes, spec)).not.toThrow();
+    const model = JSON.parse(new TextDecoder().decode(bytes));
+    expect(model.rate).toBe(20000);
+    expect(model.nativeRate).toBe(10000);
+    expect(model.kernels.length).toBe(6);
+    expect(model.kernels[0][0][0].length).toBe(512);
+    expect(spec.audio.surrogate!.fullScale).toBe(16);
+  });
 
   test("failed HTTP, network errors, and malformed model reject for voice fallback", async () => {
     const notFound = (async () =>

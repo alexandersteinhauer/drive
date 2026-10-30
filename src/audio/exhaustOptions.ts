@@ -20,7 +20,7 @@ export function pistaExhaustStatus(
   if (mode === "surrogate-retrained") {
     if (active === false)
       return "Retrained preview unavailable; original exhaust active.";
-    return `Retrained pressure-only preview${active ? " active" : ""}; experimental, bass still too strong.`;
+    return `Retrained pressure-only preview${active ? " active" : ""}; experimental, residual bass and spectral errors.`;
   }
   if (active === undefined)
     return "Exhaust-only pilot; known transient and training-rate limits.";

@@ -1,5 +1,5 @@
 {
-  "status": "Unwired experimental candidate. Failed the full spectral no-regression gate; neither existing game model is replaced.",
+  "status": "User-selected for the existing Retrained (preview) option despite the failed median spectral-error gate. Experimental pressure-only model; original voice and old pilot remain available.",
   "modelKind": "Supervised regularized control-gated causal FIR regression, not a neural network",
   "referencePhysicsCommit": "47425e57409e0b4cb03714665bd8727e18ead28a",
   "trainingToolsCommit": "73c4f9a",
@@ -2125,11 +2125,21 @@
   ],
   "verification": {
     "pythonToolTests": 50,
-    "gameTests": 119,
+    "gameTests": 120,
     "gameFailures": 0,
-    "candidateSchema": "passed against unchanged game spec",
+    "candidateSchema": "passed against unchanged game physics and active retrained model route",
     "typecheck": "passed",
     "productionBuild": "passed",
-    "note": "Existing Vite chunk-size warning remains."
+    "note": "Existing Vite chunk-size warning remains.",
+    "deploymentTests": "passed: 32 audio tests, full game suite, typecheck, build, and dev-server model/route hashes"
+  },
+  "deployment": {
+    "mode": "surrogate-retrained",
+    "label": "Retrained (preview)",
+    "requestedByUser": true,
+    "automaticPromotion": false,
+    "spectralGatePassed": false,
+    "playbackFullScalePa": 16,
+    "physicsChanged": false
   }
 }
