@@ -1,0 +1,45 @@
+{
+  "version": 1,
+  "purpose": "Separate a data-only learning curve from promotion of a replacement preview. Record before scoring any added-data fit.",
+  "architecture": {
+    "modelRate": 20000,
+    "taps": 512,
+    "gatesFrom": "public/audio/surrogate/pista-retrained.json",
+    "damping": 1,
+    "preemphasis": 0.9,
+    "atol": 1e-7,
+    "btol": 1e-7,
+    "iterationLimit": 8000,
+    "reportWarmupSamples": 1024
+  },
+  "learningCurve": {
+    "baseline": "converged baseline stage, not the old 400-iteration preview",
+    "vary": "training run membership only; fixed gates, architecture, physical calibration and normalized ridge objective",
+    "nonconverged": "diagnostic only; do not interpret as a matched-convergence data comparison"
+  },
+  "selection": {
+    "split": "validation",
+    "runs": ["validation-original", "validation-nearby"],
+    "referenceModel": "public/audio/surrogate/pista-retrained.json",
+    "promotionChecks": [
+      "equal-segment waveform score improves",
+      "pooled normalized waveform MSE improves",
+      "pooled median absolute band-level error improves",
+      "pooled worst absolute band-level error improves",
+      "absolute 200-400 Hz level error does not worsen on either validation run"
+    ],
+    "rankEligible": [
+      "smallest worst absolute 200-400 Hz level error across validation runs",
+      "smallest equal-segment waveform score"
+    ],
+    "ifNoneEligible": "Freeze the converged candidate with the smallest worst validation 200-400 Hz error for diagnostic testing only; do not replace a game asset."
+  },
+  "finalEvaluation": {
+    "runs": ["test-reapply", "test-broad"],
+    "freezeBeforeReadingTargets": true,
+    "reselectionAfterTest": false,
+    "oldKnownFailure": "diagnostic-known-failure is not a fresh test",
+    "runtime": "Any proposed game asset must additionally pass native/WASM pressure agreement and actual streaming performance checks.",
+    "automaticPromotion": false
+  }
+}
