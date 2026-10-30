@@ -6,7 +6,8 @@
 //! The reference config's keys merge into the spec as in examples/reference.rs; `lumped`
 //! drops its ducts. Programs: segments `seconds:rpm0:rpm1:throttle`, comma separated.
 //! env: FREQ (default 20000), FLUID (fluid substeps, default 12), DUCT_THREADS,
-//! SEED (burn randomness, default 1), MIN_SUBSTEPS (pipes per fluid step, default 1).
+//! SEED (burn randomness, default 1), MIN_SUBSTEPS (pipes per fluid step, default 1),
+//! EXHAUST_ONLY=1 (add only the reference ducts; keep the game's upstream engine settings).
 //! Writes <out>.steps.f32 (per step: cycle angle, rpm, dyno torque, boost (gauge Pa),
 //! manifold pressure, turbo speed, wastegate, turbine power, throttle, flap; per cylinder
 //! pressure, temperature, exhaust flow (kg/s), effective valve area, volume, port pressure), <out>.steps.json (the layout);
@@ -34,12 +35,11 @@ fn main() {
         })
         .collect();
     let env = |k: &str, d: f64| std::env::var(k).ok().map_or(d, |v| v.parse().unwrap());
-    merge(&mut spec, &reference);
-    if !ducted {
-        spec.as_object_mut().unwrap().remove("ducts");
-    }
+    let exhaust_only = std::env::var_os("EXHAUST_ONLY").is_some();
+    configure_exhaust(&mut spec, &reference, ducted, exhaust_only);
     spec["simulationFrequency"] = env("FREQ", 20000.0).into();
     spec["fluidSteps"] = (env("FLUID", 12.0) as usize).into();
+    let simulation_spec = spec.clone();
     let spec: EngineSpec = serde_json::from_value(spec).unwrap();
     let rate = spec.simulation_frequency * spec.fluid_steps as f64;
 
@@ -81,7 +81,9 @@ fn main() {
                 e.wastegate(),
                 e.turbine_power(),
                 thr,
-                e.ducts.as_ref().map_or(0.0, |d| d.flap),
+                e.ducts.as_ref().map_or_else(|| {
+                    if spec.audio.surrogate.is_some() { e.staging()[n+4] } else { 0.0 }
+                }, |d| d.flap),
             ].map(|v| v as f32));
             for i in 0..n {
                 steps.extend([e.cylinder_pressure(i), e.cylinder_temperature(i), e.cylinder_exhaust_flow(i), e.cylinder_exhaust_area(i), e.cylinder_volume(i), e.exhaust_runner_pressure(i)].map(|v| v as f32));
@@ -113,6 +115,11 @@ fn main() {
         "firingAngles": (0..n).map(|i| e.firing_angle(i)).collect::<Vec<_>>(),
         "program": program,
         "ducted": ducted,
+        "fluidSteps": spec.fluid_steps,
+        "surrogateAudio": spec.audio.surrogate.is_some(),
+        "upstreamMode": if exhaust_only { "game" } else { "mergedReference" },
+        "simulationSpec": simulation_spec,
+        "sourceRevision": std::env::var("SOURCE_REVISION").unwrap_or_default(),
         "seed": env("SEED", 1.0) as u32,
     });
     if let Some(d) = &e.ducts {
@@ -146,5 +153,47 @@ fn merge(a: &mut serde_json::Value, b: &serde_json::Value) {
                 }
             }
         }
+    }
+}
+
+/// Data acquisition can swap only the exhaust, preserving the deployed engine's
+/// combustion and boost controls. Legacy diagnostic renders can still merge the full config.
+fn configure_exhaust(spec: &mut serde_json::Value, reference: &serde_json::Value, ducted: bool, exhaust_only: bool) {
+    if exhaust_only {
+        if ducted { spec["ducts"] = reference.get("ducts").unwrap_or(reference).clone(); }
+    } else {
+        merge(spec, reference);
+    }
+    if !ducted { spec.as_object_mut().unwrap().remove("ducts"); }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn exhaust_only_preserves_the_games_upstream_settings() {
+        let original = json!({"physics":{"realGas":true},"turbo":{"boost":"stock"},"audio":{"surrogate":{"model":"pilot"}}});
+        let reference = json!({"physics":{"cycleVariation":0.1},"turbo":{"boost":"reference"},"ducts":{"pipes":[]}});
+        for ducted in [false,true] {
+            let mut spec = original.clone();
+            configure_exhaust(&mut spec,&reference,ducted,true);
+            assert_eq!(spec["physics"],original["physics"]);
+            assert_eq!(spec["turbo"],original["turbo"]);
+            assert_eq!(spec["audio"],original["audio"]);
+            assert_eq!(spec.get("ducts").is_some(),ducted);
+        }
+    }
+
+    #[test]
+    fn legacy_reference_merge_and_bare_ducts_remain_available() {
+        let reference = json!({"physics":{"cycleVariation":0.1},"ducts":{"pipes":[]}});
+        let mut spec = json!({"physics":{"realGas":true}});
+        configure_exhaust(&mut spec,&reference,false,false);
+        assert_eq!(spec["physics"],json!({"realGas":true,"cycleVariation":0.1}));
+        assert!(spec.get("ducts").is_none());
+        configure_exhaust(&mut spec,&reference["ducts"],true,true);
+        assert_eq!(spec["ducts"],reference["ducts"]);
     }
 }

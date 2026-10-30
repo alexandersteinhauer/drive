@@ -286,8 +286,12 @@ Model load/init/runtime failure creates a new original-voice worklet and changes
 Cached audio nodes are muted/suspended and their histories cleared when cars switch.
 
 - `examples/abtrace.rs`: paired game/reference traces, crank trajectory held by the dyno,
-  separate burn seeds for training and held-out drives. Records physical pressures before
-  listener directivity, and continuous exit states, not separate fictitious event targets.
+  separate burn seeds for training, validation and test drives. `EXHAUST_ONLY=1` swaps only
+  the exhaust geometry; it does not merge the reference config's combustion/boost overrides
+  into the deployed source engine. Metadata records the complete simulation spec, native
+  rate, fluid steps, seed and actual actuator state. Matching commands/seeds does not make
+  the two exhausts' instantaneous cylinder/valve states equal. Records physical pressures
+  before listener directivity and continuous exit states, not fictitious event targets.
 - `examples/superpose.rs`: a deep clone of one warm state, then independent single/pair
   burn perturbations; `scripts/superpose_analyse.py` measures the second difference,
   `y(a+b) - y(a) - y(b) + y(base)`. An unchanged branch must replay bit for bit. Small
@@ -298,7 +302,12 @@ Cached audio nodes are muted/suspended and their histories cleared when cars swi
   and the flap actuator's state; the targets are each outlet's reference pressure. Gates
   act on the current output, so already-running tails respond to changed controls.
   Pressure filters are constrained to zero DC. Matrix-free least squares has an explicitly
-  tested adjoint; diagonal preconditioning preserves the original ridge penalty.
+  tested adjoint; diagonal preconditioning preserves the original ridge penalty. The native
+  source rate and model rate are independent: raw flow and all five controls undergo the
+  same f32 linear interpolation as `SurrogateStream` **before** nonlinear features. Traces
+  are tagged at step end; teacher decimation uses that fixed timestamp, not a fitted shift.
+  Optional segment balance changes training residual weights only, not deployment gain.
+  Iteration-limit stops are reported as such, not as optimizer convergence.
 - `src/surrogate.rs`: the same fitted model in Rust and WASM, with shared input FFTs,
   summed frequency-domain MIMO convolution, bounded normalized gates, input validation
   before state changes, and no allocations while processing. It does not use `voice.rs`
@@ -316,9 +325,19 @@ then native and WASM replay/benchmarks), writing large temporary files outside t
 bash engine/scripts/surrogate-pilot.sh /absolute/path/to/pilot
 ```
 
+The deployment-matched pipeline uses the game's 10 kHz/four-substep engine as the source,
+while the teacher adds the corrected exhaust with 24 fluid substeps (240 kHz radiation).
+Training, validation and test have distinct trajectories and seeds. Model fitting uses
+validation for comparison; the final test is evaluated with frozen weights.
+
 Or use the individual tools. `scripts/test_surrogate_fit.py` checks causality, indexing,
-identification on an independent synthetic trajectory, and preservation of the regularized
-objective under preconditioning. A local steady-state fit alone is not an acceptance test:
+identification on an independent synthetic trajectory, preservation of the regularized
+objective under preconditioning, exact native/model interpolation, actual flap state,
+fixed teacher decimation timestamps and frozen-model evaluation. `scripts/surrogate_select.py`
+uses the fitter's canonical segment boundaries and a preregistered equal-segment raw/
+preemphasized waveform-error score; never supply final test results to select parameters.
+`scripts/surrogate-stream-wasm.ts` replays the exported native-rate input through the actual
+streaming adapter, rather than bypassing resampling with precomputed model-rate features. A local steady-state fit alone is not an acceptance test:
 hold out entire trajectories and random seeds, check shifts/lift/reapply/flaps/thermal
 history, compare game-input vs reference-input fits, inspect harmonic and band errors, and
 measure the actual WASM decoder. The optional exit-state fit also needs noise-level and
