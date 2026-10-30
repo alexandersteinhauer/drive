@@ -4,9 +4,11 @@
 """Independent-trajectory learning curves for the existing causal FIR surrogate.
 
 uv run engine/scripts/surrogate_study.py fit manifest.json out --stage baseline \
-    --gates-from public/audio/surrogate/pista-retrained.json --iterations 8000
+    --gates-from previous-preview.json --iterations 8000
 uv run engine/scripts/surrogate_study.py freeze manifest.json out.model.json frozen.json
 uv run engine/scripts/surrogate_study.py evaluate manifest.json frozen.json final --split test
+
+Recover previous-preview.json from Git history as documented in engine/README.md.
 
 Manifest v1: {config, modelRate:20000, runs:[{id, split, reference, game,
 seed?, program?}], stages?:[{id, trainRuns:[id,...]}]}. Capture paths are prefixes,

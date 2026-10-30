@@ -56,8 +56,7 @@ export class PauseMenu {
     credits.target = "_blank";
     credits.rel = "noopener";
     credits.textContent = "Credits & licences";
-    panel.append(title, row);
-    panel.append(this.resume, credits);
+    panel.append(title, row, this.resume, credits);
     this.root.append(panel);
     document.body.append(this.root);
 

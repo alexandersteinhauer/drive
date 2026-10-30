@@ -312,9 +312,10 @@ failure fallback, not a selectable Pista sound. Cached audio nodes are muted/sus
 and their histories cleared when cars switch.
 
 The original pilot (`pista-pilot.json`) and previous preview (`pista-retrained.json`),
-with their provenance, are retained for reproducibility only. The pilot predates the
-sonic-boundary correction and has additional training-rate and source-setting mismatches;
-its limitations are not a description of the new default model.
+with their provenance, are recoverable from Git commit `30c1e12`; they are no longer
+shipped in `public/`. The pilot predates the sonic-boundary correction and has additional
+training-rate and source-setting mismatches; its limitations are not a description of
+the new default model.
 
 - `examples/abtrace.rs`: paired game/reference traces, crank trajectory held by the dyno,
   separate burn seeds for training, validation and test drives. `EXHAUST_ONLY=1` swaps only
@@ -421,8 +422,10 @@ its own zero-start convolution and preemphasis state; captures are **not concate
 Keep architecture, gates, ridge and training loss fixed for a data-only comparison:
 
 ```sh
+# Recover the previous preview outside public/ for the historical comparison.
+git show 30c1e12:public/audio/surrogate/pista-retrained.json > "$OUT/pista-retrained.json"
 uv run engine/scripts/surrogate_study.py fit "$OUT/manifest.json" "$OUT/baseline" \
-  --stage baseline --gates-from public/audio/surrogate/pista-retrained.json \
+  --stage baseline --gates-from "$OUT/pista-retrained.json" \
   --iterations 6000 --atol 1e-7 --btol 1e-7
 # Repeat for targeted, coverage and replicated stages after their captures complete.
 ```
@@ -439,7 +442,8 @@ Only choose a stage from validation results, freeze its exact weights/provenance
 use `evaluate --split test` on the reserved programs. No run-specific alignment, gain,
 playback EQ, extra noise or reference-physics adjustment is part of this experiment.
 Test results do not automatically replace the game's default model. The explicit selection
-and no-regression gates are in `scripts/surrogate-data-rules.json`.
+and no-regression gates are in `scripts/surrogate-data-rules.json`. Its historical asset
+paths are retained unchanged; recover those weights from Git for a new comparison.
 
 The completed study is recorded in `scripts/surrogate-data-results.json`. Every stage
 reached LSQR tolerance; adding the first 13 s of targeted coverage reduced the two
@@ -455,7 +459,7 @@ no-regression gate **failed**. The weights are saved as
 `public/audio/surrogate/pista-coverage-candidate.json`, with provenance alongside. The user
 subsequently requested this candidate and then made it the Pista default, removing the
 sound selector. The original voice remains a failure fallback; pilot and previous-preview
-weights remain archived. The user override does not turn the failed spectral check into a pass.
+weights remain in Git history. The user override does not turn the failed spectral check into a pass.
 The candidate still uses 512 taps (25.6 ms history), the original calibration and loss,
 and no playback EQ. It fixes much, not all, of the bass generalization problem.
 

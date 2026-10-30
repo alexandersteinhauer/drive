@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "status": "User-selected Pista default despite the failed median spectral-error gate. Experimental pressure-only model; original voice remains a failure fallback, and prior model weights remain archived.",
+  "status": "User-selected Pista default despite the failed median spectral-error gate. Experimental pressure-only model; original voice remains a failure fallback, and prior model weights remain recoverable from Git history.",
   "question": "Does diverse training data reduce the 200-400 Hz generalization error?",
   "availableTrainingSeconds": 81.2,
   "selectedTrainingSeconds": 38.15,

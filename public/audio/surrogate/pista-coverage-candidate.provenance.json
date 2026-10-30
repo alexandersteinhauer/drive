@@ -1,5 +1,5 @@
 {
-  "status": "User-selected Pista default despite the failed median spectral-error gate. Experimental pressure-only model; original voice remains a failure fallback, and prior model weights remain archived.",
+  "status": "User-selected Pista default despite the failed median spectral-error gate. Experimental pressure-only model; original voice remains a failure fallback, and prior model weights remain recoverable from Git history.",
   "modelKind": "Supervised regularized control-gated causal FIR regression, not a neural network",
   "referencePhysicsCommit": "47425e57409e0b4cb03714665bd8727e18ead28a",
   "trainingToolsCommit": "73c4f9a",
