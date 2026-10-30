@@ -2046,7 +2046,10 @@ pub struct Ducts {
     /// open end's outward velocity, density and temperature (for the jets' noise).
     pub sound: Vec<f32>,
     pub exits: Vec<f32>,
+    /// Each open end's share of `sound`, the ends interleaved, kept while `listening_ends`.
+    pub end_sound: Vec<f32>,
     pub listening: bool,
+    pub listening_ends: bool,
 }
 
 /// The atmosphere: 25 C, engine-sim's air (a quarter oxygen by moles).
@@ -2214,6 +2217,8 @@ impl Ducts {
             names,
             sound: Vec::new(),
             exits: Vec::new(),
+            end_sound: Vec::new(),
+            listening_ends: false,
             listening: true,
         })
     }
@@ -2244,6 +2249,10 @@ impl Ducts {
         for &l in &self.outlets {
             let f = &self.net.links[l].flow;
             self.exits.extend([f.un as f32, f.rho as f32, (f.p / (f.rho * RS)) as f32]);
+            if self.listening_ends {
+                let p = self.net.links[l].radiation.as_ref().map_or(0.0, |r| r.pressure);
+                self.end_sound.push((p / self.distance) as f32);
+            }
         }
     }
 }

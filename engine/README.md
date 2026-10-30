@@ -203,6 +203,16 @@ faster, a stage being ~100 microseconds of work).
   scaled by a normal factor, sigma 0.1 for the F154, which gives the literature's
   coefficients of variation (IMEP 1.6-2.6 %, peak pressure 9-11 % at full load; IMEP ~9 % at
   idle: Heywood 9.4).
+  Each cylinder draws its burns' randomness from its own sequence, three numbers every
+  ignition event, so a burn's depends on the cylinder and its count alone (without cycle
+  variation, engine-sim's single sequence, as tests/reference.rs needs).
+
+`examples/abtrace.rs` runs the engine on the dynamometer with the reference exhaust or the
+game's lumped one, recording each step's state (each cylinder's pressure, temperature and
+exhaust valve flow; torque, boost, turbine power, wastegate) and, with the ducts, each open
+end's sound before directivity: the dyno holds the crank to the program's speed and the burns'
+randomness is the cylinders' own, so the two engines run the same crank motion and burns
+(peak pressures correlated 0.99-1.0 cycle by cycle), and differ only by their exhausts.
 
 `tests/duct.rs` checks it against exact solutions: Sod's shock tube, the speed of sound and
 reflections off closed and open ends, a choked nozzle's flow, Darcy's friction, a

@@ -290,6 +290,10 @@ struct Cylinder {
     exhaust_wave: f64,
     /// Moles through the exhaust valve since the last audio sample (out positive).
     exhaust_moles: f64,
+    /// Moles through the exhaust valve over the last step (out positive).
+    step_exhaust_moles: f64,
+    /// This cylinder's own random sequence for its burns, with cycle variation.
+    rng: Rng,
     pressure_history: [f64; STATE_SAMPLES],
     piston_speed_history: [f64; STATE_SAMPLES],
     /// Combustion heat released so far (J).
@@ -360,6 +364,12 @@ impl Cylinder {
     }
 
     fn ignite(&mut self, ctx: &Context, rng: &mut Rng) {
+        // With cycle variation, each cylinder draws from its own sequence (rng is its own),
+        // the same three numbers every ignition event whether it lights or not: a burn's
+        // randomness then depends on the cylinder and the count of its burns alone, so two
+        // engines whose cranks turn alike (a dynamometer's) burn alike, whatever their
+        // exhausts. Without, engine-sim's one sequence, drawn as it draws (tests/reference.rs).
+        let drawn = ctx.cycle_variation.map(|_| [rng.unit(), rng.unit().max(1e-12), rng.unit()]);
         if self.lit {
             return;
         }
@@ -390,16 +400,14 @@ impl Cylinder {
             - (clamp01(turbulence / fuel.max_turbulence_effect)
                 * clamp01(1.0 - dilution / fuel.max_dilution_effect));
         let randomness = fuel.burning_efficiency_randomness;
-        let rand_s = fuel.low_efficiency_attenuation
-            * ((1.0 - randomness) + randomness * rng.unit());
+        let unit = drawn.map_or_else(|| rng.unit(), |d| d[0]);
+        let rand_s = fuel.low_efficiency_attenuation * ((1.0 - randomness) + randomness * unit);
         let efficiency_attenuation = mixing_factor * rand_s + (1.0 - mixing_factor);
         self.flame.efficiency = efficiency_attenuation * fuel.max_burning_efficiency;
         self.flame.flame_speed =
             fuel.flame_speed(turbulence, afr, self.system.temperature(), self.system.pressure());
-        if let Some(sigma) = ctx.cycle_variation {
+        if let (Some(sigma), Some([_, u1, u2])) = (ctx.cycle_variation, drawn) {
             // Box and Muller's normal deviate.
-            let u1 = rng.unit().max(1e-12);
-            let u2 = rng.unit();
             let n = (-2.0 * u1.ln()).sqrt() * (2.0 * PI * u2).cos();
             self.flame.flame_speed *= (1.0 + sigma * n).max(0.2);
         }
@@ -518,6 +526,7 @@ impl Cylinder {
 
             self.exhaust_flow = exhaust_flow;
             self.exhaust_moles += exhaust_flow;
+            self.step_exhaust_moles += exhaust_flow;
             // A plane wave's pressure is rho c times its particle velocity: for a mass flow m'
             // into a pipe of area A, c m' / A.
             self.exhaust_wave +=
@@ -840,6 +849,8 @@ impl Engine {
                     exhaust_flow: 0.0,
                     exhaust_wave: 0.0,
                     exhaust_moles: 0.0,
+                    step_exhaust_moles: 0.0,
+                    rng: Rng::new(1 + cylinders.len() as u32),
                     pressure_history: [0.0; STATE_SAMPLES],
                     piston_speed_history: [0.0; STATE_SAMPLES],
                     released: 0.0,
@@ -980,7 +991,7 @@ impl Engine {
     }
 
     /// Position in the four-stroke cycle, 0..4 pi.
-    fn cycle_angle(&self) -> f64 {
+    pub fn cycle_angle(&self) -> f64 {
         let wrapped = (-self.crank_angle() + 0.0) % (4.0 * PI);
         if wrapped < 0.0 {
             wrapped + 4.0 * PI
@@ -1106,6 +1117,29 @@ impl Engine {
 
     pub fn cylinder_pressure(&self, i: usize) -> f64 {
         self.cylinders[i].system.pressure()
+    }
+
+    pub fn cylinder_temperature(&self, i: usize) -> f64 {
+        self.cylinders[i].system.temperature()
+    }
+
+    /// The mass flow out of a cylinder's exhaust valve over the last step (kg/s, out positive).
+    pub fn cylinder_exhaust_flow(&self, i: usize) -> f64 {
+        self.cylinders[i].step_exhaust_moles * AIR_MOLECULAR_MASS / self.timestep
+    }
+
+    pub fn cylinder_count(&self) -> usize {
+        self.cylinders.len()
+    }
+
+    /// The cycle angle a cylinder fires at (rad, 0..4 pi).
+    pub fn firing_angle(&self, i: usize) -> f64 {
+        self.cylinders[i].firing_angle
+    }
+
+    /// The turbines' power in the last step (W).
+    pub fn turbine_power(&self) -> f64 {
+        self.turbo.as_ref().map_or(0.0, |t| t.turbine_power)
     }
 
     pub fn cylinder_volume(&self, i: usize) -> f64 {
@@ -1299,10 +1333,16 @@ impl Engine {
                 ducted: self.ducts.is_some(),
                 cycle_variation: self.cycle_variation,
             };
-            let rng = &mut self.rng;
             for c in cylinders.iter_mut() {
+                c.step_exhaust_moles = 0.0;
                 if c.ignition_event {
-                    c.ignite(&ctx, rng);
+                    if self.cycle_variation.is_some() {
+                        let mut own = std::mem::replace(&mut c.rng, Rng::new(0));
+                        c.ignite(&ctx, &mut own);
+                        c.rng = own;
+                    } else {
+                        c.ignite(&ctx, &mut self.rng);
+                    }
                 }
                 c.update(&ctx);
             }
@@ -1420,6 +1460,7 @@ impl Engine {
             c.system.set_totals(n, nd.e, Mix { p_fuel: f, p_inert: 1.0 - f - o, p_o2: o });
             c.exhaust_flow = n0 - n;
             c.exhaust_moles += n0 - n;
+            c.step_exhaust_moles += n0 - n;
         }
         d.listen();
         d.turbines.iter().map(|&o| d.net.work[o]).sum()

@@ -79,6 +79,8 @@ pub struct Turbo {
     /// What the throttle sees: pressure (Pa) and temperature (K) after the intercooler.
     pub charge_pressure: f64,
     pub charge_temperature: f64,
+    /// The turbine's power in the last update (W).
+    pub turbine_power: f64,
 }
 
 impl Turbo {
@@ -101,6 +103,7 @@ impl Turbo {
             blow_off: false,
             charge_pressure: ATM,
             charge_temperature: celcius(25.0),
+            turbine_power: 0.0,
         };
         let max_boost = s.boost.samples.iter().fold(0.0f64, |m, &(_, b)| m.max(b));
         t.full_speed = t.speed_for(max_boost).max(1.0);
@@ -172,6 +175,7 @@ impl Turbo {
             * exhaust_temperature
             * expansion;
         let turbine = turbine_power.unwrap_or(available);
+        self.turbine_power = turbine;
         // The boost controller opens the wastegate as the shaft passes its target speed.
         let target = self.speed_for(self.boost.sample_triangle(crank.abs()).min(self.limit));
         let error = if target > 0.0 { omega / target - 1.0 } else { 1.0 };
