@@ -12,13 +12,13 @@ crate-type = ["cdylib", "rlib"]
 [features]
 # Exactly engine-sim's arithmetic, for tests/reference.rs (slower in WebAssembly).
 reference = []
-# The pipes of duct.rs stepped in parallel (native builds: the reference simulation).
-parallel = ["dep:rayon"]
+# The pipes of duct.rs stepped in parallel, on DUCT_THREADS threads (native builds: the
+# reference simulation; src/pool.rs).
+parallel = []
 
 [dependencies]
 serde = { version = "1", default-features = false, features = ["derive", "alloc"] }
 serde_json = { version = "1", default-features = false, features = ["alloc", "float_roundtrip"] }
-rayon = { version = "1", optional = true }
 
 [profile.release]
 opt-level = 3

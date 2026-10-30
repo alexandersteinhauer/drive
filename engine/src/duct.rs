@@ -108,6 +108,12 @@ pub fn orifice(p0: f64, t0: f64, g: f64, p: f64) -> f64 {
     p0 / (RS * t0).sqrt() * psi.max(0.0).sqrt()
 }
 
+/// The most an opening of discharge area 1 passes from gas at rest at `p0`, `t0` (kg/s m^2):
+/// choked, sonic at its vena contracta. A slug's flow is held to it (it can't be faster).
+pub fn choked(p0: f64, t0: f64, g: f64) -> f64 {
+    p0 / (RS * t0).sqrt() * (g * (2.0 / (g + 1.0)).powf((g + 1.0) / (g - 1.0))).sqrt()
+}
+
 /// The rate of a gas slug's flow `m` (kg/s) through an opening of discharge area `cda` and
 /// slug length `l`, between gas at `a` and `b` (pressure, temperature, ratio of specific
 /// heats, density): d m/dt = cda/l (p_a - p_b - its jet's loss), the loss m|m| / (2 rho
@@ -284,6 +290,8 @@ pub struct Pipe {
     first_order: bool,
     /// Flux (x-ward, per area) through end A and end B, set by what they meet.
     face: [[f64; NQ]; 2],
+    /// What last passed outward through end A and end B where a link solved it.
+    end_flow: [EndFlow; 2],
 }
 
 /// Commercial steel and stainless tube (m).
@@ -411,6 +419,7 @@ impl Pipe {
             step_flow: vec![0.0; n + 1],
             first_order: false,
             face: [[0.0; NQ]; 2],
+            end_flow: [EndFlow::default(); 2],
         }
     }
 
@@ -529,9 +538,9 @@ impl Pipe {
         self.face[(side == Side::B) as usize] = end_flux(side.sign(), self.end_area(side), f);
     }
 
+    /// The cells' rates of change (padded, its ends' faces set).
     fn rates(&mut self) {
         let n = self.prim.len();
-        self.pad();
         for r in self.rate.iter_mut() {
             *r = [0.0; NQ];
         }
@@ -1348,6 +1357,23 @@ pub struct Network {
     /// Substeps rejected (and done again in halves) so far.
     pub rejected: usize,
     debug_last: String,
+    /// Each pipe's links, in order, and the pipes longest first (the order their tasks are
+    /// handed out in parallel): built as the network is first stepped.
+    pipe_links: Vec<Vec<usize>>,
+    pipe_order: Vec<usize>,
+}
+
+/// The pipes, for tasks each taking one of them (src/pool.rs).
+#[derive(Clone, Copy)]
+struct Pipes(*mut Pipe);
+unsafe impl Sync for Pipes {}
+unsafe impl Send for Pipes {}
+impl Pipes {
+    /// Pipe `k`: the caller's alone while it has it (no two tasks given the same `k`).
+    #[allow(clippy::mut_from_ref)]
+    unsafe fn get(&self, k: usize) -> &mut Pipe {
+        &mut *self.0.add(k)
+    }
 }
 
 impl Default for Network {
@@ -1364,6 +1390,8 @@ impl Default for Network {
             substeps: 0,
             rejected: 0,
             debug_last: String::new(),
+            pipe_links: vec![],
+            pipe_order: vec![],
         }
     }
 }
@@ -1407,12 +1435,30 @@ impl Network {
 
     /// Largest stable step.
     pub fn stable_dt(&mut self) -> f64 {
-        let mut dt = f64::INFINITY;
-        for p in &mut self.pipes {
+        self.index();
+        let dts: Vec<std::sync::atomic::AtomicU64> = (0..self.pipes.len()).map(|_| std::sync::atomic::AtomicU64::new(0)).collect();
+        let pipes = Pipes(self.pipes.as_mut_ptr());
+        crate::pool::run(self.pipe_order.len(), &|j| {
+            let k = self.pipe_order[j];
+            let p = unsafe { pipes.get(k) };
             p.update_prim();
-            dt = dt.min(p.stable_dt());
+            dts[k].store(p.stable_dt().to_bits(), std::sync::atomic::Ordering::Relaxed);
+        });
+        self.cfl * dts.iter().map(|d| f64::from_bits(d.load(std::sync::atomic::Ordering::Relaxed))).fold(f64::INFINITY, f64::min)
+    }
+
+    /// Each pipe's links and the pipes' order (again if pipes or links were added).
+    fn index(&mut self) {
+        if self.pipe_order.len() == self.pipes.len() && self.pipe_links.iter().map(Vec::len).sum::<usize>() == self.links.len() {
+            return;
         }
-        self.cfl * dt
+        self.pipe_links = vec![vec![]; self.pipes.len()];
+        for (i, l) in self.links.iter().enumerate() {
+            self.pipe_links[l.pipe].push(i);
+        }
+        self.pipe_order = (0..self.pipes.len()).collect();
+        let pipes = &self.pipes;
+        self.pipe_order.sort_by_key(|&k| std::cmp::Reverse(pipes[k].cells()));
     }
 
     /// Advances by `dt`, in as many substeps as stability takes.
@@ -1487,14 +1533,6 @@ impl Network {
         }
     }
 
-    /// Every cell and volume with mass and internal energy.
-    fn physical(&self) -> bool {
-        let cells = self.pipes.iter().all(|p| {
-            p.q.iter().all(|q| q[0] > 0.0 && q[2] - 0.5 * q[1] * q[1] / q[0] > 0.0 && q[2].is_finite())
-        });
-        cells && self.nodes.iter().all(|n| n.atmosphere || (n.m > 0.0 && n.e > 0.0))
-    }
-
     fn substep(&mut self, dt: f64) -> bool {
         for p in &mut self.pipes {
             p.q0.clone_from(&p.q);
@@ -1522,8 +1560,7 @@ impl Network {
         // does it again in halves).
         for (weight, keep) in [(1.0 / 6.0, 0.0), (1.0 / 6.0, 0.75), (2.0 / 3.0, 1.0 / 3.0)] {
             self.rates(dt, weight);
-            self.advance(dt, keep);
-            if !self.physical() {
+            if !self.advance(dt, keep) {
                 return false;
             }
         }
@@ -1537,43 +1574,54 @@ impl Network {
 
     /// The rates of change of everything; `weight` of the stage's work and flows is kept.
     fn rates(&mut self, dt: f64, weight: f64) {
-        #[cfg(feature = "parallel")]
-        {
-            use rayon::prelude::*;
-            self.pipes.par_iter_mut().for_each(|p| {
-                p.update_prim();
-                p.pad();
-            });
-        }
-        #[cfg(not(feature = "parallel"))]
-        for p in &mut self.pipes {
-            p.update_prim();
-            p.pad();
-        }
         for n in &mut self.nodes {
             n.rate = [0.0; 4];
         }
+        self.index();
+        // Each pipe on its own (in parallel): its cells' state, its ends against the nodes
+        // they meet (which stand still through the stage), its cells' rates.
+        {
+            let (links, nodes, pipe_links) = (&self.links, &self.nodes, &self.pipe_links);
+            let stage = |k: usize, pipe: &mut Pipe| {
+                pipe.update_prim();
+                pipe.pad();
+                for &i in &pipe_links[k] {
+                    let l = &links[i];
+                    let s = pipe.end(l.side);
+                    let area = pipe.end_area(l.side);
+                    let mut res = nodes[l.node].reservoir();
+                    let mut z = 0.0;
+                    if let Some(r) = &l.radiation {
+                        res.p -= r.resistance * r.ql;
+                        z = r.resistance * area;
+                    }
+                    let f = solve_end(&s, area, l.cda, &res, z);
+                    if debug_checks() && !(f.m.is_finite() && f.energy.is_finite() && f.p.is_finite() && f.un.is_finite()) {
+                        panic!("link pipe {} {:?} node {}: end {:?} reservoir {:?} area {area} cda {} z {z} -> {:?}", l.pipe, l.side, l.node, s, res, l.cda, f);
+                    }
+                    pipe.set_end(l.side, &f);
+                    pipe.end_flow[(l.side == Side::B) as usize] = f;
+                }
+                pipe.rates();
+            };
+            let pipes = Pipes(self.pipes.as_mut_ptr());
+            let order = &self.pipe_order;
+            crate::pool::run(order.len(), &|j| {
+                let k = order[j];
+                // Each pipe in one task alone.
+                stage(k, unsafe { pipes.get(k) });
+            });
+        }
+        // What the ends passed, into their nodes in order.
         for l in &mut self.links {
-            let pipe = &mut self.pipes[l.pipe];
+            let pipe = &self.pipes[l.pipe];
+            let f = pipe.end_flow[(l.side == Side::B) as usize];
             let node = &mut self.nodes[l.node];
-            let s = pipe.end(l.side);
-            let area = pipe.end_area(l.side);
-            let mut res = node.reservoir();
-            let mut z = 0.0;
-            if let Some(r) = &l.radiation {
-                res.p -= r.resistance * r.ql;
-                z = r.resistance * area;
-            }
-            let f = solve_end(&s, area, l.cda, &res, z);
-            if debug_checks() && !(f.m.is_finite() && f.energy.is_finite() && f.p.is_finite() && f.un.is_finite()) {
-                panic!("link pipe {} {:?} node {}: end {:?} reservoir {:?} area {area} cda {} z {z} -> {:?}", l.pipe, l.side, l.node, s, res, l.cda, f);
-            }
-            pipe.set_end(l.side, &f);
             if !node.atmosphere {
                 node.gain(f.m, f.energy, f.yf, f.yo);
             }
             if let Some(r) = &mut l.radiation {
-                r.dql = r.rate_ql * (f.un * area - r.ql);
+                r.dql = r.rate_ql * (f.un * pipe.end_area(l.side) - r.ql);
             }
             l.flow = f;
         }
@@ -1582,6 +1630,9 @@ impl Network {
             // The flow has the slug's inertia (`slug_rate`): smooth through no flow, where the
             // quasi-steady flow (~ sqrt dp, of infinite conductance) chatters between small
             // volumes, and the compressible quasi-steady flow once steady.
+            // At most what the opening chokes at (none, shut): a valve closing on its flow
+            // stops its gas as fast.
+            o.m = o.m.clamp(-o.cda * choked(b.p, b.t, gamma(b.t)), o.cda * choked(a.p, a.t, gamma(a.t)));
             let m = o.m;
             let forward = m >= 0.0;
             let (src, dst) = if forward { (a, b) } else { (b, a) };
@@ -1589,7 +1640,7 @@ impl Network {
                 let gas = |r: &Reservoir| (r.p, r.t, gamma(r.t), r.p / (RS * r.t));
                 slug_rate(o.cda, o.length, m, gas(&a), gas(&b))
             } else {
-                -o.m / 1e-4
+                0.0
             };
             let flow = m.abs();
             let h0 = enthalpy(src.t);
@@ -1617,15 +1668,6 @@ impl Network {
             o.flow = m;
             o.power = flow * w;
             *work += weight * dt * o.power;
-        }
-        #[cfg(feature = "parallel")]
-        {
-            use rayon::prelude::*;
-            self.pipes.par_iter_mut().for_each(|p| p.rates());
-        }
-        #[cfg(not(feature = "parallel"))]
-        for p in &mut self.pipes {
-            p.rates();
         }
         for k in 0..self.perforations.len() {
             self.perforate(k);
@@ -1655,6 +1697,7 @@ impl Network {
         for (c, &cda) in z.cda.iter().enumerate() {
             let i = z.first + c;
             let cell = pipe.prim[i];
+            z.m[c] = z.m[c].clamp(-cda * choked(res.p, res.t, res_g), cda * choked(cell.p, cell.t, cell.g));
             let m = z.m[c];
             z.dm[c] = slug_rate(cda, z.length, m, (cell.p, cell.t, cell.g, cell.rho), (res.p, res.t, res_g, res.p / (RS * res.t)));
             let (h0, yf, yo, u) = if m >= 0.0 {
@@ -1747,15 +1790,25 @@ impl Network {
     }
 
     /// From the saved state: `keep` of it, and the rest the current state stepped by `dt`.
-    fn advance(&mut self, dt: f64, keep: f64) {
+    /// Advances a stage; false if it left a gas without mass or internal energy.
+    fn advance(&mut self, dt: f64, keep: f64) -> bool {
         let step = 1.0 - keep;
-        for p in &mut self.pipes {
+        let pipe = |p: &mut Pipe| -> bool {
             for i in 0..p.q.len() {
                 for k in 0..NQ {
                     p.q[i][k] = keep * p.q0[i][k] + step * (p.q[i][k] + dt * p.rate[i][k]);
                 }
             }
-        }
+            p.q.iter().all(|q| q[0] > 0.0 && q[2] - 0.5 * q[1] * q[1] / q[0] > 0.0 && q[2].is_finite())
+        };
+        let bad = std::sync::atomic::AtomicBool::new(false);
+        let pipes = Pipes(self.pipes.as_mut_ptr());
+        crate::pool::run(self.pipe_order.len(), &|j| {
+            if !pipe(unsafe { pipes.get(self.pipe_order[j]) }) {
+                bad.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+        });
+        let cells = !bad.into_inner();
         for n in &mut self.nodes {
             if n.atmosphere {
                 continue;
@@ -1785,6 +1838,7 @@ impl Network {
                 z.m[i] = keep * z.m0[i] + step * (z.m[i] + dt * z.dm[i]);
             }
         }
+        cells && self.nodes.iter().all(|n| n.atmosphere || (n.m > 0.0 && n.e > 0.0))
     }
 
     /// The nodes' and the links' states (for debugging).

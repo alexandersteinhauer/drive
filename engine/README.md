@@ -119,7 +119,11 @@ offline: `src/duct.rs` replaces the exhaust runners and collectors with pipes an
 `examples/reference.rs` runs an engine with them on the dynamometer and writes it;
 `scripts/reference-drive.ts` drives the game's car with them (through the native library,
 `scripts/native-engine.ts`), the 488 Pista's exhaust from `scripts/pista-reference.json`; and
-`scripts/reference_sound.py` makes what was recorded the sound heard.
+`scripts/reference_sound.py` makes what was recorded the sound heard. Natively, with the
+`parallel` feature, the pipes are stepped on `DUCT_THREADS` threads (`src/pool.rs`: each pipe's
+stage one task, longest first, the threads spinning between stages, the nodes after them in
+order, so the result is the same to the bit): 4.4 times as fast on 6 threads of an M-series
+Mac.
 
 - Each pipe is a column of finite volumes of the one-dimensional Euler equations with the
   gas's composition, fifth order in space (WENO-Z) and third in time (SSP Runge-Kutta), HLLC
@@ -164,12 +168,14 @@ offline: `src/duct.rs` replaces the exhaust runners and collectors with pipes an
 - Orifices between nodes (turbine rotors, wastegates) and a volute's stator channels: the gas
   in the opening moves as a slug, d m/dt = Cd A / l (dp - m|m| / (2 rho Cd^2 A^2 Y^2)), its
   length l the passage and its end corrections, Y the compressible expansion factor of the
-  pressure ratio: once steady exactly the quasi-steady compressible (and choked) flow. The
+  pressure ratio: once steady exactly the quasi-steady compressible (and choked) flow; at
+  any time at most what the opening chokes at (a wastegate closing on its flow stops its gas
+  as fast, rather than the loss, ~ m^2 / A, growing without bound). The
   quasi-steady flow alone, ~ sqrt(dp), has infinite conductance at no flow: between small
   volumes (a 50 cc rotor space, a 30 cc turbine outlet) it chattered at idle, 6-9.5 kHz up
   30 dB at the turbine's outlet, heard as bit crushing; with the slug's mass it is 60 dB down.
-  `tests/duct.rs` checks the steady flow against the orifice's and a vessel's Helmholtz
-  frequency through a hole.
+  `tests/duct.rs` checks the steady flow against the orifice's, a vessel's Helmholtz
+  frequency through a hole, and a valve closing on its flow.
 - Perforated walls (a silencer's core): each cell's holes a slug of gas driven by the
   pressure across it against its jet's loss and viscous drag, its mass the holes' gas over
   the wall and their end corrections.

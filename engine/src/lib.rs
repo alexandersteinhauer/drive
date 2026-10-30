@@ -7,6 +7,7 @@ pub mod engine;
 pub mod fastmath;
 pub mod function;
 pub mod gas;
+pub mod pool;
 pub mod rng;
 pub mod solver;
 pub mod spec;

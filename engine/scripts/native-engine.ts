@@ -2,7 +2,8 @@
 // WebAssembly module, through Bun's FFI, with EngineModule's interface: for the reference
 // simulation's long renders, which run several times faster natively.
 //   import { useNativeEngine } from "./native-engine.ts"; await useNativeEngine(repo);
-// before loadEngineModule(), after `cargo build --release` in engine/.
+// before loadEngineModule(), after `cargo build --release --lib --features parallel` in engine/
+// (DUCT_THREADS=<n> in the environment: the pipes on n threads, src/pool.rs).
 import { dlopen, FFIType as T, toArrayBuffer } from "bun:ffi";
 
 export async function useNativeEngine(repo: string): Promise<void> {
@@ -52,7 +53,7 @@ export async function useNativeEngine(repo: string): Promise<void> {
     (f) => statSync(`${repo}/engine/src/${f}`).mtimeMs > built,
   );
   if (stale.length)
-    throw new Error(`${path} is older than engine/src/${stale.join(", ")}: cargo build --release --lib in engine/`);
+    throw new Error(`${path} is older than engine/src/${stale.join(", ")}: cargo build --release --lib --features parallel in engine/`);
   const lib = dlopen(
     path,
     Object.fromEntries(Object.entries(sig).map(([k, [args, returns]]) => [k, { args, returns }])),

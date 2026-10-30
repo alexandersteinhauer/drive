@@ -653,3 +653,29 @@ fn orifice_helmholtz() {
     println!("{f:.2} Hz over {n} periods, Helmholtz {expected:.2} Hz");
     assert!(n >= 5 && (f / expected - 1.0).abs() < 0.01);
 }
+
+#[test]
+fn closing_orifice() {
+    // A valve between two vessels closing on its flow (a wastegate), gradually and at once:
+    // the gas in it passes at most what the narrowed opening chokes at, and none once shut.
+    let mut net = Network::default();
+    let a = net.add_node(Node::volume(2e-3, 2.0e5, 900.0, 0.0, 0.25));
+    let b = net.add_node(Node::volume(2e-3, 1.0e5, 900.0, 0.0, 0.25));
+    let o = net.orifice(a, b, 5e-4, 0.0);
+    let dt = 5e-6;
+    for _ in 0..200 {
+        net.step(dt);
+    }
+    for (k, cda) in [3e-4, 1e-4, 3e-5, 1e-5, 1e-6, 0.0, 5e-4, 1e-7, 5e-4, 0.0].into_iter().enumerate() {
+        net.orifices[o].cda = cda;
+        for _ in 0..20 {
+            net.step(dt);
+            let m = net.orifices[o].flow;
+            assert!(m.is_finite() && net.nodes[a].pressure().is_finite(), "step {k}: cda {cda} m {m}");
+        }
+        let (ra, rb) = (net.nodes[a].reservoir(), net.nodes[b].reservoir());
+        let steady = cda * orifice(ra.p, ra.t, gamma(ra.t), rb.p);
+        println!("cda {cda:.0e}: flow {:.6} kg/s, quasi-steady {steady:.6}", net.orifices[o].flow);
+        assert!(net.orifices[o].flow <= 1.0001 * cda * orifice(ra.p, ra.t, gamma(ra.t), 0.0) + 1e-9);
+    }
+}
