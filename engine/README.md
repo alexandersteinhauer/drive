@@ -435,8 +435,26 @@ learning curve. Current and longer-history models must not be conflated in this 
 Only choose a stage from validation results, freeze its exact weights/provenance, then
 use `evaluate --split test` on the reserved programs. No run-specific alignment, gain,
 playback EQ, extra noise or reference-physics adjustment is part of this experiment.
-Test results do not automatically replace either existing game asset. Acquisition and
-multi-run fitting have separate synthetic tests in `test_surrogate_acquire.py` and
+Test results do not automatically replace either existing game asset. The explicit selection
+and no-regression gates are in `scripts/surrogate-data-rules.json`.
+
+The completed study is recorded in `scripts/surrogate-data-results.json`. Every stage
+reached LSQR tolerance; adding the first 13 s of targeted coverage reduced the two
+validation drives' 200–400 Hz errors from the old preview's +5.23/+11.38 dB to
++0.21/+0.44 dB. The larger 68.2/81.2 s fits improved waveform scores further, but their
+worst validation bass errors were slightly larger. The pre-recorded spectral ranking
+therefore selected the 38.15 s model before any final-test scoring.
+
+On two fresh frozen-model tests, bass error fell from +12.02/+10.62 dB to
++0.78/+3.97 dB, and pooled normalized waveform MSE fell from 0.248 to 0.123.
+However, median absolute band-level error worsened from 1.06 to 1.83 dB, so the full
+no-regression gate **failed**. The weights are preserved separately as
+`public/audio/surrogate/pista-coverage-candidate.json`, with provenance alongside, but
+are **not wired into the game's selector**. Both existing models remain unchanged.
+The candidate still uses 512 taps (25.6 ms history), the original calibration and loss,
+and no playback EQ. It fixes much, not all, of the bass generalization problem.
+
+Acquisition and multi-run fitting have separate synthetic tests in `test_surrogate_acquire.py` and
 `test_surrogate_study.py`.
 
 ## Physics beyond engine-sim's

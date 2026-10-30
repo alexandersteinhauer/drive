@@ -1,0 +1,2135 @@
+{
+  "status": "Unwired experimental candidate. Failed the full spectral no-regression gate; neither existing game model is replaced.",
+  "modelKind": "Supervised regularized control-gated causal FIR regression, not a neural network",
+  "referencePhysicsCommit": "47425e57409e0b4cb03714665bd8727e18ead28a",
+  "trainingToolsCommit": "73c4f9a",
+  "acquisitionPlan": "engine/scripts/surrogate-data-plan.json",
+  "acquisitionPlanSha256": "a32d31a1b13fba4bd9bf9d0cfa94666c9af24e0fceec6887ac30522f35570fb1",
+  "selectionRules": "engine/scripts/surrogate-data-rules.json",
+  "selectionRulesSha256": "0ba67c7a313c9c1f326711dcb93efd73ec784487989291af6791a59b4b14ee0a",
+  "model": {
+    "gates": 6,
+    "cylinders": 8,
+    "powers": [
+      1,
+      2
+    ],
+    "taps": 512,
+    "rate": 20000,
+    "nativeRate": 10000,
+    "flowScaleKgPerS": 0.1
+  },
+  "inputControls": [
+    "rpm/1000",
+    "manifold/1e5",
+    "wastegate",
+    "throttle",
+    "flap"
+  ],
+  "sourceSettings": {
+    "nativeRate": 10000,
+    "fluidSteps": 4,
+    "boostAndCombustion": "unmodified stock game settings"
+  },
+  "teacherSettings": {
+    "nativeRate": 10000,
+    "fluidSteps": 24,
+    "fluidRate": 240000,
+    "upstream": "same stock settings; add only the corrected reference exhaust"
+  },
+  "outputs": "Two outlet listener-pressure contributions in Pa at 5 m, before directivity; no other sound sources",
+  "intendedPlaybackFullScalePa": 16,
+  "artifactPlaybackFullScalePa": 32,
+  "datasets": {
+    "availableTrainingSeconds": 81.2,
+    "selectedTrainingSeconds": 38.15,
+    "selectedTrainingRuns": [
+      "baseline",
+      "target-up"
+    ],
+    "validationSeconds": 18.87,
+    "finalTestSeconds": 21.78,
+    "runs": [
+      {
+        "id": "baseline",
+        "split": "train",
+        "seed": 17,
+        "program": [
+          [
+            1.5,
+            1000.0,
+            1000.0,
+            0.0
+          ],
+          [
+            1.0,
+            1000.0,
+            1800.0,
+            0.2
+          ],
+          [
+            1.0,
+            1800.0,
+            1800.0,
+            0.2
+          ],
+          [
+            0.8,
+            1800.0,
+            2500.0,
+            0.45
+          ],
+          [
+            1.2,
+            2500.0,
+            2500.0,
+            0.45
+          ],
+          [
+            0.5,
+            2500.0,
+            3300.0,
+            0.8
+          ],
+          [
+            1.5,
+            3300.0,
+            3300.0,
+            1.0
+          ],
+          [
+            0.4,
+            3300.0,
+            4200.0,
+            1.0
+          ],
+          [
+            1.5,
+            4200.0,
+            4200.0,
+            1.0
+          ],
+          [
+            0.4,
+            4200.0,
+            5200.0,
+            1.0
+          ],
+          [
+            1.5,
+            5200.0,
+            5200.0,
+            1.0
+          ],
+          [
+            0.4,
+            5200.0,
+            6500.0,
+            1.0
+          ],
+          [
+            1.5,
+            6500.0,
+            6500.0,
+            1.0
+          ],
+          [
+            0.4,
+            6500.0,
+            7500.0,
+            1.0
+          ],
+          [
+            1.5,
+            7500.0,
+            7500.0,
+            1.0
+          ],
+          [
+            0.25,
+            7500.0,
+            5800.0,
+            0.0
+          ],
+          [
+            0.6,
+            5800.0,
+            5800.0,
+            1.0
+          ],
+          [
+            0.4,
+            5800.0,
+            5800.0,
+            0.0
+          ],
+          [
+            0.8,
+            5800.0,
+            3200.0,
+            0.0
+          ],
+          [
+            1.0,
+            3200.0,
+            3200.0,
+            0.2
+          ],
+          [
+            1.0,
+            3200.0,
+            3200.0,
+            0.55
+          ],
+          [
+            0.7,
+            3200.0,
+            3200.0,
+            1.0
+          ],
+          [
+            0.7,
+            3200.0,
+            1800.0,
+            0.0
+          ],
+          [
+            1.0,
+            1800.0,
+            1800.0,
+            0.1
+          ],
+          [
+            0.7,
+            1800.0,
+            2800.0,
+            0.7
+          ],
+          [
+            1.3,
+            2800.0,
+            2800.0,
+            1.0
+          ],
+          [
+            0.6,
+            2800.0,
+            1000.0,
+            0.0
+          ],
+          [
+            1.0,
+            1000.0,
+            1000.0,
+            0.0
+          ]
+        ]
+      },
+      {
+        "id": "target-up",
+        "split": "train",
+        "seed": 1019,
+        "program": [
+          [
+            0.8,
+            1000.0,
+            1000.0,
+            0.0
+          ],
+          [
+            0.9,
+            1000.0,
+            4300.0,
+            0.7
+          ],
+          [
+            0.9,
+            4300.0,
+            4300.0,
+            0.4
+          ],
+          [
+            0.9,
+            4300.0,
+            4300.0,
+            1.0
+          ],
+          [
+            0.3,
+            4300.0,
+            4600.0,
+            1.0
+          ],
+          [
+            1.4,
+            4600.0,
+            4600.0,
+            1.0
+          ],
+          [
+            0.25,
+            4600.0,
+            4600.0,
+            0.0
+          ],
+          [
+            1.4,
+            4600.0,
+            4600.0,
+            1.0
+          ],
+          [
+            0.8,
+            4600.0,
+            4600.0,
+            0.35
+          ],
+          [
+            0.3,
+            4600.0,
+            4900.0,
+            0.7
+          ],
+          [
+            1.1,
+            4900.0,
+            4900.0,
+            1.0
+          ],
+          [
+            0.25,
+            4900.0,
+            4900.0,
+            0.0
+          ],
+          [
+            0.9,
+            4900.0,
+            4900.0,
+            1.0
+          ],
+          [
+            0.3,
+            4900.0,
+            5200.0,
+            1.0
+          ],
+          [
+            1.0,
+            5200.0,
+            5200.0,
+            1.0
+          ],
+          [
+            0.8,
+            5200.0,
+            1000.0,
+            0.0
+          ],
+          [
+            0.7,
+            1000.0,
+            1000.0,
+            0.0
+          ]
+        ]
+      },
+      {
+        "id": "target-down",
+        "split": "train",
+        "seed": 2027,
+        "program": [
+          [
+            0.9,
+            1000.0,
+            1000.0,
+            0.0
+          ],
+          [
+            1.2,
+            1000.0,
+            6200.0,
+            0.9
+          ],
+          [
+            1.1,
+            6200.0,
+            6200.0,
+            1.0
+          ],
+          [
+            0.25,
+            6200.0,
+            5000.0,
+            0.0
+          ],
+          [
+            1.2,
+            5000.0,
+            5000.0,
+            1.0
+          ],
+          [
+            0.4,
+            5000.0,
+            4700.0,
+            1.0
+          ],
+          [
+            1.2,
+            4700.0,
+            4700.0,
+            1.0
+          ],
+          [
+            0.35,
+            4700.0,
+            4700.0,
+            0.0
+          ],
+          [
+            1.2,
+            4700.0,
+            4700.0,
+            1.0
+          ],
+          [
+            0.4,
+            4700.0,
+            4400.0,
+            0.5
+          ],
+          [
+            1.0,
+            4400.0,
+            4400.0,
+            0.5
+          ],
+          [
+            0.8,
+            4400.0,
+            4400.0,
+            1.0
+          ],
+          [
+            0.3,
+            4400.0,
+            4600.0,
+            1.0
+          ],
+          [
+            1.2,
+            4600.0,
+            4600.0,
+            1.0
+          ],
+          [
+            0.8,
+            4600.0,
+            1000.0,
+            0.0
+          ],
+          [
+            0.8,
+            1000.0,
+            1000.0,
+            0.0
+          ]
+        ]
+      },
+      {
+        "id": "broad-loads",
+        "split": "train",
+        "seed": 3037,
+        "program": [
+          [
+            0.9,
+            1000.0,
+            1000.0,
+            0.0
+          ],
+          [
+            0.6,
+            1000.0,
+            1600.0,
+            0.25
+          ],
+          [
+            0.9,
+            1600.0,
+            1600.0,
+            0.25
+          ],
+          [
+            0.6,
+            1600.0,
+            2400.0,
+            0.45
+          ],
+          [
+            1.0,
+            2400.0,
+            2400.0,
+            0.45
+          ],
+          [
+            0.5,
+            2400.0,
+            3000.0,
+            0.8
+          ],
+          [
+            1.1,
+            3000.0,
+            3000.0,
+            1.0
+          ],
+          [
+            0.5,
+            3000.0,
+            3900.0,
+            1.0
+          ],
+          [
+            1.0,
+            3900.0,
+            3900.0,
+            1.0
+          ],
+          [
+            0.6,
+            3900.0,
+            5600.0,
+            1.0
+          ],
+          [
+            1.0,
+            5600.0,
+            5600.0,
+            1.0
+          ],
+          [
+            0.5,
+            5600.0,
+            6800.0,
+            1.0
+          ],
+          [
+            1.0,
+            6800.0,
+            6800.0,
+            1.0
+          ],
+          [
+            0.5,
+            6800.0,
+            7700.0,
+            1.0
+          ],
+          [
+            0.9,
+            7700.0,
+            7700.0,
+            1.0
+          ],
+          [
+            0.25,
+            7700.0,
+            5800.0,
+            0.0
+          ],
+          [
+            0.9,
+            5800.0,
+            5800.0,
+            1.0
+          ],
+          [
+            0.3,
+            5800.0,
+            4300.0,
+            0.0
+          ],
+          [
+            0.9,
+            4300.0,
+            4300.0,
+            1.0
+          ],
+          [
+            0.7,
+            4300.0,
+            2300.0,
+            0.0
+          ],
+          [
+            0.8,
+            2300.0,
+            2300.0,
+            0.25
+          ],
+          [
+            0.7,
+            2300.0,
+            1000.0,
+            0.0
+          ],
+          [
+            0.8,
+            1000.0,
+            1000.0,
+            0.0
+          ]
+        ]
+      },
+      {
+        "id": "target-repeat",
+        "split": "train",
+        "seed": 4051,
+        "program": [
+          [
+            0.8,
+            1000.0,
+            1000.0,
+            0.0
+          ],
+          [
+            0.9,
+            1000.0,
+            4300.0,
+            0.7
+          ],
+          [
+            0.9,
+            4300.0,
+            4300.0,
+            0.4
+          ],
+          [
+            0.9,
+            4300.0,
+            4300.0,
+            1.0
+          ],
+          [
+            0.3,
+            4300.0,
+            4600.0,
+            1.0
+          ],
+          [
+            1.4,
+            4600.0,
+            4600.0,
+            1.0
+          ],
+          [
+            0.25,
+            4600.0,
+            4600.0,
+            0.0
+          ],
+          [
+            1.4,
+            4600.0,
+            4600.0,
+            1.0
+          ],
+          [
+            0.8,
+            4600.0,
+            4600.0,
+            0.35
+          ],
+          [
+            0.3,
+            4600.0,
+            4900.0,
+            0.7
+          ],
+          [
+            1.1,
+            4900.0,
+            4900.0,
+            1.0
+          ],
+          [
+            0.25,
+            4900.0,
+            4900.0,
+            0.0
+          ],
+          [
+            0.9,
+            4900.0,
+            4900.0,
+            1.0
+          ],
+          [
+            0.3,
+            4900.0,
+            5200.0,
+            1.0
+          ],
+          [
+            1.0,
+            5200.0,
+            5200.0,
+            1.0
+          ],
+          [
+            0.8,
+            5200.0,
+            1000.0,
+            0.0
+          ],
+          [
+            0.7,
+            1000.0,
+            1000.0,
+            0.0
+          ]
+        ]
+      },
+      {
+        "id": "validation-original",
+        "split": "validation",
+        "seed": 73,
+        "program": [
+          [
+            1.0,
+            1000.0,
+            1000.0,
+            0.0
+          ],
+          [
+            1.0,
+            1000.0,
+            2800.0,
+            0.65
+          ],
+          [
+            0.7,
+            2800.0,
+            2800.0,
+            0.35
+          ],
+          [
+            1.4,
+            2800.0,
+            4000.0,
+            1.0
+          ],
+          [
+            0.8,
+            4000.0,
+            6200.0,
+            1.0
+          ],
+          [
+            0.25,
+            6200.0,
+            4400.0,
+            0.0
+          ],
+          [
+            0.6,
+            4400.0,
+            4400.0,
+            1.0
+          ],
+          [
+            0.8,
+            4400.0,
+            2400.0,
+            0.0
+          ],
+          [
+            0.6,
+            2400.0,
+            2400.0,
+            0.25
+          ],
+          [
+            0.8,
+            2400.0,
+            1000.0,
+            0.0
+          ],
+          [
+            0.5,
+            1000.0,
+            1000.0,
+            0.0
+          ]
+        ]
+      },
+      {
+        "id": "validation-nearby",
+        "split": "validation",
+        "seed": 7717,
+        "program": [
+          [
+            0.85,
+            1000.0,
+            1000.0,
+            0.0
+          ],
+          [
+            1.1,
+            1000.0,
+            4500.0,
+            0.75
+          ],
+          [
+            1.15,
+            4500.0,
+            4500.0,
+            1.0
+          ],
+          [
+            0.3,
+            4500.0,
+            4500.0,
+            0.0
+          ],
+          [
+            1.15,
+            4500.0,
+            4500.0,
+            1.0
+          ],
+          [
+            0.45,
+            4500.0,
+            4800.0,
+            0.55
+          ],
+          [
+            0.9,
+            4800.0,
+            4800.0,
+            0.55
+          ],
+          [
+            0.9,
+            4800.0,
+            4800.0,
+            1.0
+          ],
+          [
+            0.45,
+            4800.0,
+            6400.0,
+            1.0
+          ],
+          [
+            0.7,
+            6400.0,
+            6400.0,
+            1.0
+          ],
+          [
+            0.27,
+            6400.0,
+            4550.0,
+            0.0
+          ],
+          [
+            0.85,
+            4550.0,
+            4550.0,
+            1.0
+          ],
+          [
+            0.7,
+            4550.0,
+            1000.0,
+            0.0
+          ],
+          [
+            0.65,
+            1000.0,
+            1000.0,
+            0.0
+          ]
+        ]
+      },
+      {
+        "id": "test-reapply",
+        "split": "test",
+        "seed": 9901,
+        "program": [
+          [
+            1.1,
+            1000.0,
+            1000.0,
+            0.0
+          ],
+          [
+            1.3,
+            1000.0,
+            6100.0,
+            0.85
+          ],
+          [
+            0.95,
+            6100.0,
+            6100.0,
+            1.0
+          ],
+          [
+            0.22,
+            6100.0,
+            4600.0,
+            0.0
+          ],
+          [
+            1.3,
+            4600.0,
+            4600.0,
+            1.0
+          ],
+          [
+            0.4,
+            4600.0,
+            4600.0,
+            0.3
+          ],
+          [
+            0.9,
+            4600.0,
+            4600.0,
+            1.0
+          ],
+          [
+            0.55,
+            4600.0,
+            4750.0,
+            1.0
+          ],
+          [
+            0.9,
+            4750.0,
+            4750.0,
+            1.0
+          ],
+          [
+            0.28,
+            4750.0,
+            4750.0,
+            0.0
+          ],
+          [
+            1.05,
+            4750.0,
+            4750.0,
+            1.0
+          ],
+          [
+            0.9,
+            4750.0,
+            1000.0,
+            0.0
+          ],
+          [
+            0.7,
+            1000.0,
+            1000.0,
+            0.0
+          ]
+        ]
+      },
+      {
+        "id": "test-broad",
+        "split": "test",
+        "seed": 9923,
+        "program": [
+          [
+            1.05,
+            1000.0,
+            1000.0,
+            0.0
+          ],
+          [
+            1.0,
+            1000.0,
+            2900.0,
+            0.6
+          ],
+          [
+            0.8,
+            2900.0,
+            2900.0,
+            0.35
+          ],
+          [
+            1.2,
+            2900.0,
+            4100.0,
+            1.0
+          ],
+          [
+            0.8,
+            4100.0,
+            4100.0,
+            1.0
+          ],
+          [
+            0.8,
+            4100.0,
+            7100.0,
+            1.0
+          ],
+          [
+            0.27,
+            7100.0,
+            5350.0,
+            0.0
+          ],
+          [
+            0.95,
+            5350.0,
+            5350.0,
+            1.0
+          ],
+          [
+            0.31,
+            5350.0,
+            4050.0,
+            0.0
+          ],
+          [
+            1.05,
+            4050.0,
+            4050.0,
+            1.0
+          ],
+          [
+            0.8,
+            4050.0,
+            2400.0,
+            0.0
+          ],
+          [
+            0.7,
+            2400.0,
+            2400.0,
+            0.25
+          ],
+          [
+            0.8,
+            2400.0,
+            1000.0,
+            0.0
+          ],
+          [
+            0.7,
+            1000.0,
+            1000.0,
+            0.0
+          ]
+        ]
+      },
+      {
+        "id": "diagnostic-original-test",
+        "split": "diagnostic",
+        "seed": 239,
+        "program": [
+          [
+            1.5,
+            1000.0,
+            1000.0,
+            0.0
+          ],
+          [
+            1.5,
+            1000.0,
+            3800.0,
+            0.8
+          ],
+          [
+            1.0,
+            3800.0,
+            3800.0,
+            1.0
+          ],
+          [
+            1.5,
+            3800.0,
+            7000.0,
+            1.0
+          ],
+          [
+            0.3,
+            7000.0,
+            5000.0,
+            0.0
+          ],
+          [
+            0.8,
+            5000.0,
+            5000.0,
+            1.0
+          ],
+          [
+            0.5,
+            5000.0,
+            5000.0,
+            0.0
+          ],
+          [
+            1.0,
+            5000.0,
+            2500.0,
+            0.0
+          ],
+          [
+            1.0,
+            2500.0,
+            2500.0,
+            0.25
+          ],
+          [
+            1.0,
+            2500.0,
+            5000.0,
+            0.6
+          ],
+          [
+            1.0,
+            5000.0,
+            1000.0,
+            0.0
+          ],
+          [
+            1.0,
+            1000.0,
+            1000.0,
+            0.0
+          ]
+        ]
+      },
+      {
+        "id": "diagnostic-known-failure",
+        "split": "diagnostic",
+        "seed": 6837,
+        "program": [
+          [
+            0.8,
+            1000.0,
+            1000.0,
+            0.0
+          ],
+          [
+            0.8,
+            1000.0,
+            2600.0,
+            0.55
+          ],
+          [
+            0.6,
+            2600.0,
+            2600.0,
+            0.3
+          ],
+          [
+            0.7,
+            2600.0,
+            3600.0,
+            1.0
+          ],
+          [
+            0.6,
+            3600.0,
+            3600.0,
+            1.0
+          ],
+          [
+            0.7,
+            3600.0,
+            6000.0,
+            1.0
+          ],
+          [
+            0.6,
+            6000.0,
+            6000.0,
+            1.0
+          ],
+          [
+            0.2,
+            6000.0,
+            4600.0,
+            0.0
+          ],
+          [
+            0.5,
+            4600.0,
+            4600.0,
+            1.0
+          ],
+          [
+            0.5,
+            4600.0,
+            4600.0,
+            0.0
+          ],
+          [
+            0.6,
+            4600.0,
+            2200.0,
+            0.0
+          ],
+          [
+            0.6,
+            2200.0,
+            3200.0,
+            0.5
+          ],
+          [
+            0.6,
+            3200.0,
+            1000.0,
+            0.0
+          ],
+          [
+            0.6,
+            1000.0,
+            1000.0,
+            0.0
+          ]
+        ]
+      }
+    ]
+  },
+  "optimizer": {
+    "atol": 1e-07,
+    "btol": 1e-07,
+    "conditionLimit": 100000000.0,
+    "damping": 1.0,
+    "featureScale": [
+      0.8837156648069696,
+      0.8801286700164408,
+      0.8830972456156228,
+      0.8817562292627247,
+      0.8827435130384292,
+      0.87935460423808,
+      0.882055172058517,
+      0.8810252501435453,
+      2.94860888673431,
+      2.9263544744490613,
+      2.9436269599864757,
+      2.9360019826488566,
+      2.9411950768588233,
+      2.9202067417607878,
+      2.936931969265089,
+      2.931154695199889
+    ],
+    "gateScale": [
+      0.3616258975563378,
+      0.3202935057831843,
+      0.19460686763961954,
+      0.411214709767785,
+      0.2442718268228934,
+      0.225968767638162
+    ],
+    "gateSource": {
+      "definition": "fixed centers, widths, powers and flowScale; no reclustering",
+      "path": "/Users/alex/.local/share/rad/worktrees/slowroads-338c4dad/public/audio/surrogate/pista-retrained.json",
+      "sha256": "555036c99f396a37a59e19f4c2b41711696be5c8929d6c980309d7e63d407a65"
+    },
+    "iterations": 8000,
+    "method": "independent-run matrix-free LSQR; one augmented original-coefficient ridge",
+    "normalization": {
+      "baselineRuns": [
+        "baseline"
+      ],
+      "baselineSamples": 502486.0,
+      "baselineStage": "baseline",
+      "dataResidualScale": 0.8120681486948343,
+      "definition": "N_baseline/N_effective * summed squared residuals + damping^2 * original-coefficient squared norm",
+      "effectiveSamples": 761972
+    },
+    "preemphasis": 0.9,
+    "warmupPerRun": 512
+  },
+  "fit": [
+    {
+      "atol": 1e-07,
+      "btol": 1e-07,
+      "conditionEstimate": 240657.97373659976,
+      "conditionLimit": 100000000.0,
+      "converged": true,
+      "convolution": {
+        "backend": "overlap-add",
+        "blockSize": 512,
+        "fftSize": 1024
+      },
+      "exactNormalResidual": 1.1758176065929966,
+      "exactResidual": 89.01646031083557,
+      "iterationLimit": 8000,
+      "iterationLimitReached": false,
+      "iterations": 4837,
+      "leastSquaresToleranceRatio": 8.287655586163476e-08,
+      "meanWeightedDataSse": 0.014577370577894056,
+      "normalResidual": 1.1758176082775549,
+      "objective": 7923.930206270565,
+      "operatorNormEstimate": 159381.51238621963,
+      "originalCoefficientNormalResidual": 0.7408599346753952,
+      "originalCoefficientRelativeNormalResidual": 1.0249707872024187e-05,
+      "originalCoefficientRidgeSse": 599.0055740668924,
+      "output": 0,
+      "preconditionedSolutionNorm": 14.707797849806532,
+      "relativeNormalResidual": 1.345370811290291e-05,
+      "residual": 89.01646031083942,
+      "scaledDataSse": 7324.924632203672,
+      "stop": 2,
+      "stopReason": "least_squares_tolerance",
+      "zeroDc": true
+    },
+    {
+      "atol": 1e-07,
+      "btol": 1e-07,
+      "conditionEstimate": 234873.95633873538,
+      "conditionLimit": 100000000.0,
+      "converged": true,
+      "convolution": {
+        "backend": "overlap-add",
+        "blockSize": 512,
+        "fftSize": 1024
+      },
+      "exactNormalResidual": 1.253833891032855,
+      "exactResidual": 86.10271923910379,
+      "iterationLimit": 8000,
+      "iterationLimitReached": false,
+      "iterations": 4724,
+      "leastSquaresToleranceRatio": 9.240192381298554e-08,
+      "meanWeightedDataSse": 0.013617033135749171,
+      "normalResidual": 1.2538338910126603,
+      "objective": 7413.678260367935,
+      "operatorNormEstimate": 157594.88730215054,
+      "originalCoefficientNormalResidual": 0.7906330678251167,
+      "originalCoefficientRelativeNormalResidual": 1.1506533428880426e-05,
+      "originalCoefficientRidgeSse": 571.3097481178761,
+      "output": 1,
+      "preconditionedSolutionNorm": 14.305344656712341,
+      "relativeNormalResidual": 1.5029322542368077e-05,
+      "residual": 86.1027192391076,
+      "scaledDataSse": 6842.368512250058,
+      "stop": 2,
+      "stopReason": "least_squares_tolerance",
+      "zeroDc": true
+    }
+  ],
+  "learningCurve": [
+    {
+      "stage": "baseline",
+      "bassDb": {
+        "validation-original": 8.616291861036467,
+        "validation-nearby": 14.999249153928734
+      },
+      "worstAbsBassDb": 14.999249153928734,
+      "equalSegmentWaveScore": 0.7308642090700659,
+      "pooledWaveMse": 0.2278349054115445,
+      "medianAbsBandDb": 1.3855065928419532,
+      "worstAbsBandDb": 13.005744543663285,
+      "checks": {
+        "converged": true,
+        "segmentScoreImproves": true,
+        "globalWaveMseImproves": false,
+        "medianBandErrorImproves": false,
+        "worstBandErrorImproves": false,
+        "bassBandNotWorse": false
+      },
+      "eligible": false,
+      "modelSha256": "0e2e6eadae84052a40e1d436e4d34505febb2889f296cf68673eb2536a34d941",
+      "reportSha256": "bdaaaad0b1411c53f0d1518c43d22d3a4748eebe9baec62a47ddcf93d200bc7b",
+      "validationReportSha256": "dde8eab1fd988a3e7afeaf76dd1adca8a49382e6ef7b954fa79338dcbb1b029d",
+      "iterations": [
+        5041,
+        4880
+      ],
+      "trainingSeconds": 25.15,
+      "trainingRuns": [
+        "baseline"
+      ]
+    },
+    {
+      "stage": "targeted",
+      "bassDb": {
+        "validation-original": 0.21149295460613157,
+        "validation-nearby": 0.4367338213003036
+      },
+      "worstAbsBassDb": 0.4367338213003036,
+      "equalSegmentWaveScore": 0.6259630598026686,
+      "pooledWaveMse": 0.10027669006463316,
+      "medianAbsBandDb": 0.8791221346323606,
+      "worstAbsBandDb": 4.097991622715045,
+      "checks": {
+        "converged": true,
+        "segmentScoreImproves": true,
+        "globalWaveMseImproves": true,
+        "medianBandErrorImproves": true,
+        "worstBandErrorImproves": true,
+        "bassBandNotWorse": true
+      },
+      "eligible": true,
+      "modelSha256": "25b15400014d5cb0cb752f571b157d29eb191ab0fc0e1727eb8a1e3394e4dd64",
+      "reportSha256": "f2cab5b4fde7260b9785e8250353416530945cd03525b96203a8a4795d766d2a",
+      "validationReportSha256": "f2cab5b4fde7260b9785e8250353416530945cd03525b96203a8a4795d766d2a",
+      "iterations": [
+        4837,
+        4724
+      ],
+      "trainingSeconds": 38.15,
+      "trainingRuns": [
+        "baseline",
+        "target-up"
+      ]
+    },
+    {
+      "stage": "coverage",
+      "bassDb": {
+        "validation-original": -0.4873580278337026,
+        "validation-nearby": -0.021078119666694956
+      },
+      "worstAbsBassDb": 0.4873580278337026,
+      "equalSegmentWaveScore": 0.4750659647555945,
+      "pooledWaveMse": 0.09411399564528859,
+      "medianAbsBandDb": 0.6702928105506833,
+      "worstAbsBandDb": 4.428520309939106,
+      "checks": {
+        "converged": true,
+        "segmentScoreImproves": true,
+        "globalWaveMseImproves": true,
+        "medianBandErrorImproves": true,
+        "worstBandErrorImproves": true,
+        "bassBandNotWorse": true
+      },
+      "eligible": true,
+      "modelSha256": "2e51ea856ac8cd91eb1035c03ad0fa609017f1e8bb0182a28ff0110c700a5fb1",
+      "reportSha256": "8a7b3f3b806614f22818f94b3eb74debee64c4fdd92f5a56560b4d7f3bab915f",
+      "validationReportSha256": "8a7b3f3b806614f22818f94b3eb74debee64c4fdd92f5a56560b4d7f3bab915f",
+      "iterations": [
+        4645,
+        4590
+      ],
+      "trainingSeconds": 68.2,
+      "trainingRuns": [
+        "baseline",
+        "target-up",
+        "target-down",
+        "broad-loads"
+      ]
+    },
+    {
+      "stage": "replicated",
+      "bassDb": {
+        "validation-original": -0.525397217710727,
+        "validation-nearby": -0.06135005447551785
+      },
+      "worstAbsBassDb": 0.525397217710727,
+      "equalSegmentWaveScore": 0.48078775485329506,
+      "pooledWaveMse": 0.0910001962722013,
+      "medianAbsBandDb": 0.6293109641378412,
+      "worstAbsBandDb": 4.651426082792272,
+      "checks": {
+        "converged": true,
+        "segmentScoreImproves": true,
+        "globalWaveMseImproves": true,
+        "medianBandErrorImproves": true,
+        "worstBandErrorImproves": true,
+        "bassBandNotWorse": true
+      },
+      "eligible": true,
+      "modelSha256": "9683f57166963b26ae051beec281c3b5b9e5b824f00664eb6611f80612d49b17",
+      "reportSha256": "bbab7521498d53ad144832b0e09de161fb1f2f1d5551242063e4babeab2c3222",
+      "validationReportSha256": "bbab7521498d53ad144832b0e09de161fb1f2f1d5551242063e4babeab2c3222",
+      "iterations": [
+        4587,
+        4531
+      ],
+      "trainingSeconds": 81.2,
+      "trainingRuns": [
+        "baseline",
+        "target-up",
+        "target-down",
+        "broad-loads",
+        "target-repeat"
+      ]
+    }
+  ],
+  "freshFinalTest": {
+    "checks": {
+      "segmentScoreImproves": true,
+      "globalWaveMseImproves": true,
+      "medianBandErrorImproves": false,
+      "worstBandErrorImproves": true,
+      "bassBandNotWorse": true
+    },
+    "passes": false,
+    "results": {
+      "final-preview": {
+        "waveMse": 0.24798735729320823,
+        "correlation": 0.8675391673040734,
+        "segmentScore": 0.7420162703830809,
+        "medianBand": 1.064639287060351,
+        "worstBand": 11.382760186688278,
+        "bass": {
+          "test-reapply": 12.02248759381794,
+          "test-broad": 10.621200385994571
+        }
+      },
+      "final-selected": {
+        "waveMse": 0.12330928120044155,
+        "correlation": 0.93686938840929,
+        "segmentScore": 0.7346030127264834,
+        "medianBand": 1.834504606358653,
+        "worstBand": 3.0754162127501843,
+        "bass": {
+          "test-reapply": 0.7793288386045948,
+          "test-broad": 3.9665820480524934
+        }
+      }
+    },
+    "reselectionAfterTest": false
+  },
+  "runtimeAgreement": {
+    "maxAbsPa": 1.896905715742525e-05,
+    "relativeRms": 9.86561987483541e-07,
+    "finite": true
+  },
+  "runtimeStream": {
+    "nativeFrames": 105500,
+    "audioFrames": 465097,
+    "inputRate": 10000,
+    "outputRate": 44100,
+    "inputSeconds": 10.55,
+    "outputSeconds": 10.54641723356009,
+    "medianMs": 133.14387499999998,
+    "streamPercentRealtime": 1.2620272511848338,
+    "minMs": 128.709042,
+    "maxMs": 166.50920899999994,
+    "includes": "JS packet copy, model, input and output resampling; excludes model load, loudness and directivity"
+  },
+  "dataIdentity": {
+    "abtrace": {
+      "sha256": "223150b939569c261ba9bcc9934035c9b38bb44ef3486942a4014dd599c7bee3",
+      "bytes": 1055200
+    },
+    "spec.json": {
+      "sha256": "0294c47a4d58b720ad04718f30390b7d360b329e64af12d7704f17acddf4aacc",
+      "bytes": 49245
+    },
+    "reference.json": {
+      "sha256": "6e191073e4a2f3721a32825607d277e22574135a3acc47c5ec7c6bc0f9304dc1",
+      "bytes": 11742
+    }
+  },
+  "captureIdentity": {
+    "baseline": {
+      "id": "baseline",
+      "seed": 17,
+      "split": "train",
+      "files": {
+        "game": {
+          ".steps.json": {
+            "sha256": "47df35847451245ef2511b455b25bea23d830a6ae09352f513c5e07d951672a7",
+            "bytes": 127577
+          },
+          ".steps.f32": {
+            "sha256": "3897bfd5f9538f751e589c017021b5beceff01f172ae5df168e0c8a3dd0f7886",
+            "bytes": 58348000
+          }
+        },
+        "reference": {
+          ".steps.json": {
+            "sha256": "8292f9d215fe47167f8c0dc3fc447d7b6412b75b8824652010fc4f7f9480a592",
+            "bytes": 140864
+          },
+          ".steps.f32": {
+            "sha256": "1dceb8428d24d450bacd1371c73c80d732edca6692b10a03865f6ac84509a709",
+            "bytes": 58348000
+          },
+          ".ends.f32": {
+            "sha256": "ee2f60effbe88ea2bd157c80ef7c32dd42a07af145eef1c6c68a694a3e305f99",
+            "bytes": 48288000
+          },
+          ".f32": {
+            "sha256": "93aa600ea000cb4d3cd1fa298f6018396fd1e5e9d4c7ea8b2203a5780f8305db",
+            "bytes": 24144000
+          },
+          ".exits.f32": {
+            "sha256": "4324c6bf19c70c9f26b8f9258c138bbc5dd9370828efbdc054ed43a9b817104c",
+            "bytes": 144864000
+          }
+        }
+      },
+      "acquisitionIdentity": {
+        "abtrace": {
+          "sha256": "223150b939569c261ba9bcc9934035c9b38bb44ef3486942a4014dd599c7bee3",
+          "bytes": 1055200
+        },
+        "spec.json": {
+          "sha256": "0294c47a4d58b720ad04718f30390b7d360b329e64af12d7704f17acddf4aacc",
+          "bytes": 49245
+        },
+        "reference.json": {
+          "sha256": "6e191073e4a2f3721a32825607d277e22574135a3acc47c5ec7c6bc0f9304dc1",
+          "bytes": 11742
+        }
+      }
+    },
+    "target-up": {
+      "id": "target-up",
+      "seed": 1019,
+      "split": "train",
+      "files": {
+        "game": {
+          ".steps.json": {
+            "sha256": "ce40b70cf2383b821f7f47c9665ac5b8370957dba16f0cda1c9db69c590e4f98",
+            "bytes": 126896
+          },
+          ".steps.f32": {
+            "sha256": "678e320c65ae036fd1119833225039b32af8acddcceb94267e59293a09d31683",
+            "bytes": 30160000
+          }
+        },
+        "reference": {
+          ".steps.json": {
+            "sha256": "a92abc9c4342cd7ca815717a93a99b7b6e4feadb1d7b2c27297b0302ec20232e",
+            "bytes": 140183
+          },
+          ".steps.f32": {
+            "sha256": "d478f30993f4cafee23d40929e9270919129d4f4ea7b40ce35ce57ce27c551d7",
+            "bytes": 30160000
+          },
+          ".ends.f32": {
+            "sha256": "6e96412fd52d72a48c1f766509ea7ba37934a9a2bccd10c51dc1bc92ab4b1044",
+            "bytes": 24960000
+          },
+          ".f32": {
+            "sha256": "f37ec1c7eaea94d425cd7bba2c82e15e1678670d588f44583f5306339189b5b2",
+            "bytes": 12480000
+          },
+          ".exits.f32": {
+            "sha256": "7805368eff2f02fa6a2007ba89f43bffefeaf953bdef3aa580100ff85342b7f1",
+            "bytes": 74880000
+          }
+        }
+      },
+      "acquisitionIdentity": {
+        "abtrace": {
+          "sha256": "223150b939569c261ba9bcc9934035c9b38bb44ef3486942a4014dd599c7bee3",
+          "bytes": 1055200
+        },
+        "spec.json": {
+          "sha256": "0294c47a4d58b720ad04718f30390b7d360b329e64af12d7704f17acddf4aacc",
+          "bytes": 49245
+        },
+        "reference.json": {
+          "sha256": "6e191073e4a2f3721a32825607d277e22574135a3acc47c5ec7c6bc0f9304dc1",
+          "bytes": 11742
+        }
+      }
+    },
+    "target-down": {
+      "id": "target-down",
+      "seed": 2027,
+      "split": "train",
+      "files": {
+        "game": {
+          ".steps.json": {
+            "sha256": "b39ff49dc839968acd1bee480a1c773d94d2f92b9eb40c3681e618c8246e788f",
+            "bytes": 126833
+          },
+          ".steps.f32": {
+            "sha256": "8d329621a7917e5e92e5d33dee143367f275cbdf9e7ce4763a2f828314f9838d",
+            "bytes": 30392000
+          }
+        },
+        "reference": {
+          ".steps.json": {
+            "sha256": "48164a80e29cb183221f1259c85057e8829556ad54d3b8159ad864d974e9758c",
+            "bytes": 140120
+          },
+          ".steps.f32": {
+            "sha256": "3f8f23d05e90a6acb11abf86e1a9167103f475ade74248d99821880f23d905aa",
+            "bytes": 30392000
+          },
+          ".ends.f32": {
+            "sha256": "0749c4743e61a450f995cc8f5b4858703b05bb75f28c637c061264c8105cff4c",
+            "bytes": 25152000
+          },
+          ".f32": {
+            "sha256": "94fac4dad1eff60e3ef6f201ef335930a26c7bf3545557a887256ca30e82842b",
+            "bytes": 12576000
+          },
+          ".exits.f32": {
+            "sha256": "b6f842b843fd79e4975f02d8221d0ea537e7bf39a55c4a5317eb83d411e12b0e",
+            "bytes": 75456000
+          }
+        }
+      },
+      "acquisitionIdentity": {
+        "abtrace": {
+          "sha256": "223150b939569c261ba9bcc9934035c9b38bb44ef3486942a4014dd599c7bee3",
+          "bytes": 1055200
+        },
+        "spec.json": {
+          "sha256": "0294c47a4d58b720ad04718f30390b7d360b329e64af12d7704f17acddf4aacc",
+          "bytes": 49245
+        },
+        "reference.json": {
+          "sha256": "6e191073e4a2f3721a32825607d277e22574135a3acc47c5ec7c6bc0f9304dc1",
+          "bytes": 11742
+        }
+      }
+    },
+    "broad-loads": {
+      "id": "broad-loads",
+      "seed": 3037,
+      "split": "train",
+      "files": {
+        "game": {
+          ".steps.json": {
+            "sha256": "602dec3b7eacbe927f4ca703a071390354c1bbc75ee386ef8d5636439a7684f1",
+            "bytes": 127271
+          },
+          ".steps.f32": {
+            "sha256": "928b3da7ab1e4a2e1ad3c70294194987d0a90451dd2c3b651752e1b94d6cafd4",
+            "bytes": 39324000
+          }
+        },
+        "reference": {
+          ".steps.json": {
+            "sha256": "da7153ec74662dd7832f5a533404a09ba58e6e988c84f7072bbb0fe861086b66",
+            "bytes": 140558
+          },
+          ".steps.f32": {
+            "sha256": "1b277720622383c5f62f36a9cd6accacb3c6e2f57a6e721313d18d6687d86827",
+            "bytes": 39324000
+          },
+          ".ends.f32": {
+            "sha256": "d01356e5469ba6b351ea7b5e959ff38e8181d97f171854645088d807555726f9",
+            "bytes": 32544000
+          },
+          ".f32": {
+            "sha256": "1fd81e7b0f269dd00d5f156b81b6d4fa6bcd5f808267d07a999df463b0ec33ea",
+            "bytes": 16272000
+          },
+          ".exits.f32": {
+            "sha256": "a50a6dfc8fc8c991203972e76fa9594635b312ab66c3a7a7687cc6f4992fb6a8",
+            "bytes": 97632000
+          }
+        }
+      },
+      "acquisitionIdentity": {
+        "abtrace": {
+          "sha256": "223150b939569c261ba9bcc9934035c9b38bb44ef3486942a4014dd599c7bee3",
+          "bytes": 1055200
+        },
+        "spec.json": {
+          "sha256": "0294c47a4d58b720ad04718f30390b7d360b329e64af12d7704f17acddf4aacc",
+          "bytes": 49245
+        },
+        "reference.json": {
+          "sha256": "6e191073e4a2f3721a32825607d277e22574135a3acc47c5ec7c6bc0f9304dc1",
+          "bytes": 11742
+        }
+      }
+    },
+    "target-repeat": {
+      "id": "target-repeat",
+      "seed": 4051,
+      "split": "train",
+      "files": {
+        "game": {
+          ".steps.json": {
+            "sha256": "21862c71f62ecde2bb09132f1822c8c09996c7363d1be3fbbacc6140d3c4aaaf",
+            "bytes": 126896
+          },
+          ".steps.f32": {
+            "sha256": "122fcf75538e13eb1976794305ed2e05a63fff4f8ba14c96fa2e20f86dfbf530",
+            "bytes": 30160000
+          }
+        },
+        "reference": {
+          ".steps.json": {
+            "sha256": "be1398477b6b872d39ac2a3d1040f8f66c1d11689256402d2b4a030ea65554f2",
+            "bytes": 140183
+          },
+          ".steps.f32": {
+            "sha256": "e1780c60e1ef226d8ab7e65d9edd0a632376768c7e4b868bd76ecc7a3e18de0a",
+            "bytes": 30160000
+          },
+          ".ends.f32": {
+            "sha256": "c0f0a8dd37d85853ff4ebf71b8fe035ad4b126a5b5c8f296bb0676da7192c7c9",
+            "bytes": 24960000
+          },
+          ".f32": {
+            "sha256": "9b9a1738a6555329722757d7a40cf6ed74036b1898424aaf033deca058e3da9a",
+            "bytes": 12480000
+          },
+          ".exits.f32": {
+            "sha256": "4c118f894eed2e5ca47ea7a3c9d386f9008ec1d5a53f1461196e2609dfecafd4",
+            "bytes": 74880000
+          }
+        }
+      },
+      "acquisitionIdentity": {
+        "abtrace": {
+          "sha256": "223150b939569c261ba9bcc9934035c9b38bb44ef3486942a4014dd599c7bee3",
+          "bytes": 1055200
+        },
+        "spec.json": {
+          "sha256": "0294c47a4d58b720ad04718f30390b7d360b329e64af12d7704f17acddf4aacc",
+          "bytes": 49245
+        },
+        "reference.json": {
+          "sha256": "6e191073e4a2f3721a32825607d277e22574135a3acc47c5ec7c6bc0f9304dc1",
+          "bytes": 11742
+        }
+      }
+    },
+    "validation-original": {
+      "id": "validation-original",
+      "seed": 73,
+      "split": "validation",
+      "files": {
+        "game": {
+          ".steps.json": {
+            "sha256": "92ad58266f77eed04daac83ba367bd6799b7db95ac3325ad325f32fac82a6ab5",
+            "bytes": 126523
+          },
+          ".steps.f32": {
+            "sha256": "af745c1d9a197a4da87d3edb97dc6d076cce36c34e953f962c1dba6937f4a411",
+            "bytes": 19604000
+          }
+        },
+        "reference": {
+          ".steps.json": {
+            "sha256": "c3f001ce1ccf70e01be3236a36e8f10d17ae69060dc011de4172e5907795567e",
+            "bytes": 139810
+          },
+          ".steps.f32": {
+            "sha256": "8bd749f1bea2897f1fc0e600f822fbbfae882beafc892ba59d8393caac28cb09",
+            "bytes": 19604000
+          },
+          ".ends.f32": {
+            "sha256": "82b7201318111f9e14137e4efba7024c05d53051cac138e853655af09dd37466",
+            "bytes": 16224000
+          },
+          ".f32": {
+            "sha256": "46f65e4da9c37b99292c16df6326867f2569c473eb1e4780bedd8c725070f64d",
+            "bytes": 8112000
+          },
+          ".exits.f32": {
+            "sha256": "770ff0b0ca803c23bc51bf93f890a785f63a69ddfc339a357e5e3522a69b9b54",
+            "bytes": 48672000
+          }
+        }
+      },
+      "acquisitionIdentity": {
+        "abtrace": {
+          "sha256": "223150b939569c261ba9bcc9934035c9b38bb44ef3486942a4014dd599c7bee3",
+          "bytes": 1055200
+        },
+        "spec.json": {
+          "sha256": "0294c47a4d58b720ad04718f30390b7d360b329e64af12d7704f17acddf4aacc",
+          "bytes": 49245
+        },
+        "reference.json": {
+          "sha256": "6e191073e4a2f3721a32825607d277e22574135a3acc47c5ec7c6bc0f9304dc1",
+          "bytes": 11742
+        }
+      }
+    },
+    "validation-nearby": {
+      "id": "validation-nearby",
+      "seed": 7717,
+      "split": "validation",
+      "files": {
+        "game": {
+          ".steps.json": {
+            "sha256": "7bc0ffd25582086f08721e84fc357f7a89b4d0dd7bff0e0c34c4a2d1985e57eb",
+            "bytes": 126718
+          },
+          ".steps.f32": {
+            "sha256": "01d751665f2191981aea5095c097548e366a2cf1b6255c1dea3eb8ad05d4e4cd",
+            "bytes": 24174400
+          }
+        },
+        "reference": {
+          ".steps.json": {
+            "sha256": "9f7955044dbe50eb3d069454c9af4fd207176234e4da7adfe9f23ef9234c6563",
+            "bytes": 140005
+          },
+          ".steps.f32": {
+            "sha256": "c3adcbddefdb8f7c2432d4fa42da0dcc270f186d78dbf67f709cf5a7e6e17e48",
+            "bytes": 24174400
+          },
+          ".ends.f32": {
+            "sha256": "1b7211477f835ec86ea36a9084a65249ad87d2a2470327dca99740ec4c09a615",
+            "bytes": 20006400
+          },
+          ".f32": {
+            "sha256": "d44b3c87a1682e278d0c7ee1a75ead3ac89485791f075688ee73a5cb57069faf",
+            "bytes": 10003200
+          },
+          ".exits.f32": {
+            "sha256": "1fb0da977ad363e2186dd4f22432294a4c59070c3bbcf0d800a974575d2e395e",
+            "bytes": 60019200
+          }
+        }
+      },
+      "acquisitionIdentity": {
+        "abtrace": {
+          "sha256": "223150b939569c261ba9bcc9934035c9b38bb44ef3486942a4014dd599c7bee3",
+          "bytes": 1055200
+        },
+        "spec.json": {
+          "sha256": "0294c47a4d58b720ad04718f30390b7d360b329e64af12d7704f17acddf4aacc",
+          "bytes": 49245
+        },
+        "reference.json": {
+          "sha256": "6e191073e4a2f3721a32825607d277e22574135a3acc47c5ec7c6bc0f9304dc1",
+          "bytes": 11742
+        }
+      }
+    },
+    "test-reapply": {
+      "id": "test-reapply",
+      "seed": 9901,
+      "split": "test",
+      "files": {
+        "game": {
+          ".steps.json": {
+            "sha256": "bbb77c9f34018d0ef288e92660f6e4c37f0681994d64fed9e1fdeb72bae84833",
+            "bytes": 126651
+          },
+          ".steps.f32": {
+            "sha256": "8749ec9f93e5b66e8593fc47c709032325ba982e6fc3772082e067518ba5dad1",
+            "bytes": 24476000
+          }
+        },
+        "reference": {
+          ".steps.json": {
+            "sha256": "182e1569ec16461b79fe6cea1872479c894ec073f38720e1fba95300afe1eaef",
+            "bytes": 139938
+          },
+          ".steps.f32": {
+            "sha256": "b63151c293ce0dabb1250176c399cdc98947e76dbf02cc35831b096cc4ad6ddd",
+            "bytes": 24476000
+          },
+          ".ends.f32": {
+            "sha256": "98c257e9e4760eaf4c9742009c30ce7c4215e23d7e1d695d36b9c3d24163fdd4",
+            "bytes": 20256000
+          },
+          ".f32": {
+            "sha256": "05a4279744857f130e0d79dd6d7a36ee6c74af5cde2acf8a52c0861d696a1f36",
+            "bytes": 10128000
+          },
+          ".exits.f32": {
+            "sha256": "0ef3653834a5fba0d537cff0e731f2c8d5b8df5de8a3945fbcbb71cba4e62ae8",
+            "bytes": 60768000
+          }
+        }
+      },
+      "acquisitionIdentity": {
+        "abtrace": {
+          "sha256": "223150b939569c261ba9bcc9934035c9b38bb44ef3486942a4014dd599c7bee3",
+          "bytes": 1055200
+        },
+        "spec.json": {
+          "sha256": "0294c47a4d58b720ad04718f30390b7d360b329e64af12d7704f17acddf4aacc",
+          "bytes": 49245
+        },
+        "reference.json": {
+          "sha256": "6e191073e4a2f3721a32825607d277e22574135a3acc47c5ec7c6bc0f9304dc1",
+          "bytes": 11742
+        }
+      }
+    },
+    "test-broad": {
+      "id": "test-broad",
+      "seed": 9923,
+      "split": "test",
+      "files": {
+        "game": {
+          ".steps.json": {
+            "sha256": "dda0722418f41b78183471fb6f85c9a6686b5e193af23ea6ff8e8c8908845b23",
+            "bytes": 126714
+          },
+          ".steps.f32": {
+            "sha256": "301f1781fea47489d60d62f47cf5e64bad00a0fb8810d360a2a485aa0007aef5",
+            "bytes": 26053600
+          }
+        },
+        "reference": {
+          ".steps.json": {
+            "sha256": "ae2e0f32ef0c8a21c77cd547e926a7f7107be4678f5f1386f8ad653a9f00b98c",
+            "bytes": 140001
+          },
+          ".steps.f32": {
+            "sha256": "1ed9a70e5e4552561b8fa56df19c39f25f1c3a208c8d390dab11e3880646079f",
+            "bytes": 26053600
+          },
+          ".ends.f32": {
+            "sha256": "5cd1c72276fcab91e57937e9fa56a17bb2f542c039b268422ac08234c87aa7ea",
+            "bytes": 21561600
+          },
+          ".f32": {
+            "sha256": "74cd8326643c5f26f24189bc818c81721325ce31001964cc6d1ed211941d7439",
+            "bytes": 10780800
+          },
+          ".exits.f32": {
+            "sha256": "f878bdf9eacae7299a72f48a668acde151cec13a58abc5ab2a89454cd235eb05",
+            "bytes": 64684800
+          }
+        }
+      },
+      "acquisitionIdentity": {
+        "abtrace": {
+          "sha256": "223150b939569c261ba9bcc9934035c9b38bb44ef3486942a4014dd599c7bee3",
+          "bytes": 1055200
+        },
+        "spec.json": {
+          "sha256": "0294c47a4d58b720ad04718f30390b7d360b329e64af12d7704f17acddf4aacc",
+          "bytes": 49245
+        },
+        "reference.json": {
+          "sha256": "6e191073e4a2f3721a32825607d277e22574135a3acc47c5ec7c6bc0f9304dc1",
+          "bytes": 11742
+        }
+      }
+    },
+    "diagnostic-original-test": {
+      "id": "diagnostic-original-test",
+      "seed": 239,
+      "split": "diagnostic",
+      "files": {
+        "game": {
+          ".steps.json": {
+            "sha256": "16e863d03105d12c6ce23e202f82e358392c896beb469b07f3fb63b21dc57df9",
+            "bytes": 126583
+          },
+          ".steps.f32": {
+            "sha256": "d8e0af16ee9bd95d95c8d768e4c8a62cdfb0158022ef55e37369d4e4357f6c8e",
+            "bytes": 28072000
+          }
+        },
+        "reference": {
+          ".steps.json": {
+            "sha256": "8f17f5986c4d2580ec42595161b47ec38b87fcac58f6c46306f4b0a39a355dd9",
+            "bytes": 139870
+          },
+          ".steps.f32": {
+            "sha256": "b4689b9d65b7f24b7c47928c1fa77fbacf9667586fa372fe29432325cdf87cd4",
+            "bytes": 28072000
+          },
+          ".ends.f32": {
+            "sha256": "b349f3bd8c1a3f538eb424898f3437074cd6d466a3c9c1c7aa24d78a42a1b16c",
+            "bytes": 23232000
+          },
+          ".f32": {
+            "sha256": "a0f44868e84c7c95a4392b86d1dfd3e02080d6b816f6c5b2ee33bb7c17fa7ea4",
+            "bytes": 11616000
+          },
+          ".exits.f32": {
+            "sha256": "5aae09f5217c53b2d3053d726a85e0f683c7b904c1b0d8fb14685f01e8eb445b",
+            "bytes": 69696000
+          }
+        }
+      },
+      "acquisitionIdentity": {
+        "abtrace": {
+          "sha256": "223150b939569c261ba9bcc9934035c9b38bb44ef3486942a4014dd599c7bee3",
+          "bytes": 1055200
+        },
+        "spec.json": {
+          "sha256": "0294c47a4d58b720ad04718f30390b7d360b329e64af12d7704f17acddf4aacc",
+          "bytes": 49245
+        },
+        "reference.json": {
+          "sha256": "6e191073e4a2f3721a32825607d277e22574135a3acc47c5ec7c6bc0f9304dc1",
+          "bytes": 11742
+        }
+      }
+    },
+    "diagnostic-known-failure": {
+      "id": "diagnostic-known-failure",
+      "seed": 6837,
+      "split": "diagnostic",
+      "files": {
+        "game": {
+          ".steps.json": {
+            "sha256": "1cb1a754c3c6b152505e963b131e9ebb0763f235f67a7fc27b9e5e83cd0a2086",
+            "bytes": 126675
+          },
+          ".steps.f32": {
+            "sha256": "0716edfeec78f7ad48f1a7ff1a5c9029fccafa9e68dff969dd92963bae72ac5c",
+            "bytes": 19488000
+          }
+        },
+        "reference": {
+          ".steps.json": {
+            "sha256": "6f1a7b51015ad807c5196a7a533ba91f4ac72a77fc4210a8fe584987c89827f2",
+            "bytes": 139962
+          },
+          ".steps.f32": {
+            "sha256": "75501830c487b9590982e33bdf0f36456f9f8fc2a152e528e7d460ef22e63530",
+            "bytes": 19488000
+          },
+          ".ends.f32": {
+            "sha256": "71e3bd886e8b193eda4faaf94502a2497d267191fad3887b050b224e9fe8cfba",
+            "bytes": 16128000
+          },
+          ".f32": {
+            "sha256": "36b625ca0010b88eaf07b14b64ca9e3043410407d7df707a5f6c889d14cbfc45",
+            "bytes": 8064000
+          },
+          ".exits.f32": {
+            "sha256": "cb80953c442209054837a6ffa2bdcb3606530546f3cdaa143ceafe427533575a",
+            "bytes": 48384000
+          }
+        }
+      },
+      "acquisitionIdentity": {
+        "abtrace": {
+          "sha256": "223150b939569c261ba9bcc9934035c9b38bb44ef3486942a4014dd599c7bee3",
+          "bytes": 1055200
+        },
+        "spec.json": {
+          "sha256": "0294c47a4d58b720ad04718f30390b7d360b329e64af12d7704f17acddf4aacc",
+          "bytes": 49245
+        },
+        "reference.json": {
+          "sha256": "6e191073e4a2f3721a32825607d277e22574135a3acc47c5ec7c6bc0f9304dc1",
+          "bytes": 11742
+        }
+      }
+    }
+  },
+  "frozenParameterSha256": "73ba080d5982209b1e534142a2e9efa79465f75c5135efbed8ff6ca6d9f41099",
+  "selectionReportSha256": "d13622615c6f1a05f9d52bb2e13c2a35b03b53cd68a1938e0691dc9ea324c015",
+  "export": "9 significant decimal digits after f32 conversion; runtime weights bit-identical, no fitted playback gain/EQ",
+  "sha256": "38a215c1a3f2bf932709f19948b2bbdefd41eaef07297112eada9c82587b7f5b",
+  "limitations": [
+    "The broader final test retains +3.97 dB at 200-400 Hz; matching that band is not established across all conditions.",
+    "Pooled final-test median absolute band error worsens from 1.06 to 1.83 dB; higher bands are underpredicted.",
+    "Selected model uses 38.15 seconds because the pre-recorded ranking prioritized worst validation bass error; this is not proof that 38.15 seconds is globally optimal.",
+    "Pressure only; no jet, turbo, intake, bay or mechanical noise. Improved teacher agreement is not independent real-car validation.",
+    "The reference solver's documented physical and small-perturbation limitations remain."
+  ],
+  "verification": {
+    "pythonToolTests": 50,
+    "gameTests": 119,
+    "gameFailures": 0,
+    "candidateSchema": "passed against unchanged game spec",
+    "typecheck": "passed",
+    "productionBuild": "passed",
+    "note": "Existing Vite chunk-size warning remains."
+  }
+}

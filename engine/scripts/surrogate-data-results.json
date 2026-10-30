@@ -1,0 +1,249 @@
+{
+  "version": 1,
+  "status": "Full no-regression gate failed; existing game assets and selector unchanged.",
+  "question": "Does diverse training data reduce the 200-400 Hz generalization error?",
+  "availableTrainingSeconds": 81.2,
+  "selectedTrainingSeconds": 38.15,
+  "selectedStage": "targeted",
+  "architecture": {
+    "modelRate": 20000,
+    "taps": 512,
+    "damping": 1,
+    "preemphasis": 0.9,
+    "atol": 1e-07,
+    "btol": 1e-07,
+    "iterationLimit": 8000,
+    "reportWarmupSamples": 1024
+  },
+  "gates": "six fixed gates from the previously shipped retrained preview; sixteen signed-flow features, two pressure outputs",
+  "selectionRules": "surrogate-data-rules.json",
+  "selectionRulesSha256": "0ba67c7a313c9c1f326711dcb93efd73ec784487989291af6791a59b4b14ee0a",
+  "selectionUsed": "validation only; no reselection after final tests",
+  "learningCurve": [
+    {
+      "stage": "baseline",
+      "bassDb": {
+        "validation-original": 8.616291861036467,
+        "validation-nearby": 14.999249153928734
+      },
+      "worstAbsBassDb": 14.999249153928734,
+      "equalSegmentWaveScore": 0.7308642090700659,
+      "pooledWaveMse": 0.2278349054115445,
+      "medianAbsBandDb": 1.3855065928419532,
+      "worstAbsBandDb": 13.005744543663285,
+      "checks": {
+        "converged": true,
+        "segmentScoreImproves": true,
+        "globalWaveMseImproves": false,
+        "medianBandErrorImproves": false,
+        "worstBandErrorImproves": false,
+        "bassBandNotWorse": false
+      },
+      "eligible": false,
+      "modelSha256": "0e2e6eadae84052a40e1d436e4d34505febb2889f296cf68673eb2536a34d941",
+      "reportSha256": "bdaaaad0b1411c53f0d1518c43d22d3a4748eebe9baec62a47ddcf93d200bc7b",
+      "validationReportSha256": "dde8eab1fd988a3e7afeaf76dd1adca8a49382e6ef7b954fa79338dcbb1b029d",
+      "iterations": [
+        5041,
+        4880
+      ],
+      "trainingSeconds": 25.15,
+      "trainingRuns": [
+        "baseline"
+      ]
+    },
+    {
+      "stage": "targeted",
+      "bassDb": {
+        "validation-original": 0.21149295460613157,
+        "validation-nearby": 0.4367338213003036
+      },
+      "worstAbsBassDb": 0.4367338213003036,
+      "equalSegmentWaveScore": 0.6259630598026686,
+      "pooledWaveMse": 0.10027669006463316,
+      "medianAbsBandDb": 0.8791221346323606,
+      "worstAbsBandDb": 4.097991622715045,
+      "checks": {
+        "converged": true,
+        "segmentScoreImproves": true,
+        "globalWaveMseImproves": true,
+        "medianBandErrorImproves": true,
+        "worstBandErrorImproves": true,
+        "bassBandNotWorse": true
+      },
+      "eligible": true,
+      "modelSha256": "25b15400014d5cb0cb752f571b157d29eb191ab0fc0e1727eb8a1e3394e4dd64",
+      "reportSha256": "f2cab5b4fde7260b9785e8250353416530945cd03525b96203a8a4795d766d2a",
+      "validationReportSha256": "f2cab5b4fde7260b9785e8250353416530945cd03525b96203a8a4795d766d2a",
+      "iterations": [
+        4837,
+        4724
+      ],
+      "trainingSeconds": 38.15,
+      "trainingRuns": [
+        "baseline",
+        "target-up"
+      ]
+    },
+    {
+      "stage": "coverage",
+      "bassDb": {
+        "validation-original": -0.4873580278337026,
+        "validation-nearby": -0.021078119666694956
+      },
+      "worstAbsBassDb": 0.4873580278337026,
+      "equalSegmentWaveScore": 0.4750659647555945,
+      "pooledWaveMse": 0.09411399564528859,
+      "medianAbsBandDb": 0.6702928105506833,
+      "worstAbsBandDb": 4.428520309939106,
+      "checks": {
+        "converged": true,
+        "segmentScoreImproves": true,
+        "globalWaveMseImproves": true,
+        "medianBandErrorImproves": true,
+        "worstBandErrorImproves": true,
+        "bassBandNotWorse": true
+      },
+      "eligible": true,
+      "modelSha256": "2e51ea856ac8cd91eb1035c03ad0fa609017f1e8bb0182a28ff0110c700a5fb1",
+      "reportSha256": "8a7b3f3b806614f22818f94b3eb74debee64c4fdd92f5a56560b4d7f3bab915f",
+      "validationReportSha256": "8a7b3f3b806614f22818f94b3eb74debee64c4fdd92f5a56560b4d7f3bab915f",
+      "iterations": [
+        4645,
+        4590
+      ],
+      "trainingSeconds": 68.2,
+      "trainingRuns": [
+        "baseline",
+        "target-up",
+        "target-down",
+        "broad-loads"
+      ]
+    },
+    {
+      "stage": "replicated",
+      "bassDb": {
+        "validation-original": -0.525397217710727,
+        "validation-nearby": -0.06135005447551785
+      },
+      "worstAbsBassDb": 0.525397217710727,
+      "equalSegmentWaveScore": 0.48078775485329506,
+      "pooledWaveMse": 0.0910001962722013,
+      "medianAbsBandDb": 0.6293109641378412,
+      "worstAbsBandDb": 4.651426082792272,
+      "checks": {
+        "converged": true,
+        "segmentScoreImproves": true,
+        "globalWaveMseImproves": true,
+        "medianBandErrorImproves": true,
+        "worstBandErrorImproves": true,
+        "bassBandNotWorse": true
+      },
+      "eligible": true,
+      "modelSha256": "9683f57166963b26ae051beec281c3b5b9e5b824f00664eb6611f80612d49b17",
+      "reportSha256": "bbab7521498d53ad144832b0e09de161fb1f2f1d5551242063e4babeab2c3222",
+      "validationReportSha256": "bbab7521498d53ad144832b0e09de161fb1f2f1d5551242063e4babeab2c3222",
+      "iterations": [
+        4587,
+        4531
+      ],
+      "trainingSeconds": 81.2,
+      "trainingRuns": [
+        "baseline",
+        "target-up",
+        "target-down",
+        "broad-loads",
+        "target-repeat"
+      ]
+    }
+  ],
+  "previousPreviewValidation": {
+    "bassDb": {
+      "validation-original": 5.232180393224148,
+      "validation-nearby": 11.377933181744186
+    },
+    "worstAbsBassDb": 11.377933181744186,
+    "equalSegmentWaveScore": 0.7491156127736996,
+    "pooledWaveMse": 0.1883763011175701,
+    "medianAbsBandDb": 1.1876380110128983,
+    "worstAbsBandDb": 9.426641505109547
+  },
+  "finalTestSeconds": 21.78,
+  "finalTests": {
+    "checks": {
+      "segmentScoreImproves": true,
+      "globalWaveMseImproves": true,
+      "medianBandErrorImproves": false,
+      "worstBandErrorImproves": true,
+      "bassBandNotWorse": true
+    },
+    "passes": false,
+    "results": {
+      "final-preview": {
+        "waveMse": 0.24798735729320823,
+        "correlation": 0.8675391673040734,
+        "segmentScore": 0.7420162703830809,
+        "medianBand": 1.064639287060351,
+        "worstBand": 11.382760186688278,
+        "bass": {
+          "test-reapply": 12.02248759381794,
+          "test-broad": 10.621200385994571
+        }
+      },
+      "final-selected": {
+        "waveMse": 0.12330928120044155,
+        "correlation": 0.93686938840929,
+        "segmentScore": 0.7346030127264834,
+        "medianBand": 1.834504606358653,
+        "worstBand": 3.0754162127501843,
+        "bass": {
+          "test-reapply": 0.7793288386045948,
+          "test-broad": 3.9665820480524934
+        }
+      }
+    },
+    "reselectionAfterTest": false
+  },
+  "runtimeAgreement": {
+    "maxAbsPa": 1.896905715742525e-05,
+    "relativeRms": 9.86561987483541e-07,
+    "finite": true
+  },
+  "runtimeStream": {
+    "nativeFrames": 105500,
+    "audioFrames": 465097,
+    "inputRate": 10000,
+    "outputRate": 44100,
+    "inputSeconds": 10.55,
+    "outputSeconds": 10.54641723356009,
+    "medianMs": 133.14387499999998,
+    "streamPercentRealtime": 1.2620272511848338,
+    "minMs": 128.709042,
+    "maxMs": 166.50920899999994,
+    "includes": "JS packet copy, model, input and output resampling; excludes model load, loudness and directivity"
+  },
+  "tests": {
+    "pythonToolTests": 50,
+    "failed": 0
+  },
+  "candidate": "public/audio/surrogate/pista-coverage-candidate.json",
+  "candidateSha256": "38a215c1a3f2bf932709f19948b2bbdefd41eaef07297112eada9c82587b7f5b",
+  "candidateWiredIntoGame": false,
+  "previousPreviewSha256": "555036c99f396a37a59e19f4c2b41711696be5c8929d6c980309d7e63d407a65",
+  "limitations": [
+    "The broader final test retains +3.97 dB at 200-400 Hz; matching that band is not established across all conditions.",
+    "Pooled final-test median absolute band error worsens from 1.06 to 1.83 dB; higher bands are underpredicted.",
+    "Selected model uses 38.15 seconds because the pre-recorded ranking prioritized worst validation bass error; this is not proof that 38.15 seconds is globally optimal.",
+    "Pressure only; no jet, turbo, intake, bay or mechanical noise. Improved teacher agreement is not independent real-car validation.",
+    "The reference solver's documented physical and small-perturbation limitations remain."
+  ],
+  "verification": {
+    "pythonToolTests": 50,
+    "gameTests": 119,
+    "gameFailures": 0,
+    "candidateSchema": "passed against unchanged game spec",
+    "typecheck": "passed",
+    "productionBuild": "passed",
+    "note": "Existing Vite chunk-size warning remains."
+  }
+}
