@@ -1,13 +1,13 @@
 import { SURROGATE_GLOBALS, type EngineSpec } from "../sim/engineSpec";
 
-/** Remove only the experimental audio selector, retaining the original voice and physics. */
+/** Remove only the learned exhaust configuration, retaining the original voice and physics. */
 export function originalExhaustSpec(spec: EngineSpec): EngineSpec {
   const out = structuredClone(spec);
   delete out.audio.surrogate;
   return out;
 }
 
-/** Check the pilot's interface here; Rust validates every coefficient and kernel shape. */
+/** Check the model's interface here; Rust validates every coefficient and kernel shape. */
 export function validateSurrogateModel(
   bytes: ArrayBuffer,
   spec: EngineSpec,
@@ -21,16 +21,16 @@ export function validateSurrogateModel(
     throw new Error("exhaust model cylinder count does not match the engine");
   if (!Array.isArray(m.widths) || m.widths.length !== SURROGATE_GLOBALS)
     throw new Error("exhaust model must use the five live engine controls");
-  // The shipped pilot predicts the two radiated exhaust pressures, not jet noise or
+  // The shipped model predicts the two radiated exhaust pressures, not jet noise or
   // teacher-only fluid state. Never accidentally play another model's raw outputs.
   if (
     !Array.isArray(m.kernels) ||
     !Array.isArray(m.kernels[0]) ||
     m.kernels[0].length !== 2
   )
-    throw new Error("exhaust pilot must predict two pressure outputs");
+    throw new Error("exhaust model must predict two pressure outputs");
   if (m.rate !== 20000)
-    throw new Error("exhaust pilot must run at its trained 20 kHz rate");
+    throw new Error("exhaust model must run at its trained 20 kHz rate");
   // New models declare their native training rate. Do not silently recreate the old
   // train/runtime mismatch if engine settings change; legacy pilots lack this metadata.
   if (m.nativeRate !== undefined && m.nativeRate !== spec.simulationFrequency)
@@ -44,7 +44,7 @@ export type ModelRequest = (
   options?: RequestInit,
 ) => Promise<Response>;
 
-/** Optional asset: never requested for the original exhaust or for the other cars. */
+/** Requested only for engines configured with learned exhaust, never for fallback. */
 export async function fetchSurrogateModel(
   spec: EngineSpec,
   base: string,

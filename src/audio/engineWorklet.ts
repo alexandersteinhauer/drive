@@ -1,5 +1,5 @@
 // Simulated engine channels become sound on the audio thread: the original voice,
-// engine-sim's synthesizer, or the opt-in learned exhaust pilot. Never mix their sources.
+// engine-sim's synthesizer, or the learned exhaust. Never mix their sources.
 import { EngineModule } from "../sim/engineSim";
 import { Loudness } from "./loudness";
 

@@ -23,7 +23,6 @@ import {
   ferrari488Pista,
   vwBeetle,
   withImpulseExhaust,
-  withPistaSurrogateExhaust,
   type CarConfig,
 } from "./sim/config";
 import { RoadView } from "./roadView";
@@ -35,11 +34,6 @@ import { CrashCard, Hud, type AssistMode } from "./hud";
 import { PauseMenu } from "./pauseMenu";
 import { Stats } from "./stats";
 import { EngineSound } from "./audio/engineSound";
-import {
-  pistaExhaustMode,
-  pistaExhaustStatus,
-  pistaExhaustUrl,
-} from "./audio/exhaustOptions";
 import { loadEngineModule } from "./sim/engineSim";
 import type { EngineSpec } from "./sim/engineSpec";
 import { SimulatedEngine } from "./sim/powerplant";
@@ -156,14 +150,10 @@ let carSun = 1;
 let camSide = 0;
 
 /**
- * ?exhaust=impulse: the engines heard through engine-sim's exhaust impulse response
- * instead of the acoustics computed from each car's exhaust, to compare the two.
+ * ?exhaust=impulse: compare the Beetle's computed acoustics with engine-sim's
+ * exhaust impulse response. The Pista always uses its learned exhaust.
  */
 const gameUrl = new URL(location.href);
-const pistaExhaust = pistaExhaustMode(
-  gameUrl,
-  localStorage.getItem("pistaExhaust"),
-);
 const exhaust =
   gameUrl.searchParams.get("exhaust") === "impulse"
     ? withImpulseExhaust
@@ -185,19 +175,14 @@ const models: {
     headlights: { x: 0.5, y: 0.78, z: -1.63 },
   },
   {
-    config:
-      pistaExhaust === "original"
-        ? exhaust(ferrari488Pista)
-        : withPistaSurrogateExhaust(
-            pistaExhaust === "surrogate-retrained" ? "retrained" : "pilot",
-          ),
+    config: ferrari488Pista,
     url: "models/ferrari-488-pista.glb",
     // At the cover, 0.16 m ahead of the projector lens: further in, the beam would light the
     // bumper below from inside.
     headlights: { x: 0.7, y: 0.57, z: -2.2 },
   },
 ];
-// Shareable direct start, especially useful for comparing the optional Pista exhaust.
+// Shareable direct start in a selected car.
 let model =
   gameUrl.searchParams.get("car") === "pista"
     ? 2
@@ -327,11 +312,8 @@ function loadEngineSound(): void {
     s.onBackendChange = (surrogate) => {
       if (car !== current) return;
       engine.sim.surrogateAudio = surrogate;
-      menu.setPistaExhaustStatus(pistaExhaustStatus(pistaExhaust, surrogate));
     };
     s.onWarning = reportAudioWarning;
-    if (spec.audio.surrogate)
-      menu.setPistaExhaustStatus(pistaExhaustStatus(pistaExhaust, s.surrogate));
     if (s.warning) reportAudioWarning(s.warning);
     if (audioInteracted) s.resume();
   });
@@ -345,7 +327,6 @@ for (const type of ["keydown", "pointerdown"])
   });
 let audioNotice: HTMLElement | null = null;
 function reportAudioWarning(message: string): void {
-  menu.setPistaExhaustStatus(message);
   audioNotice?.remove();
   const notice = document.createElement("div");
   notice.setAttribute("role", "status");
@@ -423,14 +404,6 @@ const menu = new PauseMenu(
   },
   // Paused, no frames are drawn: redraw once to show a new setting.
   () => render(),
-  {
-    mode: pistaExhaust,
-    status: pistaExhaustStatus(pistaExhaust),
-    onChange: (mode) => {
-      localStorage.setItem("pistaExhaust", mode);
-      location.assign(pistaExhaustUrl(new URL(location.href), mode));
-    },
-  },
 );
 loadEngineSound();
 menu.enabled = false;

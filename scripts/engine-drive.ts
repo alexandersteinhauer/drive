@@ -1,12 +1,13 @@
 // Drives a car on flat ground with its simulated engine, as the game does, and writes what
 // it sounds like: idle, a launch through the gears, lifting off, cruising, braking.
 //   bun scripts/engine-drive.ts [out.wav] [beetle|pista]
-// RECORDED=1: through engine-sim's exhaust impulse response instead of the computed
-// acoustics, as the game plays it with ?exhaust=impulse.
+// The Pista uses its default learned exhaust. RECORDED=1 renders the original voice
+// through engine-sim's impulse response as a diagnostic (not a Pista game option).
 // Prints the engine, gearbox, clutch and the sound's level (before the loudness stage)
 // every 0.25 s.
 import { writeFileSync } from "node:fs";
 import { Loudness } from "../src/audio/loudness";
+import { validateSurrogateModel } from "../src/audio/surrogateModel";
 import { Car } from "../src/sim/car";
 import {
   ferrari488Pista,
@@ -48,15 +49,55 @@ const engine = car.powerplant as SimulatedEngine;
 engine.sim.collectAudio = true;
 const spec = structuredClone(engine.cfg.spec);
 
-// The synthesizer as the worklet runs it: the voice (engine/src/voice.rs), or engine-sim's.
+// The same backend and stream format as the worklet, without browser audio APIs.
 const audio = await EngineModule.load(await wasm());
 const x = audio.exports;
-const json = audio.write(new TextEncoder().encode(JSON.stringify(spec)));
+const learned = spec.audio.surrogate;
 const voice = !!spec.audio.voice;
-const synth = voice
-  ? x.voice_for_engine(json.ptr, json.len)
-  : x.synth_for_engine(json.ptr, json.len);
-if (!spec.audio.acoustics)
+let synth: number;
+if (learned) {
+  const bytes = await Bun.file(`public/${learned.model}`).arrayBuffer();
+  validateSurrogateModel(bytes, spec);
+  const model = audio.write(new Uint8Array(bytes));
+  try {
+    synth = x.surrogate_voice_new(
+      model.ptr,
+      model.len,
+      engine.sim.frequency,
+      RATE,
+      learned.fullScale,
+    );
+  } finally {
+    audio.free(model);
+  }
+} else {
+  const json = audio.write(new TextEncoder().encode(JSON.stringify(spec)));
+  try {
+    synth = voice
+      ? x.voice_for_engine(json.ptr, json.len)
+      : x.synth_for_engine(json.ptr, json.len);
+  } finally {
+    audio.free(json);
+  }
+}
+if (!synth) throw new Error("engine audio backend rejected");
+engine.sim.surrogateAudio = !!learned;
+const write = learned
+  ? x.surrogate_voice_write
+  : voice
+    ? x.voice_write
+    : x.synth_write;
+const available = learned
+  ? x.surrogate_voice_input_available
+  : voice
+    ? x.voice_input_available
+    : x.synth_input_available;
+const render = learned
+  ? x.surrogate_voice_render
+  : voice
+    ? x.voice_render
+    : x.synth_render;
+if (!learned && !spec.audio.acoustics)
   for (const [i, exhaust] of spec.exhausts.entries()) {
     const wav = audio.write(
       new Uint8Array(
@@ -73,7 +114,7 @@ if (!spec.audio.acoustics)
       exhaust.impulseVolume,
     );
   }
-if (!voice) x.synth_set_gain(synth, 0.003);
+if (!learned && !voice) x.synth_set_gain(synth, 0.003);
 const channels = audioChannels(spec);
 const loudness = new Loudness(RATE);
 const pcm: number[] = [];
@@ -104,10 +145,12 @@ while (t < total) {
   const samples = new Float32Array(steps * channels);
   perChannel.forEach((c, k) => samples.set(c, k * steps));
   const block = audio.write(new Uint8Array(samples.buffer));
-  (voice ? x.voice_write : x.synth_write)(synth, block.ptr, steps, channels);
+  write(synth, block.ptr, steps, channels);
   audio.free(block);
-  const n = (voice ? x.voice_input_available : x.synth_input_available)(synth);
-  const ptr = (voice ? x.voice_render : x.synth_render)(synth, n);
+  const n = available(synth);
+  const ptr = render(synth, n);
+  if (learned && x.surrogate_voice_failed(synth))
+    throw new Error("learned exhaust failed");
   const rendered = audio.f32(ptr, x.synth_rendered()).slice();
   for (const v of rendered) {
     power += v * v;
@@ -130,6 +173,9 @@ while (t < total) {
     nextLog += 0.25;
   }
 }
+
+(learned ? x.surrogate_voice_free : voice ? x.voice_free : x.synth_free)(synth);
+engine.sim.dispose();
 
 const data = Buffer.alloc(pcm.length * 2);
 pcm.forEach((v, i) =>

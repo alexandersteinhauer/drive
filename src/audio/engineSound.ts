@@ -17,7 +17,7 @@ async function fetchBytes(url: string): Promise<ArrayBuffer> {
   return response.arrayBuffer();
 }
 
-/** Engine audio, with a fresh original-voice worklet if the optional learned pilot fails. */
+/** Engine audio, with a fresh original-voice worklet if the learned exhaust fails. */
 export class EngineSound {
   stats = { buffered: 0, load: 0 };
   /** Called before any differently formatted input can reach the replacement node. */

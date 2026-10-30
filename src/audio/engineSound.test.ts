@@ -9,7 +9,7 @@ import {
   spyOn,
   test,
 } from "bun:test";
-import { withPistaSurrogateExhaust } from "../sim/config";
+import { ferrari488Pista } from "../sim/config";
 import type { EngineSpec } from "../sim/engineSpec";
 import type {
   EngineInput,
@@ -147,7 +147,7 @@ beforeEach(() => {
     },
     fetch: async (url: string) => {
       requests.push(url);
-      if (url.includes("pista-pilot")) {
+      if (url.includes("pista-coverage-candidate")) {
         if (missing) return new Response("missing", { status: 404 });
         return Response.json({
           cylinders: 8,
@@ -171,7 +171,7 @@ afterEach(() => {
 afterAll(() => mock.restore());
 
 function spec(): EngineSpec {
-  const cfg = withPistaSurrogateExhaust();
+  const cfg = structuredClone(ferrari488Pista);
   if (
     cfg.powertrain.type !== "combustion" ||
     cfg.powertrain.engine.type !== "simulated"
@@ -187,11 +187,22 @@ async function create(engine = spec()) {
 const samples = (channels: number) =>
   Array.from({ length: channels }, () => new Float32Array(32));
 
-describe("optional learned exhaust fallback lifecycle", () => {
+describe("default learned exhaust fallback lifecycle", () => {
+  test("default Pista requests the coverage candidate and initializes learned audio", async () => {
+    const sound = await create();
+    expect(sound.surrogate).toBe(true);
+    expect(requests.filter((url) => url.includes("/surrogate/"))).toEqual([
+      `${import.meta.env.BASE_URL}audio/surrogate/pista-coverage-candidate.json`,
+    ]);
+    expect(FakeNode.all[0]?.options.processorOptions.channels).toBe(13);
+    expect(sound.warning).toBeNull();
+  });
   test("original mode creates no model request or surrogate worklet", async () => {
     const sound = await create(originalExhaustSpec(spec()));
     expect(sound.surrogate).toBe(false);
-    expect(requests.some((url) => url.includes("pista-pilot"))).toBe(false);
+    expect(
+      requests.some((url) => url.includes("pista-coverage-candidate")),
+    ).toBe(false);
     expect(FakeNode.all[0]?.options.processorOptions.model).toBeUndefined();
     expect(sound.warning).toBeNull();
   });

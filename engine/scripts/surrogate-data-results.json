@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "status": "Full no-regression gate failed; user explicitly selected the candidate for Retrained (preview). Measurements and original/pilot modes are unchanged.",
+  "status": "User-selected Pista default despite the failed median spectral-error gate. Experimental pressure-only model; original voice remains a failure fallback, and prior model weights remain archived.",
   "question": "Does diverse training data reduce the 200-400 Hz generalization error?",
   "availableTrainingSeconds": 81.2,
   "selectedTrainingSeconds": 38.15,
@@ -244,13 +244,25 @@
     "candidateSchema": "passed against unchanged game physics and active retrained model route",
     "typecheck": "passed",
     "productionBuild": "passed",
-    "note": "Existing Vite chunk-size warning remains.",
+    "note": "Verification recorded for the prior preview deployment. Existing Vite chunk-size warning remains.",
     "deploymentTests": "passed: 32 audio tests, full game suite, typecheck, build, and dev-server model/route hashes"
   },
   "deployment": {
-    "mode": "surrogate-retrained",
+    "mode": "pista-default",
     "requestedByUser": true,
     "automaticPromotion": false,
-    "spectralGatePassed": false
+    "spectralGatePassed": false,
+    "selectableAlternatives": false,
+    "failureFallback": "original voice"
+  },
+  "defaultDeploymentVerification": {
+    "audioTests": 27,
+    "audioFailures": 0,
+    "typecheck": "passed",
+    "productionBuild": "passed; existing Vite chunk-size warning",
+    "browser": "passed: default and legacy original URL load the coverage candidate; no Pista exhaust section or selector remains",
+    "configuration": "default Pista config exactly matches the previously selected candidate; model weights and calibration unchanged",
+    "offlineRenderer": "52-second default and original-diagnostic renders passed; all 209 logged driving states match",
+    "fullGameSuite": "not completed for this change; earlier run interrupted for the subsequent UI removal"
   }
 }

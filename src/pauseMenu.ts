@@ -1,5 +1,4 @@
 import type * as THREE from "three/webgpu";
-import type { PistaExhaustMode } from "./audio/exhaustOptions";
 
 /** Render resolution choices, as a share of the display's (capped at 2x) pixel density. */
 const MIN = 50;
@@ -19,7 +18,6 @@ export class PauseMenu {
   private readonly slider = document.createElement("input");
   private readonly value = document.createElement("output");
   private readonly resume = document.createElement("button");
-  private readonly exhaustStatus = document.createElement("small");
   /** Display pixel density the percentage applies to. */
   private readonly native = Math.min(devicePixelRatio, 2);
 
@@ -29,11 +27,6 @@ export class PauseMenu {
     private readonly onToggle: (open: boolean) => void,
     /** Called after a setting changed the image (to redraw it while paused). */
     private readonly onChange: () => void,
-    pistaExhaust?: {
-      mode: PistaExhaustMode;
-      status: string;
-      onChange: (mode: PistaExhaustMode) => void;
-    },
   ) {
     this.root.id = "paused";
     this.root.hidden = true;
@@ -64,35 +57,6 @@ export class PauseMenu {
     credits.rel = "noopener";
     credits.textContent = "Credits & licences";
     panel.append(title, row);
-    if (pistaExhaust) {
-      const exhaustRow = document.createElement("label");
-      exhaustRow.className = "setting";
-      const label = document.createElement("span");
-      label.textContent = "Pista exhaust";
-      const select = document.createElement("select");
-      select.name = "pista-exhaust";
-      select.style.cssText =
-        "font:inherit;border-radius:5px;padding:4px;max-width:210px";
-      for (const [value, text] of [
-        ["original", "Original"],
-        ["surrogate", "Learned (experimental)"],
-        ["surrogate-retrained", "Retrained (preview)"],
-      ] as const) {
-        const option = document.createElement("option");
-        option.value = value;
-        option.textContent = text;
-        select.append(option);
-      }
-      select.value = pistaExhaust.mode;
-      select.addEventListener("change", () => {
-        pistaExhaust.onChange(select.value as PistaExhaustMode);
-      });
-      this.exhaustStatus.style.cssText =
-        "grid-column:1/-1;opacity:.75;font-size:12px";
-      this.setPistaExhaustStatus(pistaExhaust.status);
-      exhaustRow.append(label, select, this.exhaustStatus);
-      panel.append(exhaustRow);
-    }
     panel.append(this.resume, credits);
     this.root.append(panel);
     document.body.append(this.root);
@@ -103,10 +67,6 @@ export class PauseMenu {
       else this.show();
     });
     this.apply(false);
-  }
-
-  setPistaExhaustStatus(status: string): void {
-    this.exhaustStatus.textContent = status + " Changes restart in the Pista.";
   }
 
   /** Off while loading: there's nothing to pause yet. */

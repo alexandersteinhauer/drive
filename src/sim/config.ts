@@ -190,6 +190,7 @@ export function withImpulseExhaust(cfg: CarConfig): CarConfig {
     out.powertrain.engine.type === "simulated"
   ) {
     const audio = out.powertrain.engine.spec.audio;
+    delete audio.surrogate;
     delete audio.acoustics;
     // engine-sim's synthesizer: its derivative path (the radiation, for the flow source),
     // with air noise on the rest.
@@ -558,7 +559,19 @@ export const ferrari488Pista: CarConfig = {
     // The F154 CD, simulated (src/sim/engines/f154cd.ts).
     engine: {
       type: "simulated",
-      spec: f154cd,
+      spec: {
+        ...f154cd,
+        audio: {
+          ...f154cd.audio,
+          // Pressure-only learned exhaust. Retain the original voice for failure fallback.
+          surrogate: {
+            model: "audio/surrogate/pista-coverage-candidate.json",
+            fullScale: 16,
+            flapSpeed: [261.7993875, 366.5191425],
+            flapThrottle: [0.3, 0.6],
+          },
+        },
+      },
       boostByGear: PISTA_VTM,
       idleRpm: 950,
       // Launch control holds the revs up while the clutch slips, so the turbos spool.
@@ -608,30 +621,3 @@ export const ferrari488Pista: CarConfig = {
   // rear overhang; 1975 mm wide without the mirrors.
   body: { center: [0, 0.205, -0.403], halfExtents: [0.987, 0.545, 2.3] },
 };
-
-/**
- * The Pista's opt-in learned exhaust models decode at 20 kHz. The retrained preview
- * uses the data-coverage candidate and the game's actual 10 kHz source; neither
- * variant changes engine physics.
- * This is pressure/exhaust only, not the voice's bay, turbo or mechanical sources.
- */
-export function withPistaSurrogateExhaust(
-  variant: "pilot" | "retrained" = "pilot",
-): CarConfig {
-  const out = structuredClone(ferrari488Pista);
-  if (
-    out.powertrain.type === "combustion" &&
-    out.powertrain.engine.type === "simulated"
-  ) {
-    out.powertrain.engine.spec.audio.surrogate = {
-      model:
-        variant === "retrained"
-          ? "audio/surrogate/pista-coverage-candidate.json"
-          : "audio/surrogate/pista-pilot.json",
-      fullScale: 16,
-      flapSpeed: [261.7993875, 366.5191425],
-      flapThrottle: [0.3, 0.6],
-    };
-  }
-  return out;
-}

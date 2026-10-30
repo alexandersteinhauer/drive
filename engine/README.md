@@ -281,38 +281,40 @@ sound. The 240 kHz fluid rate also divides exactly into the 4 kHz jet-noise cont
 
 ### Learned exhaust surrogate (experimental)
 
-The reference is also a teacher for a per-car real-time approximation. This pipeline is
-experimental: **the voice remains the default**, and a good fit to the reference is not
-independent evidence of fidelity to a real car. The Pista can already audition the pilot:
-`?car=pista&exhaust=surrogate`, or Escape → Pista exhaust → Learned (experimental).
-The original mode is `?car=pista&exhaust=original`. Other cars keep their existing sound.
+The reference is also a teacher for a per-car real-time approximation. The Pista now
+uses the data-coverage model by default: `?car=pista`. The original, pilot and preview
+selectors and the pause-menu exhaust section have been removed. Old `exhaust` URL values
+or saved Pista settings do not change its sound. Other cars keep their existing sound.
 
-The shipped pilot (`public/audio/surrogate/pista-pilot.json`, provenance alongside) predicts
-only the two tailpipes' radiated pressure before directivity. It does **not** yet include jet,
-mechanical or turbo noise, and it was trained before the sonic-boundary correction. It has
-known transient/high-band errors, not production fidelity. The actual game engine stays at
-its original frequency/fluid steps and keeps the same torque/boost physics; a separate
-physical kg/s + five-control stream feeds `src/surrogate_stream.rs`. That adapter resamples
-to the 20 kHz model and the audio device, divides by a fixed 16 Pa/full-scale calibration,
-then uses the game's existing loudness/output controls. It cannot recover source bandwidth
-missing from the game's 10 kHz control stream. Training also used the reference config's
-cycle variation and flat boost target, whereas the game keeps its original settings; this
-is an additional provisional input-distribution gap, not a hidden driving-physics change.
-Model load/init/runtime failure creates a new original-voice worklet and changes the simulation stream atomically, with a visible warning.
-Cached audio nodes are muted/suspended and their histories cleared when cars switch.
+The default model (`public/audio/surrogate/pista-coverage-candidate.json`, provenance
+alongside) remains experimental. It predicts only the two tailpipes' radiated pressure
+before directivity, not jet, mechanical, intake, bay or turbo noise. It uses the corrected
+reference, stock upstream game settings, native 10 kHz/four-substep inputs and the exact
+runtime resampling path: six gates, 512 taps, ridge damping 1. It is pressure-only
+regression, not a neural network. A good fit to the reference is not independent evidence
+of fidelity to a real car.
 
-The **Retrained (preview)** option at `?car=pista&exhaust=surrogate-retrained` now
-uses `pista-coverage-candidate.json`, selected explicitly by the user after the data study
-below. It uses the corrected reference, stock upstream game settings, native 10 kHz/four-
-substep inputs and the exact runtime resampling path: six gates, 512 taps, ridge damping 1.
-It is pressure-only regression, not a neural network. On two fresh final tests, 200–400 Hz
-errors were +0.78/+3.97 dB versus the previous preview's +12.02/+10.62 dB, and pooled
-normalized waveform MSE improved from 0.248 to 0.123. Median absolute band-level error
-worsened from 1.06 to 1.83 dB, so the full automatic promotion gate still **failed**;
-the user chose this trade-off. Residual bass and higher-band errors remain disclosed.
-The previous `pista-retrained.json` weights and provenance are retained for reproducibility.
-No EQ, per-clip gain, new noise or physics changes conceal any limitation. All learned
-variants keep the same fixed 16 Pa/full-scale calibration and original-voice failure fallback.
+On two fresh final tests, 200–400 Hz errors were +0.78/+3.97 dB versus the previous
+preview's +12.02/+10.62 dB, and pooled normalized waveform MSE improved from 0.248 to
+0.123. Median absolute band-level error worsened from 1.06 to 1.83 dB, so the full
+automatic promotion gate still **failed**; the user explicitly chose this trade-off and
+then made the candidate the default. Residual bass and higher-band errors remain
+disclosed. No EQ, per-clip gain, new noise or physics changes conceal any limitation.
+
+The actual game engine stays at its original frequency/fluid steps and keeps the same
+torque/boost physics; a separate physical kg/s + five-control stream feeds
+`src/surrogate_stream.rs`. That adapter resamples to the 20 kHz model and the audio device,
+divides by a fixed 16 Pa/full-scale calibration, then uses the game's existing
+loudness/output controls. It cannot recover source bandwidth missing from the game's
+10 kHz control stream. Model load/init/runtime failure creates a new original-voice
+worklet and changes the simulation stream atomically, with a visible warning. This is a
+failure fallback, not a selectable Pista sound. Cached audio nodes are muted/suspended
+and their histories cleared when cars switch.
+
+The original pilot (`pista-pilot.json`) and previous preview (`pista-retrained.json`),
+with their provenance, are retained for reproducibility only. The pilot predates the
+sonic-boundary correction and has additional training-rate and source-setting mismatches;
+its limitations are not a description of the new default model.
 
 - `examples/abtrace.rs`: paired game/reference traces, crank trajectory held by the dyno,
   separate burn seeds for training, validation and test drives. `EXHAUST_ONLY=1` swaps only
@@ -436,7 +438,7 @@ learning curve. Current and longer-history models must not be conflated in this 
 Only choose a stage from validation results, freeze its exact weights/provenance, then
 use `evaluate --split test` on the reserved programs. No run-specific alignment, gain,
 playback EQ, extra noise or reference-physics adjustment is part of this experiment.
-Test results do not automatically replace either existing game asset. The explicit selection
+Test results do not automatically replace the game's default model. The explicit selection
 and no-regression gates are in `scripts/surrogate-data-rules.json`.
 
 The completed study is recorded in `scripts/surrogate-data-results.json`. Every stage
@@ -451,9 +453,9 @@ On two fresh frozen-model tests, bass error fell from +12.02/+10.62 dB to
 However, median absolute band-level error worsened from 1.06 to 1.83 dB, so the full
 no-regression gate **failed**. The weights are saved as
 `public/audio/surrogate/pista-coverage-candidate.json`, with provenance alongside. The user
-subsequently requested this candidate, so the existing **Retrained (preview)** selector now
-loads it. Original and old-pilot modes, plus the previous preview's archived weights, remain
-unchanged; the user override does not turn the failed spectral check into a pass.
+subsequently requested this candidate and then made it the Pista default, removing the
+sound selector. The original voice remains a failure fallback; pilot and previous-preview
+weights remain archived. The user override does not turn the failed spectral check into a pass.
 The candidate still uses 512 taps (25.6 ms history), the original calibration and loss,
 and no playback EQ. It fixes much, not all, of the bass generalization problem.
 

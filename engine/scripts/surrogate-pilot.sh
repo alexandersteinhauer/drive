@@ -9,7 +9,7 @@ OUT="${1:?supply an output directory (renders are large and take minutes)}"
 mkdir -p "$OUT/data"
 OUT="$(cd "$OUT" && pwd)"
 cd "$ROOT"
-bun -e 'import {withPistaSurrogateExhaust} from "./src/sim/config.ts"; const c=withPistaSurrogateExhaust(); if(c.powertrain.type!=="combustion"||c.powertrain.engine.type!=="simulated") throw Error("Pista"); if(c.powertrain.engine.spec.simulationFrequency!==10000||c.powertrain.engine.spec.fluidSteps!==4) throw Error("Update the acquisition protocol for the changed game rates before rendering"); await Bun.write(process.argv[1],JSON.stringify(c.powertrain.engine.spec));' "$OUT/spec.json"
+bun -e 'import {ferrari488Pista} from "./src/sim/config.ts"; const c=ferrari488Pista; if(c.powertrain.type!=="combustion"||c.powertrain.engine.type!=="simulated") throw Error("Pista"); if(c.powertrain.engine.spec.simulationFrequency!==10000||c.powertrain.engine.spec.fluidSteps!==4) throw Error("Update the acquisition protocol for the changed game rates before rendering"); await Bun.write(process.argv[1],JSON.stringify(c.powertrain.engine.spec));' "$OUT/spec.json"
 (cd engine && cargo build --release --features parallel --example abtrace --example surrogate)
 B="${CARGO_TARGET_DIR:-$ROOT/engine/target}/release/examples/abtrace"
 R="$ROOT/engine/scripts/pista-reference.json"

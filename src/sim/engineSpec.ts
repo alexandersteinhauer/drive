@@ -163,7 +163,7 @@ export interface EngineSpec {
   };
 }
 
-/** The learned exhaust pilot (engine/src/spec.rs SurrogateSpec). No extra sound sources. */
+/** The learned exhaust (engine/src/spec.rs SurrogateSpec). No extra sound sources. */
 export interface SurrogateSpec {
   /** JSON asset relative to the application base URL. Fetched only when selected. */
   model: string;
