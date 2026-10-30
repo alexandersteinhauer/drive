@@ -1,21 +1,23 @@
-//! Tasks run in parallel on a few threads that wait between them spinning (native builds with
-//! the `parallel` feature, `DUCT_THREADS` threads): the reference simulation's pipes, each
-//! stage a few hundred microseconds of work split among them, where a pool that puts its
-//! threads to sleep spends as long waking them. The calling thread takes tasks too. Without
-//! the feature, or with one thread, the tasks run in order on the caller.
+//! Work split among a few threads that wait between batches spinning (native builds with the
+//! `parallel` feature, `DUCT_THREADS` threads): the reference simulation's pipes, each stage
+//! ~100 microseconds of work split among them, where a pool that puts its threads to sleep
+//! spends as long waking them. Each thread runs its own share, the same every batch, so its
+//! data stays in its core's cache; the calling thread is thread 0. Without the feature, or with
+//! one thread, the shares run in order on the caller.
 
-/// Runs `f(0)` .. `f(n - 1)`, each once, in any order and in parallel; returns when all are done.
-pub fn run(n: usize, f: &(dyn Fn(usize) + Sync)) {
+/// Runs `f(0)` .. `f(threads() - 1)`, each on its own thread, the same each time (the caller's
+/// 0); returns when all are done.
+pub fn run_each(f: &(dyn Fn(usize) + Sync)) {
     #[cfg(feature = "parallel")]
-    if spinning::run(n, f) {
+    if spinning::run_each(f) {
         return;
     }
-    for i in 0..n {
+    for i in 0..threads() {
         f(i);
     }
 }
 
-/// Threads `run` uses (the caller's included).
+/// Threads `run_each` uses (the caller's included).
 pub fn threads() -> usize {
     #[cfg(feature = "parallel")]
     return spinning::pool().map_or(1, |p| p.threads);
@@ -32,15 +34,12 @@ mod spinning {
 
     pub struct Pool {
         pub threads: usize,
-        /// The current batch (high 32 bits) and the next task in it (low 32): a task is taken
-        /// by advancing it, so only while its batch is current.
-        ticket: AtomicU64,
-        tasks: AtomicUsize,
+        /// The current batch: a worker seeing it change runs its share of it.
+        batch: AtomicU64,
         done: AtomicUsize,
-        /// The batch's job: a reference to it on the caller's stack, valid while the batch
-        /// has tasks to take.
+        /// The batch's job: a reference to it on the caller's stack, valid till all are done.
         job: AtomicPtr<&'static Job>,
-        /// One batch at a time (a second caller runs its tasks itself).
+        /// One batch at a time (a second caller runs its shares itself).
         busy: Mutex<()>,
     }
 
@@ -53,34 +52,19 @@ mod spinning {
             }
             let pool: &'static Pool = Box::leak(Box::new(Pool {
                 threads,
-                ticket: AtomicU64::new(0),
-                tasks: AtomicUsize::new(0),
+                batch: AtomicU64::new(0),
                 done: AtomicUsize::new(0),
                 job: AtomicPtr::new(std::ptr::null_mut()),
                 busy: Mutex::new(()),
             }));
-            for _ in 1..threads {
-                std::thread::spawn(move || worker(pool));
+            for w in 1..threads {
+                std::thread::spawn(move || worker(pool, w));
             }
             Some(pool)
         })
     }
 
-    fn take(p: &Pool, batch: u64, tasks: usize) -> Option<usize> {
-        let mut t = p.ticket.load(Acquire);
-        loop {
-            let i = (t & 0xffff_ffff) as usize;
-            if t >> 32 != batch || i >= tasks {
-                return None;
-            }
-            match p.ticket.compare_exchange_weak(t, t + 1, AcqRel, Acquire) {
-                Ok(_) => return Some(i),
-                Err(now) => t = now,
-            }
-        }
-    }
-
-    fn worker(p: &'static Pool) {
+    fn worker(p: &'static Pool, w: usize) {
         #[cfg(target_os = "macos")]
         unsafe {
             // Performance cores, as the interactive thread that waits on them.
@@ -92,8 +76,8 @@ mod spinning {
         let mut seen = 0;
         loop {
             let mut idle = 0u32;
-            let batch = loop {
-                let b = p.ticket.load(Acquire) >> 32;
+            seen = loop {
+                let b = p.batch.load(Acquire);
                 if b != seen {
                     break b;
                 }
@@ -107,38 +91,26 @@ mod spinning {
                     std::thread::sleep(std::time::Duration::from_micros(200));
                 }
             };
-            seen = batch;
-            let tasks = p.tasks.load(Acquire);
-            while let Some(i) = take(p, batch, tasks) {
-                // Taken in the current batch: its caller is still waiting, its job alive.
-                let job: &Job = unsafe { *p.job.load(Acquire) };
-                job(i);
-                p.done.fetch_add(1, Release);
-            }
+            // The caller waits for this share: its job is alive.
+            let job: &Job = unsafe { *p.job.load(Acquire) };
+            job(w);
+            p.done.fetch_add(1, Release);
         }
     }
 
     /// Runs the batch on the pool; false if it can't (no pool, or busy).
-    pub fn run<'a>(n: usize, f: &'a (dyn Fn(usize) + Sync + 'a)) -> bool {
+    pub fn run_each<'a>(f: &'a (dyn Fn(usize) + Sync + 'a)) -> bool {
         let Some(p) = pool() else { return false };
-        if n < 2 {
-            return false;
-        }
         let Ok(_one) = p.busy.try_lock() else { return false };
-        // The workers see it only while this batch is current, and it is until all its tasks
-        // are done, below.
+        // The workers see it once the batch changes, and it lives till they're all done, below.
         let job: &'static Job = unsafe { std::mem::transmute::<&'a (dyn Fn(usize) + Sync + 'a), &'static Job>(f) };
         let job: &&'static Job = &job;
         p.job.store(job as *const &'static Job as *mut &'static Job, Relaxed);
-        p.tasks.store(n, Relaxed);
         p.done.store(0, Relaxed);
-        let batch = (p.ticket.load(Relaxed) >> 32) + 1;
-        p.ticket.store(batch << 32, Release);
-        while let Some(i) = take(p, batch, n) {
-            f(i);
-            p.done.fetch_add(1, Release);
-        }
-        while p.done.load(Acquire) < n {
+        p.batch.fetch_add(1, Release);
+        f(0);
+        p.done.fetch_add(1, Release);
+        while p.done.load(Acquire) < p.threads {
             std::hint::spin_loop();
         }
         true

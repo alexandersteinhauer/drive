@@ -1,7 +1,7 @@
 // Drives the 488 Pista as the game does (src/sim/car.ts) with the reference exhaust
 // (engine/src/duct.rs) and writes what its tailpipes radiate to the listener, appending as it
 // goes: <out>.f32 (Pa at the fluid rate, see <out>.json) and <out>.exits.f32.
-//   DUCT_THREADS=6 bun engine/scripts/reference-drive.ts <out-prefix> <idle|drive> [reference.json]
+//   DUCT_THREADS=8 bun engine/scripts/reference-drive.ts <out-prefix> <idle|drive> [reference.json]
 // (the reference config defaults to pista-reference.json: its ducts, physics and boost merged
 // into the spec), then uv run engine/scripts/reference_sound.py <out-prefix> with
 // DIAMETER=0.085. WASM=1: through the WebAssembly module instead of the native library.

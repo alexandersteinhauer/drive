@@ -120,10 +120,12 @@ offline: `src/duct.rs` replaces the exhaust runners and collectors with pipes an
 `scripts/reference-drive.ts` drives the game's car with them (through the native library,
 `scripts/native-engine.ts`), the 488 Pista's exhaust from `scripts/pista-reference.json`; and
 `scripts/reference_sound.py` makes what was recorded the sound heard. Natively, with the
-`parallel` feature, the pipes are stepped on `DUCT_THREADS` threads (`src/pool.rs`: each pipe's
-stage one task, longest first, the threads spinning between stages, the nodes after them in
-order, so the result is the same to the bit): 4.4 times as fast on 6 threads of an M-series
-Mac.
+`parallel` feature, the pipes are stepped on `DUCT_THREADS` threads (`src/pool.rs`: the pipes
+split among the threads once, longest processing time first, each thread taking its own every
+stage (its pipes' data staying in its core's cache), its pipes' ends and volute channels with
+them, the threads spinning between stages, the nodes after them in order, so the result is the
+same to the bit): 3.9 times as fast on 8 threads of an M-series Mac (18 cores; past 8 hardly
+faster, a stage being ~100 microseconds of work).
 
 - Each pipe is a column of finite volumes of the one-dimensional Euler equations with the
   gas's composition, fifth order in space (WENO-Z, a cell's values at both its faces from one

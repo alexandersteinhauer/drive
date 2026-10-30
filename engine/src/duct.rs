@@ -929,6 +929,43 @@ fn inflow_state_with(g: f64, p: f64, h0: f64, t0: f64, (ts, vs): (f64, f64)) -> 
     (v, rho)
 }
 
+/// A volute's stator channels' flows (`Nozzles`) from `pipe`'s cells into the node at `res`:
+/// their rates added to the cells, what they pass into the node kept (`gain`).
+fn discharge(z: &mut Nozzles, pipe: &mut Pipe, res: Reservoir) {
+    let res_h = enthalpy(res.t);
+    let res_g = gamma(res.t);
+    // (The most the node can pass back through a unit area.)
+    let back = choked(res.p, res.t, res_g);
+    let mut total = 0.0;
+    let (mut m_sum, mut e_sum, mut f_sum, mut o_sum) = (0.0, 0.0, 0.0, 0.0);
+    for (c, &cda) in z.cda.iter().enumerate() {
+        let i = z.first + c;
+        let cell = pipe.prim[i];
+        z.m[c] = z.m[c].clamp(-cda * back, cda * choked(cell.p, cell.t, cell.g));
+        let m = z.m[c];
+        z.dm[c] = slug_rate(cda, z.length, m, (cell.p, cell.t, cell.g, cell.rho), (res.p, res.t, res_g, res.p / (RS * res.t)));
+        let (h0, yf, yo, u) = if m >= 0.0 {
+            (cell.e + RS * cell.t + 0.5 * cell.u * cell.u, cell.yf, cell.yo, cell.u)
+        } else {
+            (res_h, res.yf, res.yo, 0.0)
+        };
+        let inv_v = 1.0 / pipe.cell_volume(i);
+        let r = &mut pipe.rate[i];
+        r[0] -= m * inv_v;
+        r[1] -= m * u * inv_v;
+        r[2] -= m * h0 * inv_v;
+        r[3] -= m * yf * inv_v;
+        r[4] -= m * yo * inv_v;
+        m_sum += m;
+        e_sum += m * h0;
+        f_sum += m * yf;
+        o_sum += m * yo;
+        total += m;
+    }
+    z.flow = total;
+    z.gain = [m_sum, e_sum, f_sum, o_sum];
+}
+
 /// DUCTCHECK set: every stage's flows are checked, the first not finite reported with what
 /// made it.
 fn debug_checks() -> bool {
@@ -1407,6 +1444,8 @@ pub struct Nozzles {
     dm: Vec<f64>,
     /// The last total flow into the node (kg/s).
     pub flow: f64,
+    /// What the stage passed into the node: mass, energy, fuel and oxygen (kg/s, W).
+    gain: [f64; 4],
 }
 
 impl Nozzles {
@@ -1414,7 +1453,7 @@ impl Nozzles {
     /// and gas slug length `length`.
     pub fn new(pipe: usize, first: usize, node: usize, cda: Vec<f64>, length: f64) -> Nozzles {
         let n = cda.len();
-        Nozzles { pipe, first, node, cda, length, m: vec![0.0; n], m0: vec![0.0; n], dm: vec![0.0; n], flow: 0.0 }
+        Nozzles { pipe, first, node, cda, length, m: vec![0.0; n], m0: vec![0.0; n], dm: vec![0.0; n], flow: 0.0, gain: [0.0; 4] }
     }
 }
 
@@ -1455,21 +1494,21 @@ pub struct Network {
     /// Substeps rejected (and done again in halves) so far.
     pub rejected: usize,
     debug_last: String,
-    /// Each pipe's links, in order, and the pipes longest first (the order their tasks are
-    /// handed out in parallel): built as the network is first stepped.
+    /// Each pipe's links, in order, and the pipes split among the threads (src/pool.rs's
+    /// `run_each`), each the same every stage: built as the network is first stepped.
     pipe_links: Vec<Vec<usize>>,
-    pipe_order: Vec<usize>,
+    pipe_nozzles: Vec<Vec<usize>>,
+    pipe_parts: Vec<Vec<usize>>,
 }
 
-/// The pipes, for tasks each taking one of them (src/pool.rs).
-#[derive(Clone, Copy)]
-struct Pipes(*mut Pipe);
-unsafe impl Sync for Pipes {}
-unsafe impl Send for Pipes {}
-impl Pipes {
-    /// Pipe `k`: the caller's alone while it has it (no two tasks given the same `k`).
+/// The pipes (or their nozzles), for tasks each taking some of them (src/pool.rs).
+struct Each<T>(*mut T);
+unsafe impl<T> Sync for Each<T> {}
+unsafe impl<T> Send for Each<T> {}
+impl<T> Each<T> {
+    /// Item `k`: the caller's alone while it has it (no two tasks given the same `k`).
     #[allow(clippy::mut_from_ref)]
-    unsafe fn get(&self, k: usize) -> &mut Pipe {
+    unsafe fn get(&self, k: usize) -> &mut T {
         &mut *self.0.add(k)
     }
 }
@@ -1489,7 +1528,8 @@ impl Default for Network {
             rejected: 0,
             debug_last: String::new(),
             pipe_links: vec![],
-            pipe_order: vec![],
+            pipe_nozzles: vec![],
+            pipe_parts: vec![],
         }
     }
 }
@@ -1535,28 +1575,50 @@ impl Network {
     pub fn stable_dt(&mut self) -> f64 {
         self.index();
         let dts: Vec<std::sync::atomic::AtomicU64> = (0..self.pipes.len()).map(|_| std::sync::atomic::AtomicU64::new(0)).collect();
-        let pipes = Pipes(self.pipes.as_mut_ptr());
-        crate::pool::run(self.pipe_order.len(), &|j| {
-            let k = self.pipe_order[j];
-            let p = unsafe { pipes.get(k) };
-            p.update_prim();
-            dts[k].store(p.stable_dt().to_bits(), std::sync::atomic::Ordering::Relaxed);
+        let pipes = Each(self.pipes.as_mut_ptr());
+        crate::pool::run_each(&|t| {
+            for &k in &self.pipe_parts[t] {
+                let p = unsafe { pipes.get(k) };
+                p.update_prim();
+                dts[k].store(p.stable_dt().to_bits(), std::sync::atomic::Ordering::Relaxed);
+            }
         });
         self.cfl * dts.iter().map(|d| f64::from_bits(d.load(std::sync::atomic::Ordering::Relaxed))).fold(f64::INFINITY, f64::min)
     }
 
-    /// Each pipe's links and the pipes' order (again if pipes or links were added).
+    /// Each pipe's links and the pipes' split among the threads (again if pipes or links were
+    /// added).
     fn index(&mut self) {
-        if self.pipe_order.len() == self.pipes.len() && self.pipe_links.iter().map(Vec::len).sum::<usize>() == self.links.len() {
+        if self.pipe_parts.len() == crate::pool::threads()
+            && self.pipe_parts.iter().map(Vec::len).sum::<usize>() == self.pipes.len()
+            && self.pipe_links.iter().map(Vec::len).sum::<usize>() == self.links.len()
+            && self.pipe_nozzles.iter().map(Vec::len).sum::<usize>() == self.nozzles.len()
+        {
             return;
         }
         self.pipe_links = vec![vec![]; self.pipes.len()];
         for (i, l) in self.links.iter().enumerate() {
             self.pipe_links[l.pipe].push(i);
         }
-        self.pipe_order = (0..self.pipes.len()).collect();
-        let pipes = &self.pipes;
-        self.pipe_order.sort_by_key(|&k| std::cmp::Reverse(pipes[k].cells()));
+        self.pipe_nozzles = vec![vec![]; self.pipes.len()];
+        for (i, z) in self.nozzles.iter().enumerate() {
+            self.pipe_nozzles[z.pipe].push(i);
+        }
+        // Longest processing time first: each pipe, costliest first, to the thread with least
+        // so far. A pipe's stage costs about its cells, as much as 25 cells' its ends', and as
+        // much as one each its nozzles' channels.
+        let cost = |k: usize| self.pipes[k].cells() + 25 + self.pipe_nozzles[k].iter().map(|&z| self.nozzles[z].cda.len()).sum::<usize>();
+        let mut order: Vec<usize> = (0..self.pipes.len()).collect();
+        order.sort_by_key(|&k| std::cmp::Reverse(cost(k)));
+        let threads = crate::pool::threads();
+        let mut parts = vec![vec![]; threads];
+        let mut load = vec![0; threads];
+        for k in order {
+            let t = (0..threads).min_by_key(|&t| load[t]).unwrap();
+            parts[t].push(k);
+            load[t] += cost(k);
+        }
+        self.pipe_parts = parts;
     }
 
     /// Advances by `dt`, in as many substeps as stability takes.
@@ -1679,7 +1741,8 @@ impl Network {
         // Each pipe on its own (in parallel): its cells' state, its ends against the nodes
         // they meet (which stand still through the stage), its cells' rates.
         {
-            let (links, nodes, pipe_links) = (&self.links, &self.nodes, &self.pipe_links);
+            let (links, nodes, pipe_links, pipe_nozzles) = (&self.links, &self.nodes, &self.pipe_links, &self.pipe_nozzles);
+            let nozzles = Each(self.nozzles.as_mut_ptr());
             let stage = |k: usize, pipe: &mut Pipe| {
                 pipe.update_prim();
                 pipe.pad();
@@ -1703,13 +1766,19 @@ impl Network {
                     pipe.end_flow[(l.side == Side::B) as usize] = f;
                 }
                 pipe.rates();
+                // Its volute's stator channels (into nodes that stand still through the stage).
+                for &z in &pipe_nozzles[k] {
+                    let z = unsafe { nozzles.get(z) };
+                    discharge(z, pipe, nodes[z.node].reservoir());
+                }
             };
-            let pipes = Pipes(self.pipes.as_mut_ptr());
-            let order = &self.pipe_order;
-            crate::pool::run(order.len(), &|j| {
-                let k = order[j];
-                // Each pipe in one task alone.
-                stage(k, unsafe { pipes.get(k) });
+            let pipes = Each(self.pipes.as_mut_ptr());
+            let parts = &self.pipe_parts;
+            crate::pool::run_each(&|t| {
+                // Each pipe in one thread's part alone.
+                for &k in &parts[t] {
+                    stage(k, unsafe { pipes.get(k) });
+                }
             });
         }
         // What the ends passed, into their nodes in order.
@@ -1772,8 +1841,12 @@ impl Network {
         for k in 0..self.perforations.len() {
             self.perforate(k);
         }
-        for k in 0..self.nozzles.len() {
-            self.discharge(k);
+        for z in &self.nozzles {
+            let node = &mut self.nodes[z.node];
+            let [m, e, f, o] = z.gain;
+            if !node.atmosphere && m != 0.0 {
+                node.gain(m, e, f / m, o / m);
+            }
         }
         if debug_checks() {
             for (k, p) in self.pipes.iter().enumerate() {
@@ -1782,46 +1855,6 @@ impl Network {
                     panic!("pipe {k} rate at cell {i}: {:?}; cells {:?}; ends {:?}", p.rate[i], &p.prim[lo..(i + 3).min(p.cells())], p.face);
                 }
             }
-        }
-    }
-
-    /// A row of nozzles' flows: their rates added to its pipe's cells and its node.
-    fn discharge(&mut self, k: usize) {
-        let z = &mut self.nozzles[k];
-        let res = self.nodes[z.node].reservoir();
-        let res_h = enthalpy(res.t);
-        let res_g = gamma(res.t);
-        let pipe = &mut self.pipes[z.pipe];
-        let mut total = 0.0;
-        let (mut m_sum, mut e_sum, mut f_sum, mut o_sum) = (0.0, 0.0, 0.0, 0.0);
-        for (c, &cda) in z.cda.iter().enumerate() {
-            let i = z.first + c;
-            let cell = pipe.prim[i];
-            z.m[c] = z.m[c].clamp(-cda * choked(res.p, res.t, res_g), cda * choked(cell.p, cell.t, cell.g));
-            let m = z.m[c];
-            z.dm[c] = slug_rate(cda, z.length, m, (cell.p, cell.t, cell.g, cell.rho), (res.p, res.t, res_g, res.p / (RS * res.t)));
-            let (h0, yf, yo, u) = if m >= 0.0 {
-                (cell.e + RS * cell.t + 0.5 * cell.u * cell.u, cell.yf, cell.yo, cell.u)
-            } else {
-                (res_h, res.yf, res.yo, 0.0)
-            };
-            let inv_v = 1.0 / pipe.cell_volume(i);
-            let r = &mut pipe.rate[i];
-            r[0] -= m * inv_v;
-            r[1] -= m * u * inv_v;
-            r[2] -= m * h0 * inv_v;
-            r[3] -= m * yf * inv_v;
-            r[4] -= m * yo * inv_v;
-            m_sum += m;
-            e_sum += m * h0;
-            f_sum += m * yf;
-            o_sum += m * yo;
-            total += m;
-        }
-        z.flow = total;
-        let node = &mut self.nodes[z.node];
-        if !node.atmosphere && m_sum != 0.0 {
-            node.gain(m_sum, e_sum, f_sum / m_sum, o_sum / m_sum);
         }
     }
 
@@ -1902,10 +1935,12 @@ impl Network {
             p.q.iter().all(|q| q[0] > 0.0 && q[2] - 0.5 * q[1] * q[1] / q[0] > 0.0 && q[2].is_finite())
         };
         let bad = std::sync::atomic::AtomicBool::new(false);
-        let pipes = Pipes(self.pipes.as_mut_ptr());
-        crate::pool::run(self.pipe_order.len(), &|j| {
-            if !pipe(unsafe { pipes.get(self.pipe_order[j]) }) {
-                bad.store(true, std::sync::atomic::Ordering::Relaxed);
+        let pipes = Each(self.pipes.as_mut_ptr());
+        crate::pool::run_each(&|t| {
+            for &k in &self.pipe_parts[t] {
+                if !pipe(unsafe { pipes.get(k) }) {
+                    bad.store(true, std::sync::atomic::Ordering::Relaxed);
+                }
             }
         });
         let cells = !bad.into_inner();
