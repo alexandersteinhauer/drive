@@ -657,12 +657,14 @@ export class Car {
     let load: DriveLoad | null = null;
     this.clutchEngagement = 0;
     if (ratio !== 0) {
-      // The auto-clutch bites as the engine revs, and comes back over clutchRelease after a
-      // shift.
-      const engagement = smoothstep(
-        e.engageRpm / RPM,
-        e.launchRpm / RPM,
-        engine.omega,
+      // The auto-clutch bites as the engine revs (a launch), and comes back over
+      // clutchRelease after a shift. Rolling in gear it stays closed while the gearbox turns
+      // the engine faster than idle (the engine braking), opening only as it falls towards a
+      // stall.
+      const idle = e.idleRpm / RPM;
+      const engagement = Math.max(
+        smoothstep(e.engageRpm / RPM, e.launchRpm / RPM, engine.omega),
+        smoothstep(1.1 * idle, 1.4 * idle, ratio * avgOmega),
       );
       const release = pt.gearbox.clutchRelease
         ? Math.min(1, this.sinceClutch / pt.gearbox.clutchRelease)
@@ -1036,6 +1038,18 @@ export class Car {
     this.sinceShift += dt;
     if (this.shiftTimer > 0) {
       this.shiftTimer -= dt;
+      // A downshift's clutch waits for the blip to bring the engine to the gear's speed.
+      if (
+        this.shiftTimer <= 0 &&
+        this.targetGear < this.gear &&
+        this.targetGear > 0 &&
+        this.sinceShift < (g.downshiftTime ?? 0)
+      ) {
+        const driven = this.drivenWheels;
+        const avg = driven.reduce((s, w) => s + w.omega, 0) / driven.length;
+        const target = avg * this.gearRatio(pt, this.targetGear);
+        if (this.engineOmega < 0.97 * target) this.shiftTimer = dt;
+      }
       if (this.shiftTimer <= 0) {
         this.gear = this.targetGear;
         this.sinceClutch = 0;
@@ -1048,10 +1062,13 @@ export class Car {
     const rpmIn = (gear: number) => avgOmega * this.gearRatio(pt, gear) * RPM;
     const t = this.throttle;
     const upRpm = g.shiftUpRpmLight + (g.shiftUpRpm - g.shiftUpRpmLight) * t;
-    const downRpm =
-      g.shiftDownRpmLight + (g.shiftDownRpm - g.shiftDownRpmLight) * t;
+    const downRpm = Math.max(
+      g.shiftDownRpmLight + (g.shiftDownRpm - g.shiftDownRpmLight) * t,
+      (g.shiftDownRpmBraking ?? 0) * this.brake,
+    );
     let next = this.gear;
-    if (rpmIn(this.gear) > upRpm && this.gear < g.ratios.length)
+    // Never up while braking: the braking downshifts would hunt against the light upshift.
+    if (rpmIn(this.gear) > upRpm && this.gear < g.ratios.length && this.brake < 0.05)
       next = this.gear + 1;
     else if (
       this.gear > 1 &&

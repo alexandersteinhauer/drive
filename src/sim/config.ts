@@ -77,6 +77,17 @@ export interface GearboxConfig {
   clutchRelease?: number;
   /** Shifts up without lifting (a simulated engine's sparks are cut instead). */
   dualClutch?: boolean;
+  /**
+   * Under braking, steps down once the revs fall below this, by the brake pedal (an
+   * automated gearbox keeping the engine in its band for engine braking and the exit);
+   * absent: only the light-load point.
+   */
+  shiftDownRpmBraking?: number;
+  /**
+   * A downshift's longest (s): the oncoming clutch waits until the blip has brought the
+   * engine up to the lower gear's speed, at least `shiftTime`; absent: `shiftTime`.
+   */
+  downshiftTime?: number;
 }
 
 export interface CombustionConfig {
@@ -568,6 +579,10 @@ export const ferrari488Pista: CarConfig = {
       shiftTime: 0.06,
       clutchRelease: 0.05,
       dualClutch: true,
+      // Under braking it steps down from 4500 rpm (into the next gear at ~5500-6500), the
+      // ECU blipping the throttle to match the revs before the clutch closes.
+      shiftDownRpmBraking: 4500,
+      downshiftTime: 0.3,
     },
   },
   // E-Diff3: an electronically locked differential, modelled as a strong clutch type.
