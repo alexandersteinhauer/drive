@@ -50,6 +50,9 @@ pub struct TurboInputs {
     pub manifold: f64,
     /// Crank speed (rad/s).
     pub crank: f64,
+    /// The turbines' power (W) where the exhaust's gas dynamics work it out (duct.rs);
+    /// none: from the flow, its temperature and the pressure drop to the atmosphere.
+    pub turbine_power: Option<f64>,
 }
 
 pub struct Turbo {
@@ -133,9 +136,13 @@ impl Turbo {
         }
     }
 
+    pub fn turbine_efficiency(&self) -> f64 {
+        self.turbine_efficiency
+    }
+
     /// Advances the shaft by `dt`.
     pub fn update(&mut self, dt: f64, inputs: &TurboInputs) {
-        let TurboInputs { air, exhaust, exhaust_temperature, exhaust_pressure, manifold, crank } =
+        let TurboInputs { air, exhaust, exhaust_temperature, exhaust_pressure, manifold, crank, turbine_power } =
             *inputs;
         let omega = self.omega;
         let work = self.work(omega);
@@ -164,7 +171,7 @@ impl Turbo {
             * cp_exhaust
             * exhaust_temperature
             * expansion;
-        let turbine = available;
+        let turbine = turbine_power.unwrap_or(available);
         // The boost controller opens the wastegate as the shaft passes its target speed.
         let target = self.speed_for(self.boost.sample_triangle(crank.abs()).min(self.limit));
         let error = if target > 0.0 { omega / target - 1.0 } else { 1.0 };

@@ -320,6 +320,10 @@ struct Context<'a> {
     turbulence: &'a Function,
     crank_angle: f64,
     cycle_angle: f64,
+    /// The exhaust valves open into duct.rs's pipes (the engine steps them), not the runners.
+    ducted: bool,
+    /// The flame speed's cycle-to-cycle variation (standard deviation), if any.
+    cycle_variation: Option<f64>,
 }
 
 impl Cylinder {
@@ -392,6 +396,13 @@ impl Cylinder {
         self.flame.efficiency = efficiency_attenuation * fuel.max_burning_efficiency;
         self.flame.flame_speed =
             fuel.flame_speed(turbulence, afr, self.system.temperature(), self.system.pressure());
+        if let Some(sigma) = ctx.cycle_variation {
+            // Box and Muller's normal deviate.
+            let u1 = rng.unit().max(1e-12);
+            let u2 = rng.unit();
+            let n = (-2.0 * u1.ln()).sqrt() * (2.0 * PI * u2).cos();
+            self.flame.flame_speed *= (1.0 + sigma * n).max(0.2);
+        }
     }
 
     /// Woschni's heat transfer coefficient (W/m^2 K; Woschni, SAE 670931, 1967, in SI units
@@ -490,31 +501,35 @@ impl Cylinder {
         self.intake_runner.dissipate_excess_velocity();
         self.system.dissipate_excess_velocity();
 
-        params.k_flow = self.exhaust_flow_rate;
-        params.cross_section_area_0 = volume / cylinder_height;
-        params.cross_section_area_1 = head.exhaust_runner_area;
-        let exhaust_flow = GasSystem::flow(&params, &mut self.system, &mut self.exhaust_runner);
-        self.system.dissipate_excess_velocity();
-        self.exhaust_runner.dissipate_excess_velocity();
+        // With ducts, the engine exchanges the exhaust valve's flow with them after this.
+        if !ctx.ducted {
+            params.k_flow = self.exhaust_flow_rate;
+            params.cross_section_area_0 = volume / cylinder_height;
+            params.cross_section_area_1 = head.exhaust_runner_area;
+            let exhaust_flow = GasSystem::flow(&params, &mut self.system, &mut self.exhaust_runner);
+            self.system.dissipate_excess_velocity();
+            self.exhaust_runner.dissipate_excess_velocity();
 
-        params.k_flow = self.primary_to_collector_flow_rate;
-        params.cross_section_area_0 = head.exhaust_runner_area;
-        params.cross_section_area_1 = exhaust.collector_cross_section_area;
-        GasSystem::flow(&params, &mut self.exhaust_runner, &mut exhaust.system);
+            params.k_flow = self.primary_to_collector_flow_rate;
+            params.cross_section_area_0 = head.exhaust_runner_area;
+            params.cross_section_area_1 = exhaust.collector_cross_section_area;
+            GasSystem::flow(&params, &mut self.exhaust_runner, &mut exhaust.system);
+            self.exhaust_runner.update_velocity(dt, exhaust.velocity_decay);
+
+            self.exhaust_flow = exhaust_flow;
+            self.exhaust_moles += exhaust_flow;
+            // A plane wave's pressure is rho c times its particle velocity: for a mass flow m'
+            // into a pipe of area A, c m' / A.
+            self.exhaust_wave +=
+                exhaust_flow * AIR_MOLECULAR_MASS * self.exhaust_runner.c() / head.exhaust_runner_area;
+        }
 
         self.intake_runner.update_velocity(dt, intake.velocity_decay);
         self.system.update_velocity(dt, 0.5);
-        self.exhaust_runner.update_velocity(dt, exhaust.velocity_decay);
 
         if intake_flow.abs() > 1e-9 && self.lit {
             self.lit = false;
         }
-
-        self.exhaust_flow = exhaust_flow;
-        self.exhaust_moles += exhaust_flow;
-        // A plane wave's pressure is rho c times its particle velocity: for a mass flow m'
-        // into a pipe of area A, c m' / A.
-        self.exhaust_wave += exhaust_flow * AIR_MOLECULAR_MASS * self.exhaust_runner.c() / head.exhaust_runner_area;
 
         if self.lit {
             let total_travel_x = bank.bore / 2.0;
@@ -655,6 +670,9 @@ pub struct Engine {
     /// Each exhaust's wastegate, fully open (flow constant).
     wastegate_flow_k: f64,
     wall_temperature: Option<f64>,
+    /// The exhaust as duct.rs's pipes (spec.ducts), in place of the runners and collectors.
+    pub ducts: Option<crate::duct::Ducts>,
+    cycle_variation: Option<f64>,
 }
 
 impl Engine {
@@ -895,6 +913,12 @@ impl Engine {
             wastegate_flow_k: spec.turbo.as_ref().map_or(0.0, |t| t.wastegate_flow_k),
             wall_temperature: spec.physics.wall_temperature,
             physical: spec.physics.real_gas || spec.physics.wall_temperature.is_some(),
+            cycle_variation: spec.physics.cycle_variation,
+            ducts: spec.ducts.as_ref().map(|d| {
+                assert!(spec.physics.real_gas, "ducts need physics.realGas (the gases must agree)");
+                let n = spec.banks.iter().map(|b| b.cylinders.len()).sum();
+                crate::duct::Ducts::new(d, n).unwrap_or_else(|e| panic!("ducts: {e}"))
+            }),
         };
 
         // Chambers filled with air at the placed pistons.
@@ -935,6 +959,8 @@ impl Engine {
             turbulence: &self.turbulence,
             crank_angle: self.crank_angle(),
             cycle_angle: self.cycle_angle(),
+            ducted: self.ducts.is_some(),
+            cycle_variation: self.cycle_variation,
         }
     }
 
@@ -1102,6 +1128,20 @@ impl Engine {
         }
     }
 
+    /// The lumped exhaust collector's pressure (without ducts), and its wastegate's opening.
+    pub fn exhaust_pressure(&self, i: usize) -> f64 {
+        self.exhausts[i].system.pressure()
+    }
+
+    /// Air drawn through the throttles (kg/s, averaged over ~0.03 s; kept with a voice).
+    pub fn air_mass_flow(&self) -> f64 {
+        self.air_mass_flow
+    }
+
+    pub fn wastegate(&self) -> f64 {
+        self.turbo.as_ref().map_or(0.0, |t| t.wastegate)
+    }
+
     pub fn exhaust_runner_pressure(&self, i: usize) -> f64 {
         self.cylinders[i].exhaust_runner.pressure()
     }
@@ -1256,6 +1296,8 @@ impl Engine {
                 turbulence: &self.turbulence,
                 crank_angle,
                 cycle_angle,
+                ducted: self.ducts.is_some(),
+                cycle_variation: self.cycle_variation,
             };
             let rng = &mut self.rng;
             for c in cylinders.iter_mut() {
@@ -1269,8 +1311,9 @@ impl Engine {
         let fluid_dt = dt / self.fluid_steps as f64;
         // What passes the throttles and leaves the exhausts over the step, for the turbo.
         let (mut air, mut outflow, mut outflow_energy) = (0.0, 0.0, 0.0);
+        let mut turbine_work = 0.0;
         for _ in 0..self.fluid_steps {
-            for e in &mut self.exhausts {
+            for e in self.exhausts.iter_mut().filter(|_| self.ducts.is_none()) {
                 e.process(fluid_dt);
                 self.exhaust_moles += e.outflow;
                 if self.turbo.is_some() && e.outflow > 0.0 {
@@ -1291,10 +1334,16 @@ impl Engine {
                 turbulence: &self.turbulence,
                 crank_angle: 0.0,
                 cycle_angle: 0.0,
+                ducted: self.ducts.is_some(),
+                cycle_variation: self.cycle_variation,
             };
             for c in cylinders.iter_mut() {
                 let (intake, exhaust) = (&mut self.intakes[c.intake], &mut self.exhausts[c.exhaust]);
                 c.flow(fluid_dt, &ctx, intake, exhaust);
+            }
+            if let Some(d) = &mut self.ducts {
+                turbine_work += Self::step_ducts(d, &mut cylinders, fluid_dt);
+                self.exhaust_moles += d.outlets.iter().map(|&l| d.net.links[l].flow.m).sum::<f64>() * fluid_dt / AIR_MOLECULAR_MASS;
             }
         }
         for c in cylinders.iter_mut() {
@@ -1322,8 +1371,17 @@ impl Engine {
                     exhaust_pressure,
                     manifold,
                     crank: self.mech.omega(),
+                    turbine_power: self.ducts.as_ref().map(|_| turbine_work / dt),
                 },
             );
+            if let Some(d) = &mut self.ducts {
+                for &(o, area) in &d.wastegates {
+                    d.net.orifices[o].cda = area * turbo.wastegate;
+                }
+                for &o in &d.turbines {
+                    d.net.orifices[o].efficiency = turbo.turbine_efficiency();
+                }
+            }
             for i in &mut self.intakes {
                 i.charge_pressure = turbo.charge_pressure;
                 i.charge_temperature = turbo.charge_temperature;
@@ -1333,6 +1391,37 @@ impl Engine {
                 e.outlet_flow_rate = e.turbine_flow_rate + wastegate_k;
             }
         }
+    }
+
+    /// Exchanges the exhaust valves' flow with the ducts over a fluid substep: each
+    /// cylinder's gas becomes its node's for the step (its volume held, as over a substep
+    /// here), and what the step leaves there goes back. Returns the turbines' work (J).
+    fn step_ducts(d: &mut crate::duct::Ducts, cylinders: &mut [Cylinder], dt: f64) -> f64 {
+        const M: f64 = AIR_MOLECULAR_MASS;
+        for (c, &(node, link)) in cylinders.iter().zip(&d.cylinders) {
+            let (n, e) = c.system.totals();
+            let mix = c.system.mix();
+            let nd = &mut d.net.nodes[node];
+            nd.volume = c.system.volume();
+            nd.m = n * M;
+            nd.e = e;
+            nd.mf = n * M * mix.p_fuel;
+            nd.mo = n * M * mix.p_o2;
+            // The port's flow constant as an effective area (kArea's inverse).
+            d.net.links[link].cda = c.exhaust_flow_rate * M.sqrt();
+        }
+        d.net.step(dt);
+        for (c, &(node, _)) in cylinders.iter_mut().zip(&d.cylinders) {
+            let nd = &d.net.nodes[node];
+            let (n0, _) = c.system.totals();
+            let n = nd.m / M;
+            let (f, o) = (nd.mf / nd.m, nd.mo / nd.m);
+            c.system.set_totals(n, nd.e, Mix { p_fuel: f, p_inert: 1.0 - f - o, p_o2: o });
+            c.exhaust_flow = n0 - n;
+            c.exhaust_moles += n0 - n;
+        }
+        d.listen();
+        d.turbines.iter().map(|&o| d.net.work[o]).sum()
     }
 
     /// The exhaust pulses as the synthesizer's input (writeToSynthesizer).

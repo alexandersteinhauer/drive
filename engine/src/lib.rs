@@ -2,6 +2,7 @@
 //! (https://github.com/ange-yaghi/engine-sim, MIT).
 
 pub mod crank;
+pub mod duct;
 pub mod engine;
 pub mod fastmath;
 pub mod function;

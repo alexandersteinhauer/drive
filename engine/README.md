@@ -9,6 +9,7 @@ at 10 kHz, and makes the sound from its exhaust valves' flow.
   `src/gas.rs`, `src/solver.rs`, `src/function.rs`: gas dynamics, engine-sim's constraint
   solver, sampled curves; `src/voice.rs`: the sound (below); `src/synth.rs`: engine-sim's
   synthesizer; `src/acoustics.rs`: the exhaust's acoustics (below); `src/turbo.rs`: turbochargers (below);
+  `src/duct.rs`: the exhaust's gas dynamics for the reference simulation (below);
   `src/wasm.rs`: the WebAssembly interface.
 - `./build.sh` compiles it to `../src/sim/engine.wasm` (needs the `wasm32-unknown-unknown`
   target: `rustup target add wasm32-unknown-unknown`).
@@ -108,6 +109,60 @@ m' / A^2, which takes ~4 M of a wave's energy per reflection as measured for ope
 flow (Peters et al., J. Fluid Mech. 256, 1993); pipes add turbulent wall friction. A test
 checks a pipe's damped mode against the sum of these losses. The voice computes its responses
 at one flow (`voice.acousticFlow`, the engine working hard).
+
+## Reference simulation
+
+The voice approximates what the exhaust does to the valves' flow (linear acoustics, a
+steepener, losses fitted to a recording). The reference simulation computes it instead,
+offline: `src/duct.rs` replaces the exhaust runners and collectors with pipes and volumes
+(`ducts` in the spec), and the sound is the pressure their open ends radiate.
+`examples/reference.rs` runs an engine with them on the dynamometer and writes it.
+
+- Each pipe is a column of finite volumes of the one-dimensional Euler equations with the
+  gas's composition, fifth order in space (WENO-Z) and third in time (SSP Runge-Kutta), HLLC
+  fluxes, in the cylinders' real gas (so energy passes between them exactly). Cells are sized
+  for 30 to the wavelength at 3 kHz in each pipe's gas: numerical damping ~0.02 dB/m there.
+- A pipe is a run of sections: straight, cones (the area varying cell to cell, the walls
+  pushing on the gas by p dA), a catalyst's monolith (its channels' open area and hydraulic
+  diameter), packed. Lumped volumes are kept to real junctions: at kilohertz a volume isn't
+  compact (a 0.4 L one feeding a 63 mm pipe cuts off near 700 Hz), where cones and volutes
+  are ducts.
+- Where the section steps, each side's state lies on its own wave curve, mass and total
+  enthalpy pass, and the momentum balance is Borda and Carnot's out of the narrower side
+  (losing (u1 - u2)^2 / 2 of head) and isentropic into it; the step's wall takes the
+  difference between the sides' fluxes. (A Riemann solver across the step instead would need
+  a pressure jump of rho c times the velocity's to pass the flow.)
+- Walls: friction and heat transfer from the local Reynolds number (Haaland; Colburn, or
+  laminar flow's constants for round and square channels); a packing's flow resistivity
+  (Darcy).
+- A pipe's end meets a node (a cylinder, a junction or chamber's volume, the atmosphere)
+  through an opening: a half Riemann problem, the end's state on its gas's wave curve, passing
+  what the opening does, quasi-steady and compressible (as a flow bench defines the port's
+  discharge coefficient). The exhaust valve opens by the port's flow-bench curve.
+- Turbines: nozzles between volumes taking the turbo's efficiency of the isentropic work of
+  what passes, the wastegate beside them opened by the boost controller; the shaft gets
+  their power.
+- Perforated walls (a silencer's core): each cell's holes a slug of gas driven by the
+  pressure across it against its jet's loss and viscous drag, its mass the holes' gas over
+  the wall and their end corrections.
+- Open ends radiate: a resistance in parallel with the end correction's mass, the
+  monopole's power at low frequency (within 1 % of Levine and Schwinger's reflection up to
+  ka = 0.8, ~1.1 kHz for an 80 mm tailpipe; too reflective above, 0.57 for 0.50 at ka = 1.5).
+- Combustion varies from cycle to cycle (`physics.cycleVariation`): each burn's flame speed
+  scaled by a normal factor, sigma 0.1 for the F154, which gives the literature's
+  coefficients of variation (IMEP 1.6-2.6 %, peak pressure 9-11 % at full load; IMEP ~9 % at
+  idle: Heywood 9.4).
+
+`tests/duct.rs` checks it against exact solutions: Sod's shock tube, the speed of sound and
+reflections off closed and open ends, a choked nozzle's flow, Darcy's friction, a
+perforation's Helmholtz resonance, a pulse through a cone (pressure as A^-1/2), a sudden
+expansion's loss (Borda-Carnot, within 0.5 %), and conservation of mass and energy; and that
+shock tubes across steps and a catalyst heating its gas stay bounded.
+
+Not yet modelled: the jets' and the flow's turbulence noise (the pipes carry no
+turbulence), the frequency-dependent wall losses of the acoustic boundary layer (Kirchhoff's,
+~0.4-1 dB/m at 1 kHz in these pipes), the walls' own temperature (set per pipe), the
+intake's sound, and the bypass valves' closed path.
 
 ## Physics beyond engine-sim's
 

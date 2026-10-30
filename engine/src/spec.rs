@@ -30,6 +30,145 @@ pub struct EngineSpec {
     /// Physics beyond engine-sim's (all off: engine-sim's own, step for step).
     #[serde(default)]
     pub physics: PhysicsSpec,
+    /// The exhaust as pipes and volumes for duct.rs's gas dynamics, in place of engine-sim's
+    /// lumped runners and collectors (the reference simulation; needs `physics.real_gas`).
+    #[serde(default)]
+    pub ducts: Option<DuctSpec>,
+}
+
+/// An exhaust (duct.rs) of pipes between named nodes: "cylinder N" (1-based: its exhaust
+/// valve, opening as the port's flow-bench curve has it), "atmosphere" (an open end,
+/// radiating), "closed" (a wall), or one of `volumes`.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DuctSpec {
+    pub pipes: Vec<DuctPipeSpec>,
+    #[serde(default)]
+    pub volumes: Vec<DuctVolumeSpec>,
+    #[serde(default)]
+    pub orifices: Vec<DuctOrificeSpec>,
+    #[serde(default)]
+    pub turbines: Vec<DuctTurbineSpec>,
+    #[serde(default)]
+    pub perforations: Vec<DuctPerforationSpec>,
+    /// The listener's distance from the open ends (m).
+    pub listener_distance: f64,
+    /// The highest frequency the cells resolve (Hz): 30 cells to its wavelength at each
+    /// pipe's temperature.
+    #[serde(default = "default_resolution")]
+    pub resolution: f64,
+}
+
+fn default_resolution() -> f64 {
+    3000.0
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DuctPipeSpec {
+    /// A name for perforations to refer to it by.
+    #[serde(default)]
+    pub name: Option<String>,
+    pub a: String,
+    pub b: String,
+    /// One section's (none with `sections`).
+    #[serde(default)]
+    pub length: f64,
+    /// Hydraulic diameter: a round pipe's own (at end `a`).
+    #[serde(default)]
+    pub diameter: f64,
+    /// A cone's diameter at end `b`, the diameter running linearly from `diameter`.
+    #[serde(default)]
+    pub diameter_b: Option<f64>,
+    /// Flow area; none: a round pipe's. A catalyst's monolith: its channels' open area,
+    /// `diameter` theirs.
+    #[serde(default)]
+    pub area: Option<f64>,
+    /// Square channels (a monolith's): their laminar friction and heat transfer.
+    #[serde(default)]
+    pub square: bool,
+    /// A packing's flow resistivity (Pa s/m^2).
+    #[serde(default)]
+    pub flow_resistivity: f64,
+    /// The gas's temperature at the start (K), and what the cells are sized for.
+    pub temperature: f64,
+    /// The wall's temperature (K); none: adiabatic.
+    #[serde(default)]
+    pub wall_temperature: Option<f64>,
+    /// Wall roughness (m); none: drawn steel tube's.
+    #[serde(default)]
+    pub roughness: Option<f64>,
+    /// Stretches end to end from `a` to `b`, each its own shape (straight, cone, monolith,
+    /// packed), in place of the fields above but `temperature`, which sizes the cells and
+    /// gives the walls' temperature and roughness where a section doesn't.
+    #[serde(default)]
+    pub sections: Vec<DuctSectionSpec>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DuctSectionSpec {
+    pub length: f64,
+    pub diameter: f64,
+    #[serde(default)]
+    pub diameter_b: Option<f64>,
+    #[serde(default)]
+    pub area: Option<f64>,
+    #[serde(default)]
+    pub square: bool,
+    #[serde(default)]
+    pub wall_temperature: Option<f64>,
+    #[serde(default)]
+    pub flow_resistivity: f64,
+    #[serde(default)]
+    pub roughness: Option<f64>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DuctVolumeSpec {
+    pub node: String,
+    pub volume: f64,
+    pub temperature: f64,
+}
+
+/// An opening between two nodes, of `area` and discharge coefficient `discharge`.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DuctOrificeSpec {
+    pub a: String,
+    pub b: String,
+    pub area: f64,
+    pub discharge: f64,
+}
+
+/// A perforated stretch of pipe `pipe`'s wall, `from` to `to` (m along it), opening onto a
+/// node or a pipe (named), alongside from `outer_from` along it.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DuctPerforationSpec {
+    pub pipe: String,
+    pub from: f64,
+    pub to: f64,
+    pub outer: String,
+    #[serde(default)]
+    pub outer_from: f64,
+    /// Open fraction of the wall, hole diameter, wall thickness.
+    pub porosity: f64,
+    pub hole_diameter: f64,
+    pub thickness: f64,
+}
+
+/// A turbine from node `a` to node `b`: a nozzle of effective area `area` taking the turbo's
+/// turbine efficiency of the isentropic work of what passes, and beside it a wastegate of
+/// effective area `wastegate` when fully open, opened by the boost controller (turbo.rs).
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DuctTurbineSpec {
+    pub a: String,
+    pub b: String,
+    pub area: f64,
+    pub wastegate: f64,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -43,6 +182,11 @@ pub struct PhysicsSpec {
     /// Without: engine-sim's fixed coefficient towards 90 C walls.
     #[serde(default)]
     pub wall_temperature: Option<f64>,
+    /// Cycle-to-cycle variation of combustion: each burn's flame speed scaled by a normal
+    /// random factor of this standard deviation (the early flame's growth, set by the
+    /// turbulence and mixture at the spark, varies from cycle to cycle: Heywood 9.4).
+    #[serde(default)]
+    pub cycle_variation: Option<f64>,
 }
 
 fn default_fluid_steps() -> usize {

@@ -102,8 +102,8 @@ struct DynamicTerms {
 }
 
 /// gamma(T) = GAMMA_0 - GAMMA_SLOPE T (Gatowski's line, extended to 0 K).
-const GAMMA_SLOPE: f64 = 8.13e-5;
-const GAMMA_0: f64 = 1.3678 + GAMMA_SLOPE * 300.0;
+pub const GAMMA_SLOPE: f64 = 8.13e-5;
+pub const GAMMA_0: f64 = 1.3678 + GAMMA_SLOPE * 300.0;
 
 /// Internal energy per mole of the real gas at `t`: the integral of R / (gamma(T) - 1) dT.
 #[inline]
@@ -1024,6 +1024,18 @@ impl GasSystem {
     }
 
     #[inline]
+    /// Moles and internal energy (J): what another model of the gas exchanges with.
+    pub fn totals(&self) -> (f64, f64) {
+        (self.state.n_mol, self.state.e_k)
+    }
+
+    /// Sets moles, internal energy and composition, after another model's exchange.
+    pub fn set_totals(&mut self, n: f64, e: f64, mix: Mix) {
+        self.state.n_mol = n;
+        self.state.e_k = e;
+        self.state.mix = mix;
+    }
+
     pub fn mix(&self) -> Mix {
         self.state.mix
     }
