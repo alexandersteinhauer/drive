@@ -389,6 +389,56 @@ is not a causal runtime model. Listener directivity/resampling and their explici
 remain separate from identifying the causal exhaust. The pressure pilot is 20 kHz (below
 10 kHz bandwidth); its WAVs are not a claim to reproduce the reference's full 24 kHz band.
 
+### Data-coverage learning curve
+
+`surrogate-data-plan.json` records a separate, reproducible coverage study rather than
+silently changing the shipped preview. Its nested training stages contain 25.15, 38.15,
+68.2 and 81.2 seconds across one, two, four and five independently initialized runs.
+The additions include 4,300–5,200 rpm load holds, throttle lift/reapplication, descending
+RPM histories, broader load/shift coverage, and one repeated program with a different
+combustion seed. New nearby-RPM validation and two new test programs use distinct seeds.
+The previously inspected confirmation drive is explicitly **diagnostic**, not a fresh test.
+
+Acquisition keeps the same corrected exhaust, stock upstream game spec, 10 kHz/four-step
+source and 24-substep teacher. With the old deployment-matched acquisition available:
+
+```sh
+uv run engine/scripts/surrogate_acquire.py "$OUT" \
+  --renderer "$BUILT_ABTRACE" --spec "$OLD/spec.json" --baseline "$OLD/data"
+```
+
+The source spec must match the current exported game spec before acquisition. The runner
+pins the binary, spec and reference configuration; validates complete metadata, physical
+sample grids and byte counts before reuse; and hashes completed files. It writes an
+immutable `manifest.json` plus separate capture completion records. Without `--baseline`,
+it renders the baseline/diagnostic programs too. Large captures stay outside the repo.
+
+`surrogate_study.py` fits one shared model across independent trajectories. Each run has
+its own zero-start convolution and preemphasis state; captures are **not concatenated**.
+Keep architecture, gates, ridge and training loss fixed for a data-only comparison:
+
+```sh
+uv run engine/scripts/surrogate_study.py fit "$OUT/manifest.json" "$OUT/baseline" \
+  --stage baseline --gates-from public/audio/surrogate/pista-retrained.json \
+  --iterations 6000 --atol 1e-7 --btol 1e-7
+# Repeat for targeted, coverage and replicated stages after their captures complete.
+```
+
+The residuals are scaled by `sqrt(baseline_effective_samples / total_effective_samples)`
+while the original-coefficient ridge stays fixed. Thus adding duplicate recordings does
+not silently weaken regularization. Training excludes one filter-length warmup per run;
+all comparisons use a common 1,024-sample exclusion by default. Added data must improve
+unseen validation conditions, not just training error. An iteration ceiling is not proof
+of convergence; compare the reported LSQR stops and residuals before interpreting the
+learning curve. Current and longer-history models must not be conflated in this study.
+
+Only choose a stage from validation results, freeze its exact weights/provenance, then
+use `evaluate --split test` on the reserved programs. No run-specific alignment, gain,
+playback EQ, extra noise or reference-physics adjustment is part of this experiment.
+Test results do not automatically replace either existing game asset. Acquisition and
+multi-run fitting have separate synthetic tests in `test_surrogate_acquire.py` and
+`test_surrogate_study.py`.
+
 ## Physics beyond engine-sim's
 
 engine-sim's thermodynamics are simplified in ways that make an engine far too efficient

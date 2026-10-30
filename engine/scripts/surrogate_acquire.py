@@ -165,7 +165,7 @@ def acquire(manifest, out, threads):
                        ','.join(':'.join(format(v, '.12g') for v in s) for s in run['program'])]
             env = {**os.environ, 'EXHAUST_ONLY': '1', 'FREQ': str(manifest['nativeRate']),
                    'FLUID': str(manifest['referenceFluidSteps'] if teacher else manifest['sourceFluidSteps']),
-                   'SEED': str(run['seed']), 'DUCT_THREADS': str(threads),
+                   'SEED': str(run['seed']), 'DUCT_THREADS': str(threads), 'MIN_SUBSTEPS': '1',
                    'SOURCE_REVISION': manifest['sourceRevision']}
             started, last_notice = time.monotonic(), time.monotonic()
             print(f'{rid} {key}: start, {sum(s[0] for s in run["program"]):.2f} simulated seconds', flush=True)
