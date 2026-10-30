@@ -6,7 +6,11 @@ import {
   withPistaSurrogateExhaust,
 } from "../sim/config";
 import { audioChannels, type EngineSpec } from "../sim/engineSpec";
-import { pistaExhaustMode, pistaExhaustUrl } from "./exhaustOptions";
+import {
+  pistaExhaustMode,
+  pistaExhaustStatus,
+  pistaExhaustUrl,
+} from "./exhaustOptions";
 import {
   fetchSurrogateModel,
   originalExhaustSpec,
@@ -14,8 +18,11 @@ import {
   type ModelRequest,
 } from "./surrogateModel";
 
-function pistaSpec(learned = true): EngineSpec {
-  const cfg = learned ? withPistaSurrogateExhaust() : ferrari488Pista;
+function pistaSpec(
+  variant: "pilot" | "retrained" | false = "pilot",
+): EngineSpec {
+  const cfg =
+    variant === false ? ferrari488Pista : withPistaSurrogateExhaust(variant);
   if (
     cfg.powertrain.type !== "combustion" ||
     cfg.powertrain.engine.type !== "simulated"
@@ -49,24 +56,101 @@ describe("Pista exhaust selection", () => {
     expect(pistaExhaustMode(url, "original")).toBe("surrogate");
   });
 
-  test("settings link preserves world and starts the Pista", () => {
-    const url = new URL("https://example.test/game/?seed=17&foo=bar#x");
-    const next = pistaExhaustUrl(url, "surrogate");
-    expect(next.searchParams.get("car")).toBe("pista");
-    expect(next.searchParams.get("exhaust")).toBe("surrogate");
-    expect(next.searchParams.get("seed")).toBe("17");
-    expect(next.searchParams.get("foo")).toBe("bar");
-    expect(next.hash).toBe("#x");
-    expect(url.searchParams.has("exhaust")).toBe(false);
+  test.each(["original", "surrogate", "surrogate-retrained"] as const)(
+    "saved %s survives reload and an explicit URL wins every saved mode",
+    (mode) => {
+      const url = new URL("https://example.test/game/?seed=17");
+      expect(pistaExhaustMode(new URL(url.href), mode)).toBe(mode);
+      url.searchParams.set("exhaust", mode);
+      for (const saved of [
+        null,
+        "original",
+        "surrogate",
+        "surrogate-retrained",
+      ])
+        expect(pistaExhaustMode(url, saved)).toBe(mode);
+    },
+  );
+
+  test.each(["", "unknown", "impulse"])(
+    "unrecognized or legacy %s never opts into a saved learned mode",
+    (mode) => {
+      const url = new URL("https://example.test/game/");
+      expect(pistaExhaustMode(url, mode)).toBe("original");
+      url.searchParams.set("exhaust", mode);
+      expect(pistaExhaustMode(url, "surrogate")).toBe("original");
+      expect(pistaExhaustMode(url, "surrogate-retrained")).toBe("original");
+    },
+  );
+
+  test.each(["original", "surrogate", "surrogate-retrained"] as const)(
+    "settings link for %s preserves world and starts the Pista",
+    (mode) => {
+      const url = new URL(
+        "https://example.test/game/?car=beetle&seed=17&foo=bar#x",
+      );
+      const next = pistaExhaustUrl(url, mode);
+      expect(next.searchParams.get("car")).toBe("pista");
+      expect(next.searchParams.get("exhaust")).toBe(mode);
+      expect(pistaExhaustMode(next, "original")).toBe(mode);
+      expect(next.searchParams.get("seed")).toBe("17");
+      expect(next.searchParams.get("foo")).toBe("bar");
+      expect(next.hash).toBe("#x");
+      expect(url.searchParams.get("car")).toBe("beetle");
+      expect(url.searchParams.has("exhaust")).toBe(false);
+    },
+  );
+
+  test("retrained status discloses the experimental pressure-only preview and strong bass", () => {
+    for (const active of [undefined, true]) {
+      const status = pistaExhaustStatus("surrogate-retrained", active);
+      expect(status).toContain("pressure-only");
+      expect(status).toContain("preview");
+      expect(status).toContain("experimental");
+      expect(status).toContain("bass still too strong");
+    }
+    expect(pistaExhaustStatus("surrogate-retrained", false)).toBe(
+      "Retrained preview unavailable; original exhaust active.",
+    );
+    expect(pistaExhaustStatus("original")).toBe("Original exhaust active.");
+    expect(pistaExhaustStatus("surrogate", false)).toBe(
+      "Pilot unavailable; original exhaust active.",
+    );
   });
 
-  test("opt-in changes only the Pista audio selector, never engine physics", () => {
-    const before = structuredClone([bmwI4, vwBeetle, ferrari488Pista]);
-    const spec = pistaSpec();
-    expect(spec.audio.surrogate?.fullScale).toBe(16);
-    expect(spec.audio.voice).toEqual(pistaSpec(false).audio.voice);
-    expect(originalExhaustSpec(spec)).toEqual(pistaSpec(false));
-    expect([bmwI4, vwBeetle, ferrari488Pista]).toEqual(before);
+  test.each(["pilot", "retrained"] as const)(
+    "%s opt-in changes only the Pista audio selector, never car or engine physics",
+    (variant) => {
+      const before = structuredClone([bmwI4, vwBeetle, ferrari488Pista]);
+      const cfg = withPistaSurrogateExhaust(variant);
+      if (
+        cfg.powertrain.type !== "combustion" ||
+        cfg.powertrain.engine.type !== "simulated"
+      )
+        throw new Error("expected simulated Pista");
+      const spec = cfg.powertrain.engine.spec;
+      expect(spec.audio.surrogate?.fullScale).toBe(16);
+      expect(spec.audio.voice).toEqual(pistaSpec(false).audio.voice);
+      expect(originalExhaustSpec(spec)).toEqual(pistaSpec(false));
+      delete spec.audio.surrogate;
+      expect(cfg).toEqual(ferrari488Pista);
+      expect([bmwI4, vwBeetle, ferrari488Pista]).toEqual(before);
+    },
+  );
+
+  test("factory defaults to the old pilot and retrained changes only its model URI", () => {
+    const implicit = withPistaSurrogateExhaust();
+    expect(implicit).toEqual(withPistaSurrogateExhaust("pilot"));
+    const pilot = pistaSpec();
+    const retrained = pistaSpec("retrained");
+    expect(pilot.audio.surrogate?.model).toBe(
+      "audio/surrogate/pista-pilot.json",
+    );
+    expect(retrained.audio.surrogate?.model).toBe(
+      "audio/surrogate/pista-retrained.json",
+    );
+    retrained.audio.surrogate!.model = pilot.audio.surrogate!.model;
+    expect(retrained).toEqual(pilot);
   });
 
   test("surrogate stream takes precedence over fallback voice", () => {
@@ -93,18 +177,23 @@ describe("optional exhaust model asset", () => {
     expect(requests).toBe(0);
   });
 
-  test("selected pilot loads relative to the deployment base", async () => {
-    let requested = "";
-    const bytes = modelBytes();
-    const request = (async (url: string | URL | Request) => {
-      requested = String(url);
-      return new Response(bytes);
-    }) as ModelRequest;
-    expect(await fetchSurrogateModel(pistaSpec(), "/game/", request)).toEqual(
-      bytes,
-    );
-    expect(requested).toBe("/game/audio/surrogate/pista-pilot.json");
-  });
+  test.each(["pilot", "retrained"] as const)(
+    "selected %s loads only its own model relative to the deployment base",
+    async (variant) => {
+      const requested: string[] = [];
+      const bytes = modelBytes();
+      const request = (async (url: string | URL | Request) => {
+        requested.push(String(url));
+        return new Response(bytes);
+      }) as ModelRequest;
+      expect(
+        await fetchSurrogateModel(pistaSpec(variant), "/game/", request),
+      ).toEqual(bytes);
+      expect(requested).toEqual([
+        `/game/audio/surrogate/pista-${variant}.json`,
+      ]);
+    },
+  );
 
   test("failed HTTP, network errors, and malformed model reject for voice fallback", async () => {
     const notFound = (async () =>
@@ -120,6 +209,20 @@ describe("optional exhaust model asset", () => {
     ).rejects.toThrow("offline");
     const bad = (async () => new Response("not JSON")) as ModelRequest;
     await expect(fetchSurrogateModel(pistaSpec(), "/", bad)).rejects.toThrow();
+  });
+
+  test("declared native training rate must match the engine; legacy metadata stays compatible", () => {
+    const spec = pistaSpec("retrained");
+    expect(() =>
+      validateSurrogateModel(
+        modelBytes({ nativeRate: spec.simulationFrequency }),
+        spec,
+      ),
+    ).not.toThrow();
+    expect(() =>
+      validateSurrogateModel(modelBytes({ nativeRate: 20000 }), spec),
+    ).toThrow("native engine rate");
+    expect(() => validateSurrogateModel(modelBytes(), spec)).not.toThrow();
   });
 
   test("wrong model cylinders, controls, output type or rate are rejected", () => {

@@ -1,0 +1,651 @@
+{
+  "status": "Retrained experimental preview, not the default pilot; strict bass-regression promotion gate did not pass",
+  "modelKind": "Supervised regularized control-gated causal FIR regression, not a neural network",
+  "referencePhysicsCommit": "47425e57409e0b4cb03714665bd8727e18ead28a",
+  "trainingToolsCommit": "63b657d",
+  "model": {
+    "gates": 6,
+    "cylinders": 8,
+    "powers": [
+      1,
+      2
+    ],
+    "taps": 512,
+    "rate": 20000,
+    "nativeRate": 10000,
+    "flowScaleKgPerS": 0.1
+  },
+  "inputControls": [
+    "rpm/1000",
+    "manifold/1e5",
+    "wastegate",
+    "throttle",
+    "flap"
+  ],
+  "sourceSettings": {
+    "nativeRate": 10000,
+    "fluidSteps": 4,
+    "boostAndCombustion": "unmodified stock game settings"
+  },
+  "teacherSettings": {
+    "nativeRate": 10000,
+    "fluidSteps": 24,
+    "fluidRate": 240000,
+    "upstream": "same stock settings; add only the corrected reference exhaust"
+  },
+  "outputs": "Two outlet contributions to listener pressure (Pa at 5 m), before directivity; no jet/mechanical/intake/turbo noise",
+  "playbackFullScalePa": 16,
+  "datasets": {
+    "trainingSeconds": 25.15,
+    "validationSeconds": 8.45,
+    "diagnosticTestSeconds": 12.1,
+    "freshConfirmationSeconds": 8.4,
+    "seeds": {
+      "train": 17,
+      "validation": 73,
+      "diagnosticTest": 239,
+      "confirmation": 6837
+    }
+  },
+  "selection": {
+    "criterion": "spectrum",
+    "commonWarmupSamples": 1024,
+    "minCorrelation": 0.7,
+    "candidateCount": 10,
+    "validationMaxAbsBandErrorDb": 5.2321802026197926,
+    "validationMeanAbsBandErrorDb": 1.6192272052426768,
+    "note": "First waveform-first winner rejected for bass regression on the original held-out drive. Second spectral-first selection used validation only, then a fresh independent confirmation drive."
+  },
+  "optimizer": {
+    "method": "matrix-free FFT LSQR with augmented original-coefficient ridge",
+    "iterations": 400,
+    "damping": 1.0,
+    "preemphasis": 0.9,
+    "gateWidth": 1,
+    "segmentBalance": {
+      "enabled": false
+    },
+    "convolution": {
+      "backend": "overlap-add",
+      "blockSize": 512,
+      "fftSize": 1024
+    }
+  },
+  "fit": [
+    {
+      "iterations": 400,
+      "iterationLimit": 400,
+      "stop": 7,
+      "stopReason": "iteration_limit",
+      "converged": false,
+      "iterationLimitReached": true,
+      "residual": 88.82051773630191,
+      "normalResidual": 3421.5992445242314,
+      "conditionEstimate": 8816.48574756505,
+      "convolution": {
+        "backend": "overlap-add",
+        "blockSize": 512,
+        "fftSize": 1024
+      }
+    },
+    {
+      "iterations": 400,
+      "iterationLimit": 400,
+      "stop": 7,
+      "stopReason": "iteration_limit",
+      "converged": false,
+      "iterationLimitReached": true,
+      "residual": 85.56916327978205,
+      "normalResidual": 2227.5970837642767,
+      "conditionEstimate": 8816.624313834973,
+      "convolution": {
+        "backend": "overlap-add",
+        "blockSize": 512,
+        "fftSize": 1024
+      }
+    }
+  ],
+  "confirmation": {
+    "old": {
+      "samples": 166974,
+      "durationSeconds": 8.3487,
+      "rmsReferencePa": 1.4332231538722155,
+      "rmsPredictionPa": 2.1614505013715397,
+      "correlation": 0.38146635754418046,
+      "rmsRatio": 1.508104648973772,
+      "levelRatioDb": 3.56862957463997,
+      "waveErrorDb": 3.271147555987144,
+      "normalizedWaveMse": 2.123805570633575,
+      "preemphasizedNormalizedWaveMse": 2.8198602363057605,
+      "waveScore": 2.471832903469668,
+      "bands": {
+        "20-100": 1.001252970628427,
+        "100-200": 0.6926358452335883,
+        "200-400": 6.435967975408401,
+        "400-800": 3.6548574100386784,
+        "800-1600": 2.6739987441348796,
+        "1600-3200": 8.286541436748742,
+        "3200-6400": 9.177384619798474,
+        "6400-9500": 1.294920008865296
+      },
+      "bandWaveErrorDb": {
+        "20-100": -3.7500996702307345,
+        "100-200": -3.5251253248401477,
+        "200-400": 4.9450475774165135,
+        "400-800": 3.19482315429995,
+        "800-1600": 5.059192161411837,
+        "1600-3200": 8.840558081470235,
+        "3200-6400": 9.442211316114292,
+        "6400-9500": 3.569580387513918
+      }
+    },
+    "new": {
+      "samples": 166974,
+      "durationSeconds": 8.3487,
+      "rmsReferencePa": 1.4332231538722155,
+      "rmsPredictionPa": 1.3850532815725674,
+      "correlation": 0.8060172043368266,
+      "rmsRatio": 0.9663905288094844,
+      "levelRatioDb": -0.2969467008234002,
+      "waveErrorDb": -4.247287749692359,
+      "normalizedWaveMse": 0.3760721950883419,
+      "preemphasizedNormalizedWaveMse": 0.48981770606645514,
+      "waveScore": 0.4329449505773985,
+      "bands": {
+        "20-100": -1.7673771099386033,
+        "100-200": -0.7962473372049552,
+        "200-400": 7.840554094710831,
+        "400-800": -0.5562987036928511,
+        "800-1600": -1.0397193176360544,
+        "1600-3200": 0.5484794650504331,
+        "3200-6400": 0.7905108310065332,
+        "6400-9500": 1.6670122463304415
+      },
+      "bandWaveErrorDb": {
+        "20-100": -3.6940396781215097,
+        "100-200": -3.840584786239762,
+        "200-400": 7.467185868902626,
+        "400-800": -5.644782097310314,
+        "800-1600": -2.0210194876775405,
+        "1600-3200": 2.698431188220874,
+        "3200-6400": 3.312245697312228,
+        "6400-9500": 3.7207295366672484
+      }
+    },
+    "oldSegmentScore": 2.4862178525242,
+    "newSegmentScore": 0.7671651792206199,
+    "checks": {
+      "segmentScoreImproves": true,
+      "globalWaveMseImproves": true,
+      "medianBandErrorImproves": true,
+      "worstBandErrorImproves": true,
+      "bassBandNotWorse": false
+    },
+    "decision": "Expose explicit preview; preserve existing pilot because bassBandNotWorse is false"
+  },
+  "runtime": {
+    "nativeFrames": 84000,
+    "audioFrames": 370264,
+    "inputRate": 10000,
+    "outputRate": 44100,
+    "inputSeconds": 8.4,
+    "outputSeconds": 8.396009070294784,
+    "medianMs": 99.19299999999998,
+    "streamPercentRealtime": 1.1808690476190473,
+    "minMs": 98.702583,
+    "maxMs": 100.54741700000001,
+    "includes": "JS packet copy, model, input and output resampling; excludes model load, loudness and directivity"
+  },
+  "runtimeAgreement": {
+    "maxAbsPa": 1.33514404296875e-05,
+    "relativeRms": 1.0999250434906571e-06,
+    "finite": true
+  },
+  "limitations": [
+    "200-400 Hz is 7.84 dB above confirmation reference, versus old pilot 6.44 dB; phase and transient errors remain.",
+    "400-iteration LSQR fits reached their iteration cap, not full convergence.",
+    "No jet/mechanical/turbo noise, listener directivity, or reference-fidelity claim beyond the recorded data.",
+    "Reference tiny-perturbation convergence and other documented physical approximations remain unresolved."
+  ],
+  "export": "9 significant decimal digits after f32 conversion; verified bit-identical runtime weights, no fitted playback gain/EQ",
+  "sha256": "555036c99f396a37a59e19f4c2b41711696be5c8929d6c980309d7e63d407a65",
+  "dataIdentity": {
+    "nativeRenderer": {
+      "sha256": "223150b939569c261ba9bcc9934035c9b38bb44ef3486942a4014dd599c7bee3",
+      "bytes": 1055200
+    },
+    "gameSpec": {
+      "sha256": "0294c47a4d58b720ad04718f30390b7d360b329e64af12d7704f17acddf4aacc",
+      "bytes": 49245
+    },
+    "referenceConfig": {
+      "sha256": "6e191073e4a2f3721a32825607d277e22574135a3acc47c5ec7c6bc0f9304dc1",
+      "bytes": 11742
+    },
+    "referencePhysicsSource": {
+      "sha256": "326de015833194725672fa548f7e9893d2f9853afe32ada1f53f115167ecc75e",
+      "bytes": 108120
+    }
+  },
+  "programs": {
+    "train": {
+      "seed": 17,
+      "segmentsSecondsRpm0Rpm1Pedal": [
+        [
+          1.5,
+          1000.0,
+          1000.0,
+          0.0
+        ],
+        [
+          1.0,
+          1000.0,
+          1800.0,
+          0.2
+        ],
+        [
+          1.0,
+          1800.0,
+          1800.0,
+          0.2
+        ],
+        [
+          0.8,
+          1800.0,
+          2500.0,
+          0.45
+        ],
+        [
+          1.2,
+          2500.0,
+          2500.0,
+          0.45
+        ],
+        [
+          0.5,
+          2500.0,
+          3300.0,
+          0.8
+        ],
+        [
+          1.5,
+          3300.0,
+          3300.0,
+          1.0
+        ],
+        [
+          0.4,
+          3300.0,
+          4200.0,
+          1.0
+        ],
+        [
+          1.5,
+          4200.0,
+          4200.0,
+          1.0
+        ],
+        [
+          0.4,
+          4200.0,
+          5200.0,
+          1.0
+        ],
+        [
+          1.5,
+          5200.0,
+          5200.0,
+          1.0
+        ],
+        [
+          0.4,
+          5200.0,
+          6500.0,
+          1.0
+        ],
+        [
+          1.5,
+          6500.0,
+          6500.0,
+          1.0
+        ],
+        [
+          0.4,
+          6500.0,
+          7500.0,
+          1.0
+        ],
+        [
+          1.5,
+          7500.0,
+          7500.0,
+          1.0
+        ],
+        [
+          0.25,
+          7500.0,
+          5800.0,
+          0.0
+        ],
+        [
+          0.6,
+          5800.0,
+          5800.0,
+          1.0
+        ],
+        [
+          0.4,
+          5800.0,
+          5800.0,
+          0.0
+        ],
+        [
+          0.8,
+          5800.0,
+          3200.0,
+          0.0
+        ],
+        [
+          1.0,
+          3200.0,
+          3200.0,
+          0.2
+        ],
+        [
+          1.0,
+          3200.0,
+          3200.0,
+          0.55
+        ],
+        [
+          0.7,
+          3200.0,
+          3200.0,
+          1.0
+        ],
+        [
+          0.7,
+          3200.0,
+          1800.0,
+          0.0
+        ],
+        [
+          1.0,
+          1800.0,
+          1800.0,
+          0.1
+        ],
+        [
+          0.7,
+          1800.0,
+          2800.0,
+          0.7
+        ],
+        [
+          1.3,
+          2800.0,
+          2800.0,
+          1.0
+        ],
+        [
+          0.6,
+          2800.0,
+          1000.0,
+          0.0
+        ],
+        [
+          1.0,
+          1000.0,
+          1000.0,
+          0.0
+        ]
+      ]
+    },
+    "validation": {
+      "seed": 73,
+      "segmentsSecondsRpm0Rpm1Pedal": [
+        [
+          1.0,
+          1000.0,
+          1000.0,
+          0.0
+        ],
+        [
+          1.0,
+          1000.0,
+          2800.0,
+          0.65
+        ],
+        [
+          0.7,
+          2800.0,
+          2800.0,
+          0.35
+        ],
+        [
+          1.4,
+          2800.0,
+          4000.0,
+          1.0
+        ],
+        [
+          0.8,
+          4000.0,
+          6200.0,
+          1.0
+        ],
+        [
+          0.25,
+          6200.0,
+          4400.0,
+          0.0
+        ],
+        [
+          0.6,
+          4400.0,
+          4400.0,
+          1.0
+        ],
+        [
+          0.8,
+          4400.0,
+          2400.0,
+          0.0
+        ],
+        [
+          0.6,
+          2400.0,
+          2400.0,
+          0.25
+        ],
+        [
+          0.8,
+          2400.0,
+          1000.0,
+          0.0
+        ],
+        [
+          0.5,
+          1000.0,
+          1000.0,
+          0.0
+        ]
+      ]
+    },
+    "test": {
+      "seed": 239,
+      "segmentsSecondsRpm0Rpm1Pedal": [
+        [
+          1.5,
+          1000.0,
+          1000.0,
+          0.0
+        ],
+        [
+          1.5,
+          1000.0,
+          3800.0,
+          0.8
+        ],
+        [
+          1.0,
+          3800.0,
+          3800.0,
+          1.0
+        ],
+        [
+          1.5,
+          3800.0,
+          7000.0,
+          1.0
+        ],
+        [
+          0.3,
+          7000.0,
+          5000.0,
+          0.0
+        ],
+        [
+          0.8,
+          5000.0,
+          5000.0,
+          1.0
+        ],
+        [
+          0.5,
+          5000.0,
+          5000.0,
+          0.0
+        ],
+        [
+          1.0,
+          5000.0,
+          2500.0,
+          0.0
+        ],
+        [
+          1.0,
+          2500.0,
+          2500.0,
+          0.25
+        ],
+        [
+          1.0,
+          2500.0,
+          5000.0,
+          0.6
+        ],
+        [
+          1.0,
+          5000.0,
+          1000.0,
+          0.0
+        ],
+        [
+          1.0,
+          1000.0,
+          1000.0,
+          0.0
+        ]
+      ]
+    },
+    "confirmation": {
+      "seed": 6837,
+      "segmentsSecondsRpm0Rpm1Pedal": [
+        [
+          0.8,
+          1000.0,
+          1000.0,
+          0.0
+        ],
+        [
+          0.8,
+          1000.0,
+          2600.0,
+          0.55
+        ],
+        [
+          0.6,
+          2600.0,
+          2600.0,
+          0.3
+        ],
+        [
+          0.7,
+          2600.0,
+          3600.0,
+          1.0
+        ],
+        [
+          0.6,
+          3600.0,
+          3600.0,
+          1.0
+        ],
+        [
+          0.7,
+          3600.0,
+          6000.0,
+          1.0
+        ],
+        [
+          0.6,
+          6000.0,
+          6000.0,
+          1.0
+        ],
+        [
+          0.2,
+          6000.0,
+          4600.0,
+          0.0
+        ],
+        [
+          0.5,
+          4600.0,
+          4600.0,
+          1.0
+        ],
+        [
+          0.5,
+          4600.0,
+          4600.0,
+          0.0
+        ],
+        [
+          0.6,
+          4600.0,
+          2200.0,
+          0.0
+        ],
+        [
+          0.6,
+          2200.0,
+          3200.0,
+          0.5
+        ],
+        [
+          0.6,
+          3200.0,
+          1000.0,
+          0.0
+        ],
+        [
+          0.6,
+          1000.0,
+          1000.0,
+          0.0
+        ]
+      ]
+    }
+  },
+  "sampleConvention": {
+    "native": "step end",
+    "firstTimeSeconds": 0.0001,
+    "modelRate": 20000,
+    "teacherFirstRawSampleIndex": 23,
+    "teacherStride": 12,
+    "comparisonWarmupModelSamples": 1024,
+    "alignmentFit": false
+  }
+}

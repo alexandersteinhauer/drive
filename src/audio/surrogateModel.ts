@@ -31,6 +31,12 @@ export function validateSurrogateModel(
     throw new Error("exhaust pilot must predict two pressure outputs");
   if (m.rate !== 20000)
     throw new Error("exhaust pilot must run at its trained 20 kHz rate");
+  // New models declare their native training rate. Do not silently recreate the old
+  // train/runtime mismatch if engine settings change; legacy pilots lack this metadata.
+  if (m.nativeRate !== undefined && m.nativeRate !== spec.simulationFrequency)
+    throw new Error(
+      "exhaust model native engine rate does not match the source",
+    );
 }
 
 export type ModelRequest = (

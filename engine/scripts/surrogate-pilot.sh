@@ -2,14 +2,14 @@
 # Experimental, deployment-matched exhaust-only training pipeline. Large files stay outside
 # the repo; nothing automatically replaces the in-game asset. Python always runs with uv.
 #   bash engine/scripts/surrogate-pilot.sh /absolute/output/directory
-# Optional fit settings: GATES,TAPS,ITERATIONS,GATE_WIDTH,PREEMPHASIS,BALANCE_SEGMENTS=1.
+# Optional fit settings: GATES,TAPS,ITERATIONS,DAMPING,GATE_WIDTH,PREEMPHASIS,BALANCE_SEGMENTS=1.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 OUT="${1:?supply an output directory (renders are large and take minutes)}"
 mkdir -p "$OUT/data"
 OUT="$(cd "$OUT" && pwd)"
 cd "$ROOT"
-bun -e 'import {withPistaSurrogateExhaust} from "./src/sim/config.ts"; const c=withPistaSurrogateExhaust(); if(c.powertrain.type!=="combustion"||c.powertrain.engine.type!=="simulated") throw Error("Pista"); await Bun.write(process.argv[1],JSON.stringify(c.powertrain.engine.spec));' "$OUT/spec.json"
+bun -e 'import {withPistaSurrogateExhaust} from "./src/sim/config.ts"; const c=withPistaSurrogateExhaust(); if(c.powertrain.type!=="combustion"||c.powertrain.engine.type!=="simulated") throw Error("Pista"); if(c.powertrain.engine.spec.simulationFrequency!==10000||c.powertrain.engine.spec.fluidSteps!==4) throw Error("Update the acquisition protocol for the changed game rates before rendering"); await Bun.write(process.argv[1],JSON.stringify(c.powertrain.engine.spec));' "$OUT/spec.json"
 (cd engine && cargo build --release --features parallel --example abtrace --example surrogate)
 B="${CARGO_TARGET_DIR:-$ROOT/engine/target}/release/examples/abtrace"
 R="$ROOT/engine/scripts/pista-reference.json"
@@ -31,7 +31,7 @@ for mode in lumped ducted; do
     done
 done
 FIT=(--model-rate 20000 --gates "${GATES:-6}" --taps "${TAPS:-1024}" --iterations "${ITERATIONS:-350}" \
-    --gate-width "${GATE_WIDTH:-1}" --preemphasis "${PREEMPHASIS:-0.9}" --powers 1 2)
+    --damping "${DAMPING:-0.1}" --gate-width "${GATE_WIDTH:-1}" --preemphasis "${PREEMPHASIS:-0.9}" --powers 1 2)
 if [[ "${BALANCE_SEGMENTS:-0}" == 1 ]]; then FIT+=(--balance-segments); fi
 # Validation is the positional "test" dataset during fitting; final test is untouched.
 uv run engine/scripts/surrogate_fit.py "$OUT/data/train-ref" "$OUT/data/train-game" "$OUT/data/validation-ref" "$OUT/data/validation-game" "$R" "$OUT/model" "${FIT[@]}" > "$OUT/fit.log"

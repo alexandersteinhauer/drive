@@ -285,6 +285,18 @@ is an additional provisional input-distribution gap, not a hidden driving-physic
 Model load/init/runtime failure creates a new original-voice worklet and changes the simulation stream atomically, with a visible warning.
 Cached audio nodes are muted/suspended and their histories cleared when cars switch.
 
+A separate **Retrained (preview)** option is available at
+`?car=pista&exhaust=surrogate-retrained` (`pista-retrained.json`, provenance alongside).
+It uses the corrected reference, stock upstream game settings, native 10 kHz/four-substep
+inputs and the exact runtime resampling path. It has six gates, 512 taps and ridge damping
+1; it is still a regression model, not a neural network. On a fresh 8.4 s confirmation
+drive, waveform correlation improved from 0.381 to 0.806 and bands above 400 Hz were within
+1.7 dB. However, 200–400 Hz was +7.84 dB versus the old pilot's +6.44 dB. It therefore
+**failed the strict no-bass-regression promotion gate** and remains an explicit preview,
+not a silent replacement of the existing pilot. No EQ, per-clip gain, new noise or physics
+changes conceal that limitation. Both models keep the same fixed 16 Pa/full-scale playback
+calibration and original-voice failure fallback.
+
 - `examples/abtrace.rs`: paired game/reference traces, crank trajectory held by the dyno,
   separate burn seeds for training, validation and test drives. `EXHAUST_ONLY=1` swaps only
   the exhaust geometry; it does not merge the reference config's combustion/boost overrides
@@ -334,12 +346,21 @@ while the teacher adds the corrected exhaust with 24 fluid substeps (240 kHz rad
 Training, validation and test have distinct trajectories and seeds. Model fitting uses
 validation for comparison; the final test is evaluated with frozen weights.
 
+The retrained preview's fixed fit settings can be reproduced with
+`GATES=6 TAPS=512 DAMPING=1 ITERATIONS=400 PREEMPHASIS=0.9` before the command above.
+Its provenance also stores the independent confirmation program and all seeds; the shorter
+model was selected on validation, not on confirmation labels.
+
 Or use the individual tools. `scripts/test_surrogate_fit.py` checks causality, indexing,
 identification on an independent synthetic trajectory, preservation of the regularized
 objective under preconditioning, exact native/model interpolation, actual flap state,
 fixed teacher decimation timestamps and frozen-model evaluation. `scripts/surrogate_select.py`
-uses the fitter's canonical segment boundaries and a preregistered equal-segment raw/
-preemphasized waveform-error score; never supply final test results to select parameters.
+uses the fitter's canonical segment boundaries and one common warm-up exclusion. It
+supports a raw/preemphasized waveform criterion or `--criterion spectrum` (worst then mean
+absolute global band-level error, with a waveform-correlation floor). Never supply final
+confirmation results to select parameters. The first waveform-first round exposed a bass
+regression and was rejected; the second spectral-validation round used a new independent
+confirmation trajectory, and its remaining bass regression is disclosed above.
 `scripts/surrogate-stream-wasm.ts` replays the exported native-rate input through the actual
 streaming adapter, rather than bypassing resampling with precomputed model-rate features. A local steady-state fit alone is not an acceptance test:
 hold out entire trajectories and random seeds, check shifts/lift/reapply/flaps/thermal

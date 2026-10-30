@@ -35,7 +35,11 @@ import { CrashCard, Hud, type AssistMode } from "./hud";
 import { PauseMenu } from "./pauseMenu";
 import { Stats } from "./stats";
 import { EngineSound } from "./audio/engineSound";
-import { pistaExhaustMode, pistaExhaustUrl } from "./audio/exhaustOptions";
+import {
+  pistaExhaustMode,
+  pistaExhaustStatus,
+  pistaExhaustUrl,
+} from "./audio/exhaustOptions";
 import { loadEngineModule } from "./sim/engineSim";
 import type { EngineSpec } from "./sim/engineSpec";
 import { SimulatedEngine } from "./sim/powerplant";
@@ -182,9 +186,11 @@ const models: {
   },
   {
     config:
-      pistaExhaust === "surrogate"
-        ? withPistaSurrogateExhaust()
-        : exhaust(ferrari488Pista),
+      pistaExhaust === "original"
+        ? exhaust(ferrari488Pista)
+        : withPistaSurrogateExhaust(
+            pistaExhaust === "surrogate-retrained" ? "retrained" : "pilot",
+          ),
     url: "models/ferrari-488-pista.glb",
     // At the cover, 0.16 m ahead of the projector lens: further in, the beam would light the
     // bumper below from inside.
@@ -321,19 +327,11 @@ function loadEngineSound(): void {
     s.onBackendChange = (surrogate) => {
       if (car !== current) return;
       engine.sim.surrogateAudio = surrogate;
-      menu.setPistaExhaustStatus(
-        surrogate
-          ? "Exhaust-only pilot active; transients are experimental."
-          : "Pilot unavailable; original exhaust active.",
-      );
+      menu.setPistaExhaustStatus(pistaExhaustStatus(pistaExhaust, surrogate));
     };
     s.onWarning = reportAudioWarning;
     if (spec.audio.surrogate)
-      menu.setPistaExhaustStatus(
-        s.surrogate
-          ? "Exhaust-only pilot active; transients are experimental."
-          : "Pilot unavailable; original exhaust active.",
-      );
+      menu.setPistaExhaustStatus(pistaExhaustStatus(pistaExhaust, s.surrogate));
     if (s.warning) reportAudioWarning(s.warning);
     if (audioInteracted) s.resume();
   });
@@ -427,10 +425,7 @@ const menu = new PauseMenu(
   () => render(),
   {
     mode: pistaExhaust,
-    status:
-      pistaExhaust === "surrogate"
-        ? "Exhaust-only pilot; known transient and training-rate limits."
-        : "Original exhaust active.",
+    status: pistaExhaustStatus(pistaExhaust),
     onChange: (mode) => {
       localStorage.setItem("pistaExhaust", mode);
       location.assign(pistaExhaustUrl(new URL(location.href), mode));

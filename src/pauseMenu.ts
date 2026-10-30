@@ -76,6 +76,7 @@ export class PauseMenu {
       for (const [value, text] of [
         ["original", "Original"],
         ["surrogate", "Learned (experimental)"],
+        ["surrogate-retrained", "Retrained (preview)"],
       ] as const) {
         const option = document.createElement("option");
         option.value = value;

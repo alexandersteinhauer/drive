@@ -1,51 +1,91 @@
 # /// script
-# dependencies = ["numpy"]
+# dependencies = ["numpy", "scipy"]
 # ///
-"""Select a bounded surrogate candidate set on a separate validation trajectory only.
+"""Select a bounded surrogate set on a separate validation trajectory only.
 
 uv run engine/scripts/surrogate_select.py <native-game.steps.json> <selection.json>
-    <candidate-prefix> ...
-Each prefix has the fitter's .test.npz and .model.json, where "test" is the validation
-trajectory for this stage. Final test data must not be supplied here to choose parameters.
+    <candidate-prefix> ... [--criterion wave|spectrum]
+Each prefix has .test.npz/.model.json/.report.json; "test" means the validation
+trajectory at this stage. Never supply the final confirmation labels to select weights.
 
-The preregistered score averages raw and preemphasized normalized waveform errors,
-then weights each prescribed segment equally. This balances quiet/loud states and
-high-frequency detail without normalizing or equalizing the deployed waveform.
+wave: equal-segment raw/.97-preemphasized normalized waveform error.
+spectrum: worst then mean absolute global band-level error, with a waveform-correlation
+floor (default .7). All candidates share the longest FIR's warm-up exclusion and the
+fitter's canonical (start,end] step-end intervals. Neither criterion changes playback gain.
 """
+import argparse
+import importlib.util
 import json
 from pathlib import Path
-import sys
 
 import numpy as np
 
+module_spec = importlib.util.spec_from_file_location("surrogate_fit", Path(__file__).with_name("surrogate_fit.py"))
+fitter = importlib.util.module_from_spec(module_spec)
+module_spec.loader.exec_module(fitter)
 
-def score(prefix, meta):
-    # Consume the fitter's canonical (start,end] step-end intervals and fixed score,
-    # rather than reimplementing its boundary indexing here.
+
+def score(prefix, meta, warmup=None):
     report = json.loads(Path(prefix+".report.json").read_text())
-    value = report["segmentScore"]["mean"]
-    if value is None or not np.isfinite(value):
-        raise ValueError(f"no finite validation score: {prefix}")
-    segments = report["segments"]
-    if len(segments) != len(meta["program"]):
+    recorded_segments = report["segments"]
+    if len(recorded_segments) != len(meta["program"]):
         raise ValueError(f"validation segment count mismatch: {prefix}")
-    for actual, expected in zip(segments, meta["program"]):
+    for actual, expected in zip(recorded_segments, meta["program"]):
         duration, r0, r1, throttle = expected
         if not np.allclose([actual["duration"], *actual["rpm"], actual["throttle"]],
                            [duration, r0, r1, throttle], rtol=0, atol=1e-10):
             raise ValueError(f"candidate evaluated on another trajectory: {prefix}")
-    return {"prefix":prefix, "score":value, "segments":segments}
+    if warmup is None:
+        value = report["segmentScore"]["mean"]
+        if value is None or not np.isfinite(value):
+            raise ValueError(f"no finite validation score: {prefix}")
+        return {"prefix":prefix, "score":value, "segments":recorded_segments}
+    model = json.loads(Path(prefix+".model.json").read_text())
+    rate = model["rate"]
+    labels = model.get("labels", [])
+    outputs = sum(s.startswith("pressure") for s in labels) if labels else len(model["kernels"][0])
+    if not outputs:
+        raise ValueError("model has no pressure outputs")
+    with np.load(prefix+".test.npz") as data:
+        y, p = data["reference"][:, :outputs], data["prediction"][:, :outputs]
+        if "firstTime" in data and not np.isclose(float(data["firstTime"]), 1/meta["rate"], rtol=0, atol=1e-15):
+            raise ValueError("different input timestamp convention")
+    full = fitter.metrics(y, p, rate, warmup)
+    segments = []
+    for segment, a, end in fitter.segment_ranges(meta["program"], meta["rate"], rate, len(y)):
+        a = min(end, max(a, warmup))
+        segments.append({**segment, **fitter.metrics(y[:end], p[:end], rate, a)})
+    values = [s["waveScore"] for s in segments if s["samples"]]
+    errors = np.abs(list(full["bands"].values()))
+    return {"prefix":prefix, "score":float(np.mean(values)), "segments":segments,
+            "global":full, "maxAbsBandErrorDb":float(errors.max()),
+            "meanAbsBandErrorDb":float(errors.mean())}
 
 
 def main():
-    meta = json.loads(Path(sys.argv[1]).read_text())
-    candidates = [score(p, meta) for p in sys.argv[3:]]
-    candidates.sort(key=lambda x:x["score"])
-    result = {"role":"validation only", "criterion":"mean segment 0.5*(raw NMSE + .97 preemphasized NMSE)",
-              "winner":candidates[0]["prefix"], "candidates":candidates}
-    Path(sys.argv[2]).write_text(json.dumps(result, indent=2, allow_nan=False)+"\n")
-    for row in candidates:
-        print(f"{row['prefix']}: {row['score']:.6g}")
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("metadata")
+    ap.add_argument("out")
+    ap.add_argument("prefixes", nargs="+")
+    ap.add_argument("--criterion", choices=["wave", "spectrum"], default="wave")
+    ap.add_argument("--min-correlation", type=float)
+    args = ap.parse_args()
+    meta = json.loads(Path(args.metadata).read_text())
+    warmup = max(len(json.loads(Path(p+".model.json").read_text())["kernels"][0][0][0]) for p in args.prefixes)
+    rows = [score(p, meta, warmup) for p in args.prefixes]
+    floor = args.min_correlation if args.min_correlation is not None else (0.7 if args.criterion == "spectrum" else -1.)
+    for row in rows:
+        corr = row["global"]["correlation"]
+        row["eligible"] = corr is not None and corr >= floor
+        row["rank"] = [row["maxAbsBandErrorDb"], row["meanAbsBandErrorDb"], row["score"]] if args.criterion == "spectrum" else [row["score"]]
+    rows.sort(key=lambda r:(not r["eligible"], r["rank"]))
+    if not any(r["eligible"] for r in rows):
+        raise ValueError("no validation candidate meets the waveform-correlation floor")
+    result = {"role":"validation only", "criterion":args.criterion, "minCorrelation":floor,
+              "commonWarmupSamples":warmup, "winner":rows[0]["prefix"], "candidates":rows}
+    Path(args.out).write_text(json.dumps(result, indent=2, allow_nan=False)+"\n")
+    for row in rows:
+        print(f"{row['prefix']}: eligible={row['eligible']} rank={row['rank']}")
     print(f"selected: {result['winner']}")
 
 
