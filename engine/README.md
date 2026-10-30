@@ -307,7 +307,11 @@ Cached audio nodes are muted/suspended and their histories cleared when cars swi
   same f32 linear interpolation as `SurrogateStream` **before** nonlinear features. Traces
   are tagged at step end; teacher decimation uses that fixed timestamp, not a fitted shift.
   Optional segment balance changes training residual weights only, not deployment gain.
-  Iteration-limit stops are reported as such, not as optimizer convergence.
+  Iteration-limit stops are reported as such, not as optimizer convergence. Training's
+  operator partitions input time into overlap-add blocks and shares their FFTs across
+  gates/features; its overlapping-window adjoint preserves the full-record convolution
+  and original ridge objective. Direct/dense tests and full-FFT comparisons check that this
+  is a computation optimization, not a different model or loss.
 - `src/surrogate.rs`: the same fitted model in Rust and WASM, with shared input FFTs,
   summed frequency-domain MIMO convolution, bounded normalized gates, input validation
   before state changes, and no allocations while processing. It does not use `voice.rs`

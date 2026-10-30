@@ -19,6 +19,96 @@ s = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(s)
 
 
+class ConvolutionOperatorTests(unittest.TestCase):
+    def test_both_convolution_backends_match_direct_and_adjoint(self):
+        rng = np.random.default_rng(61)
+        # Includes exact and partial last blocks, one sample, and taps > samples.
+        for n, taps, block in [(1, 1, 1), (7, 11, 12), (23, 7, 8), (32, 8, 8), (33, 8, 8), (63, 9, 12)]:
+            x, h, z = rng.normal(size=(n, 2)), rng.normal(size=(3, 2, taps)), rng.normal(size=(n, 3))
+            direct = np.column_stack([sum(np.convolve(x[:, f], h[g, f])[:n] for f in range(2)) for g in range(3)])
+            gradient = np.zeros_like(h)
+            for g in range(3):
+                for f in range(2):
+                    for k in range(min(n, taps)):
+                        gradient[g, f, k] = np.dot(x[:n-k, f], z[k:, g])
+            for backend in ["full-fft", "overlap-add"]:
+                with self.subTest(n=n, taps=taps, block=block, backend=backend):
+                    convolution = s._CausalConvolution(x, taps, backend, block)
+                    predicted, adjoint = convolution.forward(h), convolution.adjoint(z)
+                    np.testing.assert_allclose(predicted, direct, atol=2e-13, rtol=2e-13)
+                    np.testing.assert_allclose(adjoint, gradient, atol=2e-13, rtol=2e-13)
+                    self.assertAlmostEqual(np.vdot(predicted, z), np.vdot(h, adjoint), delta=2e-12)
+
+    def test_augmented_operators_match_dense_with_dc_bias_weighting_and_ridge(self):
+        rng = np.random.default_rng(62)
+        n, nf, ng, taps = 53, 2, 3, 5
+        x = rng.normal(size=(n, nf))*[0.1, 4]
+        weights = rng.uniform(0.1, 1, size=(n, ng))*[0.3, 2, 0.8]
+        mask = rng.uniform(0.1, 3, size=n); mask[:taps] = 0
+        preemphasis = 0.93
+        size = ng*nf*taps
+        diagonal = 0.3*rng.uniform(0.2, 2, size=size+ng)
+        design = np.column_stack([weights[:, g]*np.r_[np.zeros(k), x[:n-k, f]]
+                                  for g in range(ng) for f in range(nf) for k in range(taps)]
+                                 + [weights[:, g] for g in range(ng)])
+        u, v = rng.normal(size=size+ng), rng.normal(size=n+size+ng)
+        for zero_dc in [False, True]:
+            projection = np.eye(size+ng)
+            if zero_dc:
+                for k in range(0, size, taps):
+                    projection[k:k+taps, k:k+taps] -= 1/taps
+                projection[size:, size:] = 0
+            data = s.lfilter([1, -preemphasis], [1], design@projection, axis=0)*mask[:, None]
+            # The prior is applied to the original optimization coordinates, not
+            # silently projected/rescaled with the convolutional data operator.
+            explicit = np.concatenate([data, np.diag(diagonal)])
+            for backend in ["full-fft", "overlap-add"]:
+                with self.subTest(zero_dc=zero_dc, backend=backend):
+                    convolution = s._CausalConvolution(x, taps, backend, 8)
+                    operator = s._RegressionOperator(convolution, weights, preemphasis, mask, diagonal)
+                    operator.zero_dc = zero_dc
+                    np.testing.assert_allclose(operator.matvec(u), explicit@u, atol=2e-13, rtol=2e-13)
+                    np.testing.assert_allclose(operator.rmatvec(v), explicit.T@v, atol=2e-13, rtol=2e-13)
+                    self.assertAlmostEqual(np.vdot(operator.matvec(u), v), np.vdot(u, operator.rmatvec(v)), delta=2e-12)
+                    # Default matrix actions must use the same vector operators.
+                    np.testing.assert_allclose(operator.matmat(u[:, None])[:, 0], explicit@u, atol=2e-13, rtol=2e-13)
+                    np.testing.assert_allclose(operator.rmatmat(v[:, None])[:, 0], explicit.T@v, atol=2e-13, rtol=2e-13)
+
+    def test_full_and_blocked_fits_agree(self):
+        rng = np.random.default_rng(63)
+        n, nf, ng, taps = 4093, 2, 2, 12
+        x = rng.normal(size=(n, nf))*[0.2, 3]
+        weights = np.column_stack([np.linspace(0.2, 0.9, n), np.linspace(0.8, 0.1, n)])
+        h = rng.normal(size=(ng, 2, nf, taps))*0.1
+        h[:, 0] -= h[:, 0].mean(axis=-1, keepdims=True)
+        bias = np.array([[0, 0.4], [0, -0.7]])
+        y = s.predict(x, weights, h, bias)+rng.normal(size=(n, 2))*0.02
+        mask = np.linspace(0.1, 2, n); mask[:taps] = 0
+        penalty = np.r_[np.repeat([0.5, 2, 3, 0.7], taps), 0.4, 1.3]
+        results = []
+        for backend in ["full-fft", "overlap-add"]:
+            with contextlib.redirect_stdout(io.StringIO()):
+                results.append(s.fit(x, weights, y, taps, 300, 0.4, 0.9, mask, [True, False], penalty,
+                                     convolution_backend=backend, convolution_block_size=32))
+        a, ab, alog = results[0]
+        b, bb, blog = results[1]
+        np.testing.assert_allclose(a, b, atol=2e-7, rtol=2e-7)
+        np.testing.assert_allclose(ab, bb, atol=2e-7, rtol=2e-7)
+        np.testing.assert_allclose(s.predict(x, weights, a, ab), s.predict(x, weights, b, bb), atol=2e-6, rtol=2e-6)
+        for full_log, block_log in zip(alog, blog):
+            self.assertTrue(full_log["converged"])
+            self.assertTrue(block_log["converged"])
+            self.assertAlmostEqual(full_log["residual"], block_log["residual"], delta=1e-9)
+        self.assertEqual(blog[0]["convolution"], {"backend": "overlap-add", "blockSize": 32, "fftSize": 64})
+
+    def test_invalid_block_size_or_backend_rejected(self):
+        for block_size in [0, 3, 4.5]:
+            with self.subTest(block_size=block_size), self.assertRaisesRegex(ValueError, "integer >= taps"):
+                s._CausalConvolution(np.ones((10, 1)), 4, block_size=block_size)
+        with self.assertRaisesRegex(ValueError, "unknown convolution backend"):
+            s._CausalConvolution(np.ones((10, 1)), 4, backend="unknown")
+
+
 class FitTests(unittest.TestCase):
     def test_power_major_signed_features(self):
         q = np.array([[0.2, -0.3], [0, 0.1]])
@@ -397,6 +487,7 @@ class EndToEndTests(unittest.TestCase):
             self.assertTrue(report["heldOut"]["independentSeed"])
             self.assertTrue(report["optimizer"]["segmentBalance"]["enabled"])
             self.assertEqual(report["optimizer"]["gateWidth"], 1.5)
+            self.assertEqual(report["optimizer"]["convolution"], {"backend": "overlap-add", "blockSize": 4, "fftSize": 8})
             self.assertEqual(report["segments"][0]["startIndex"], 4)
             self.assertEqual(report["segments"][0]["endIndex"], 95)
             self.assertEqual(report["segments"][1]["startIndex"], 95)

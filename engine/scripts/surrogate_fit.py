@@ -235,73 +235,147 @@ def targets(prefix, meta, count, exits=False, *, source_rate=None, model_rate=No
     return p, labels
 
 
-def fit(x, weights, y, taps, iterations, damping, preemphasis, mask, zero_dc=None, penalty_scale=None):
+class _CausalConvolution:
+    """Causal FIR bank and its transpose, without gates or output conditioning.
+
+    Overlap-add partitions INPUT TIME, not the FIR or training objective. Every
+    block contains B input samples followed by B zeros, with B >= taps. Its
+    linear convolution therefore fits in 2B samples. The adjoint gathers those
+    same overlapping output windows before summing their cross-correlations.
+    Only small kernel FFTs are transformed each iteration; no frequency x gate x
+    feature product over the whole recording is ever materialized.
+    """
+    def __init__(self, x, taps, backend="overlap-add", block_size=None):
+        self.n, self.nf = x.shape
+        self.taps, self.backend = taps, backend
+        if backend == "full-fft":
+            self.block_size = None
+            self.fftn = next_fast_len(self.n + taps - 1)
+            self.X = rfft(x, self.fftn, axis=0)
+        elif backend == "overlap-add":
+            self.block_size = next_fast_len(taps) if block_size is None else block_size
+            if int(self.block_size) != self.block_size or self.block_size < taps:
+                raise ValueError("convolution block size must be an integer >= taps")
+            self.block_size = int(self.block_size)
+            self.fftn = 2*self.block_size
+            self.blocks = (self.n+self.block_size-1)//self.block_size
+            padded = np.zeros((self.blocks, self.block_size, self.nf))
+            padded.reshape(-1, self.nf)[:self.n] = x
+            # Frequency-major matrices allow batched BLAS contractions. In
+            # particular, the adjoint sums blocks WITHOUT a block x freq x gate
+            # x feature intermediate. Cache the conjugate once, not per LSQR step.
+            self.X = np.ascontiguousarray(rfft(padded, self.fftn, axis=1).transpose(1, 0, 2))
+            self.X_adjoint = np.ascontiguousarray(self.X.conj().transpose(0, 2, 1))
+        else:
+            raise ValueError(f"unknown convolution backend: {backend}")
+
+    @property
+    def metadata(self):
+        return {"backend": self.backend, "blockSize": self.block_size, "fftSize": self.fftn}
+
+    def forward(self, h):
+        # h is [gate, feature, tap]; the result is [sample, gate].
+        if self.backend == "full-fft":
+            H = rfft(h.transpose(2, 0, 1), self.fftn, axis=0)
+            return irfft((H*self.X[:, None, :]).sum(axis=2), self.fftn, axis=0)[:self.n]
+        H = rfft(h.transpose(2, 1, 0), self.fftn, axis=0)
+        spectrum = np.matmul(self.X, H)
+        z = irfft(spectrum.transpose(1, 0, 2), self.fftn, axis=1)
+        b, ng = self.block_size, h.shape[0]
+        out = np.zeros((self.blocks+1, b, ng))
+        out[:-1] = z[:, :b]
+        out[1:] += z[:, b:]
+        return out.reshape(-1, ng)[:self.n]
+
+    def adjoint(self, z):
+        # z is [sample, gate]; the result is [gate, feature, tap].
+        if self.backend == "full-fft":
+            Z = rfft(z, self.fftn, axis=0)
+            return irfft(Z[:, :, None]*self.X.conj()[:, None, :], self.fftn, axis=0)[:self.taps].transpose(1, 2, 0)
+        b, ng = self.block_size, z.shape[1]
+        padded = np.zeros(((self.blocks+1)*b, ng))
+        padded[:self.n] = z
+        windows = np.lib.stride_tricks.sliding_window_view(padded, self.fftn, axis=0)[::b].transpose(0, 2, 1)
+        Z = rfft(windows, self.fftn, axis=1).transpose(1, 0, 2)
+        gradient = np.matmul(self.X_adjoint, Z)
+        return irfft(gradient, self.fftn, axis=0)[:self.taps].transpose(2, 1, 0)
+
+
+class _RegressionOperator(LinearOperator):
+    """The unchanged weighted/preemphasized regression and augmented ridge."""
+    def __init__(self, convolution, weights, preemphasis, mask, diagonal):
+        self.convolution, self.weights = convolution, weights
+        self.preemphasis, self.mask, self.diagonal = preemphasis, mask, diagonal
+        self.ng = weights.shape[1]
+        self.size = self.ng*convolution.nf*convolution.taps
+        self.zero_dc = False
+        super().__init__(dtype=np.dtype(float), shape=(convolution.n+self.size+self.ng, self.size+self.ng))
+
+    def _matvec(self, h):
+        h = np.asarray(h).reshape(-1)
+        kernel = h[:self.size].reshape(self.ng, self.convolution.nf, self.convolution.taps)
+        if self.zero_dc:
+            kernel = kernel-kernel.mean(axis=-1, keepdims=True)
+        z = self.convolution.forward(kernel)
+        if not self.zero_dc:
+            z += h[self.size:][None, :]
+        v = (z*self.weights).sum(axis=1)
+        return np.r_[lfilter([1, -self.preemphasis], [1], v)*self.mask, self.diagonal*h]
+
+    def _rmatvec(self, v):
+        v = np.asarray(v).reshape(-1)
+        n = self.convolution.n
+        # Adjoint of y[t] - preemphasis*y[t-1], without circular wrapping.
+        v_data = (v[:n]*self.mask).copy()
+        v_data[:-1] -= self.preemphasis*v_data[1:].copy()
+        z = v_data[:, None]*self.weights
+        h = self.convolution.adjoint(z)
+        if self.zero_dc:
+            h = h-h.mean(axis=-1, keepdims=True)
+        bias = np.zeros(self.ng) if self.zero_dc else z.sum(axis=0)
+        return np.r_[h.ravel(), bias]+self.diagonal*v[n:]
+
+
+def fit(x, weights, y, taps, iterations, damping, preemphasis, mask, zero_dc=None, penalty_scale=None,
+        *, convolution_backend="overlap-add", convolution_block_size=None):
     """Matrix-free causal MIMO regression; operator/adjoint are exact transposes."""
     n, nf = x.shape
     ng, no = weights.shape[1], y.shape[1]
-    fftn = next_fast_len(n + taps - 1)
-    X = rfft(x, fftn, axis=0)
-    use_bias = True
-    constrain_dc = False
     zero_dc = [False]*no if zero_dc is None else zero_dc
-    size = ng * nf * taps
-    # Include per-gate DC biases (exit mean state; pressure bias should stay near zero).
-    def forward(h):
-        H = h[:size].reshape(ng, nf, taps).transpose(2, 0, 1)
-        if constrain_dc:
-            H = H - H.mean(axis=0, keepdims=True)
-        z = irfft((rfft(H, fftn, axis=0) * X[:, None, :]).sum(axis=2), fftn, axis=0)[:n]
-        if use_bias:
-            z += h[size:][None, :]
-        v = (z * weights).sum(axis=1)
-        return lfilter([1, -preemphasis], [1], v) * mask
-    def adjoint(v):
-        v = v * mask
-        # Adjoint of y[t] - preemphasis*y[t-1], without circular wrapping.
-        v = v.copy()
-        v[:-1] -= preemphasis * v[1:].copy()
-        z = v[:, None] * weights
-        Z = rfft(z, fftn, axis=0)
-        h = irfft(Z[:, :, None] * X.conj()[:, None, :], fftn, axis=0)[:taps]
-        if constrain_dc:
-            h -= h.mean(axis=0, keepdims=True)
-        return np.r_[h.transpose(1, 2, 0).ravel(), z.sum(axis=0) if use_bias else np.zeros(ng)]
+    size = ng*nf*taps
     # Explicit augmented ridge keeps the ORIGINAL coefficient prior under diagonal
     # preconditioning. Scalar LSQR damping after rescaling would change that prior.
-    diagonal = damping * (np.ones(size+ng) if penalty_scale is None else penalty_scale)
+    diagonal = damping*(np.ones(size+ng) if penalty_scale is None else penalty_scale)
     if diagonal.shape != (size+ng,):
         raise ValueError("regularization diagonal dimensions")
-    def augmented_forward(h):
-        return np.r_[forward(h), diagonal*h]
-    def augmented_adjoint(v):
-        return adjoint(v[:n]) + diagonal*v[n:]
-    op = LinearOperator((n+size+ng, size+ng), matvec=augmented_forward, rmatvec=augmented_adjoint)
+    convolution = _CausalConvolution(x, taps, convolution_backend, convolution_block_size)
+    op = _RegressionOperator(convolution, weights, preemphasis, mask, diagonal)
     rng = np.random.default_rng(1)
     u, v = rng.normal(size=size+ng), rng.normal(size=n+size+ng)
-    lhs, rhs = np.dot(augmented_forward(u), v), np.dot(u, augmented_adjoint(v))
+    lhs, rhs = np.dot(op.matvec(u), v), np.dot(u, op.rmatvec(v))
     if not np.isclose(lhs, rhs, atol=1e-7, rtol=1e-9):
         raise AssertionError(f"operator adjoint mismatch: {lhs} {rhs}")
     kernels, biases, log = [], [], []
     for j in range(no):
         # Far-field monopole pressure has no steady-flow response. Orthogonally project
         # every FIR onto sum(h)=0 in BOTH operator/adjoint; no post-hoc output filtering.
-        constrain_dc = zero_dc[j]
-        use_bias = not constrain_dc
-        rhs = lfilter([1, -preemphasis], [1], y[:, j]) * mask
+        op.zero_dc = zero_dc[j]
+        rhs = lfilter([1, -preemphasis], [1], y[:, j])*mask
         result = lsqr(op, np.r_[rhs, np.zeros(size+ng)], damp=0, atol=1e-7, btol=1e-7, iter_lim=iterations)
         h = result[0]
         kernel = h[:size].reshape(ng, nf, taps)
-        if constrain_dc:
-            kernel = kernel - kernel.mean(axis=-1, keepdims=True)
+        if op.zero_dc:
+            kernel = kernel-kernel.mean(axis=-1, keepdims=True)
         kernels.append(kernel)
-        biases.append(h[size:] if use_bias else np.zeros(ng))
+        biases.append(np.zeros(ng) if op.zero_dc else h[size:])
         stop_reasons = {0: "zero_solution", 1: "compatible_residual_tolerance", 2: "least_squares_tolerance",
                         3: "condition_limit", 4: "compatible_machine_precision", 5: "least_squares_machine_precision",
                         6: "condition_machine_precision", 7: "iteration_limit"}
         log.append({"iterations": result[2], "iterationLimit": iterations, "stop": result[1],
                     "stopReason": stop_reasons[result[1]], "converged": result[1] in (0, 1, 2, 4, 5),
                     "iterationLimitReached": result[2] >= iterations, "residual": result[3],
-                    "normalResidual": float(result[7]), "conditionEstimate": result[6]})
+                    "normalResidual": float(result[7]), "conditionEstimate": result[6],
+                    "convolution": convolution.metadata})
         print(f"output {j}: {log[-1]}", flush=True)
     return np.stack(kernels, axis=1), np.stack(biases, axis=1), log
 
@@ -539,7 +613,8 @@ def main():
                  "kernels": h.tolist(), "biases": b.tolist(), "labels": labels, "controlLabels": control_labels}
         optimizer = {"method": "matrix-free FFT LSQR with augmented original-coefficient ridge",
                      "iterations": args.iterations, "damping": args.damping, "preemphasis": args.preemphasis,
-                     "gateWidth": args.gate_width, "segmentBalance": segment_balance}
+                     "gateWidth": args.gate_width, "segmentBalance": segment_balance,
+                     "convolution": fitlog[0]["convolution"]}
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
     Path(str(out) + ".model.json").write_text(json.dumps(model, separators=(",", ":"), allow_nan=False))
