@@ -106,6 +106,8 @@ engine_fns! {
     /// Exhaust signal of the steps since the last clear, per exhaust system.
     fn engine_audio_len(e) -> usize { e.audio.first().map_or(0, |a| a.len()) }
     fn engine_audio_channels(e) -> usize { e.audio.len() }
+    /// Select the learned model's stream (kg/s plus controls), or the original stream.
+    fn engine_set_surrogate_audio(e, on: u32) { e.set_surrogate_audio(on != 0); }
     fn engine_audio_ptr(e, channel: usize) -> *const f32 { e.audio[channel].as_ptr() }
     fn engine_audio_clear(e) {
         for a in &mut e.audio {
@@ -312,3 +314,165 @@ voice_fns! {
         })
     }
 }
+
+/// Experimental learned exhaust surrogate; outputs remain in physical units. The existing
+/// game voice is unchanged. The model's control/feature convention travels with its spec.
+///
+/// # Safety
+/// `ptr` and `len` must be a valid byte range.
+#[no_mangle]
+pub unsafe extern "C" fn surrogate_new(ptr: *const u8, len: usize) -> *mut crate::surrogate::Surrogate {
+    let Ok(json) = std::str::from_utf8(bytes(ptr, len)) else { return std::ptr::null_mut() };
+    match crate::surrogate::Surrogate::from_json(json) {
+        Ok(s) => Box::into_raw(Box::new(s)),
+        Err(_) => std::ptr::null_mut(),
+    }
+}
+
+/// # Safety
+/// `s` must come from `surrogate_new` and not be freed.
+#[no_mangle]
+pub unsafe extern "C" fn surrogate_delete(s: *mut crate::surrogate::Surrogate) {
+    if !s.is_null() { drop(Box::from_raw(s)); }
+}
+
+#[no_mangle]
+pub extern "C" fn surrogate_block_size() -> usize { crate::synth::BLOCK }
+
+/// # Safety
+/// `s` must come from `surrogate_new` and not be freed.
+#[no_mangle]
+pub unsafe extern "C" fn surrogate_inputs(s: *const crate::surrogate::Surrogate) -> usize { (*s).model().cylinders }
+
+/// # Safety
+/// `s` must come from `surrogate_new` and not be freed.
+#[no_mangle]
+pub unsafe extern "C" fn surrogate_controls(s: *const crate::surrogate::Surrogate) -> usize { (*s).model().controls() }
+
+/// # Safety
+/// `s` must come from `surrogate_new` and not be freed.
+#[no_mangle]
+pub unsafe extern "C" fn surrogate_outputs(s: *const crate::surrogate::Surrogate) -> usize { (*s).model().outputs() }
+
+/// Runs one block of frame-interleaved flow (kg/s), controls and output (model units).
+/// Returns 0 on success, -1 on invalid values; no change of history on validation failure.
+///
+/// # Safety
+/// `s` must come from `surrogate_new` and not be freed. `flow`, `controls` and `out` must
+/// address `surrogate_block_size()` times their respective channel counts, valid nonaliased
+/// f32 ranges. With no controls `controls` must still be a nonnull aligned pointer.
+#[no_mangle]
+pub unsafe extern "C" fn surrogate_process(
+    s: *mut crate::surrogate::Surrogate, flow: *const f32, controls: *const f32, out: *mut f32,
+) -> i32 {
+    let s = &mut *s;
+    let n = crate::synth::BLOCK;
+    let f = std::slice::from_raw_parts(flow, n * s.model().cylinders);
+    let c = std::slice::from_raw_parts(controls, n * s.model().controls());
+    let o = std::slice::from_raw_parts_mut(out, n * s.model().outputs());
+    match s.process_block(f, c, o) { Ok(()) => 0, Err(_) => -1 }
+}
+
+/// # Safety
+/// `s` must come from `surrogate_new` and not be freed.
+#[no_mangle]
+pub unsafe extern "C" fn surrogate_reset(s: *mut crate::surrogate::Surrogate) { (*s).reset(); }
+
+/// A fixed-48-kHz jet-noise stream; controls are physical exit states at 4 kHz.
+/// # Safety
+/// `diameters` addresses `ends` valid f64 values (m).
+#[no_mangle]
+pub unsafe extern "C" fn jet_new(diameters: *const f64, ends: usize, distance: f64, angle: f64) -> *mut crate::jet::Jet {
+    match crate::jet::Jet::new(48000.0, std::slice::from_raw_parts(diameters, ends), distance, angle) {
+        Ok(s) => Box::into_raw(Box::new(s)), Err(_) => std::ptr::null_mut(),
+    }
+}
+
+/// # Safety
+/// `s` must come from `jet_new` and not be freed.
+#[no_mangle]
+pub unsafe extern "C" fn jet_delete(s: *mut crate::jet::Jet) { if !s.is_null() { drop(Box::from_raw(s)); } }
+
+/// Controls are `[velocity,density,temperature]` f64 triples, ends interleaved, at 4 kHz.
+/// Writes 12 f32 pressure samples (Pa) per control tick. Returns -1 on invalid state.
+/// # Safety
+/// `s` must come from `jet_new` and not be freed. `states` addresses `ticks * outlets`
+/// triples; `out` addresses `ticks * 12` f32 samples, nonaliased with inputs.
+#[no_mangle]
+pub unsafe extern "C" fn jet_process(s: *mut crate::jet::Jet, states: *const [f64; 3], ticks: usize, out: *mut f32) -> i32 {
+    let s = &mut *s;
+    let states = std::slice::from_raw_parts(states, ticks*s.outlets());
+    let out = std::slice::from_raw_parts_mut(out, ticks*12);
+    for (exits, samples) in states.chunks_exact(s.outlets()).zip(out.chunks_exact_mut(12)) {
+        if s.set_exit_states(exits).is_err() { return -1; }
+        for x in samples { *x = s.next_sample() as f32; }
+    }
+    0
+}
+
+/// Streaming model audio; inputs are raw valve kg/s and five game-available controls.
+/// # Safety
+/// `ptr`/`len` addresses UTF-8 model JSON.
+#[no_mangle]
+pub unsafe extern "C" fn surrogate_voice_new(ptr: *const u8, len: usize, input_rate: f64, output_rate: f64, full_scale: f64) -> *mut crate::surrogate_stream::SurrogateStream {
+    let Ok(json) = std::str::from_utf8(bytes(ptr, len)) else { return std::ptr::null_mut() };
+    match crate::surrogate_stream::SurrogateStream::new(json, input_rate, output_rate, full_scale) {
+        Ok(s) => Box::into_raw(Box::new(s)), Err(_) => std::ptr::null_mut(),
+    }
+}
+
+/// # Safety
+/// `s` must come from `surrogate_voice_new` and not be freed.
+#[no_mangle]
+pub unsafe extern "C" fn surrogate_voice_free(s: *mut crate::surrogate_stream::SurrogateStream) { if !s.is_null() { drop(Box::from_raw(s)); } }
+
+/// # Safety
+/// `s` must come from `surrogate_voice_new` and not be freed.
+#[no_mangle]
+pub unsafe extern "C" fn surrogate_voice_set_input_rate(s: *mut crate::surrogate_stream::SurrogateStream, rate: f64) { (*s).set_input_rate(rate); }
+
+/// # Safety
+/// `s` must come from `surrogate_voice_new`; `ptr` addresses `steps * channels` planar f32s.
+#[no_mangle]
+pub unsafe extern "C" fn surrogate_voice_write(s: *mut crate::surrogate_stream::SurrogateStream, ptr: *const f32, steps: usize, channels: usize) {
+    if let Some(len) = steps.checked_mul(channels) {
+        (*s).write_planar(std::slice::from_raw_parts(ptr, len), steps, channels);
+    } else {
+        (*s).write_planar(&[], 1, 0);
+    }
+}
+
+/// # Safety
+/// `s` must come from `surrogate_voice_new` and not be freed.
+#[no_mangle]
+pub unsafe extern "C" fn surrogate_voice_input_available(s: *const crate::surrogate_stream::SurrogateStream) -> usize { (*s).input_available() }
+
+/// # Safety
+/// `s` must come from `surrogate_voice_new` and not be freed.
+#[no_mangle]
+pub unsafe extern "C" fn surrogate_voice_failed(s: *const crate::surrogate_stream::SurrogateStream) -> u32 { (*s).failed() as u32 }
+
+/// # Safety
+/// `s` must come from `surrogate_voice_new` and not be freed.
+#[no_mangle]
+pub unsafe extern "C" fn surrogate_voice_drop_input(s: *mut crate::surrogate_stream::SurrogateStream, keep: usize) { (*s).drop_input(keep); }
+
+/// # Safety
+/// `s` must come from `surrogate_voice_new` and not be freed. The returned range is valid
+/// until the next render on this module instance; count is in `synth_rendered`.
+#[no_mangle]
+pub unsafe extern "C" fn surrogate_voice_render(s: *mut crate::surrogate_stream::SurrogateStream, frames: usize) -> *const f32 {
+    OUT.with(|out| {
+        let mut out = out.borrow_mut();
+        out.clear();
+        out.resize(frames, 0.0);
+        let n = (*s).render(&mut out);
+        RENDERED.with(|r| r.set(n));
+        out.as_ptr()
+    })
+}
+
+/// # Safety
+/// `s` must come from `surrogate_voice_new` and not be freed.
+#[no_mangle]
+pub unsafe extern "C" fn surrogate_voice_reset(s: *mut crate::surrogate_stream::SurrogateStream) { (*s).reset(); }

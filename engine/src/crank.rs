@@ -49,11 +49,13 @@ fn bores(spec: &EngineSpec) -> Vec<Bore> {
 }
 
 /// The mechanism, either way.
+#[derive(Clone)]
 pub struct Mechanism {
     pub controls: Controls,
     model: Model,
 }
 
+#[derive(Clone)]
 enum Model {
     Reduced(Crank),
     Constrained(Linkage),
@@ -207,6 +209,7 @@ struct Kinematics {
 }
 
 /// The mechanism in reduced coordinates.
+#[derive(Clone)]
 pub struct Crank {
     pub theta: f64,
     /// The crank's speed over the last step.
@@ -486,6 +489,7 @@ impl Crank {
 }
 
 /// engine-sim's mechanism: constrained rigid bodies.
+#[derive(Clone)]
 pub struct Linkage {
     pub system: System,
     crank: usize,

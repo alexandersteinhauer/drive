@@ -149,6 +149,8 @@ export interface EngineSpec {
      * with the noise and the other sources a car makes.
      */
     voice?: VoiceSpec;
+    /** Experimental exhaust-only surrogate. The voice remains available as a fallback. */
+    surrogate?: SurrogateSpec;
   };
   /** A turbocharger feeding every intake from every exhaust (engine/src/turbo.rs). */
   turbo?: TurboSpec;
@@ -159,6 +161,17 @@ export interface EngineSpec {
     /** Woschni's heat transfer to cylinder walls at this mean temperature (K). */
     wallTemperature?: number;
   };
+}
+
+/** The learned exhaust pilot (engine/src/spec.rs SurrogateSpec). No extra sound sources. */
+export interface SurrogateSpec {
+  /** JSON asset relative to the application base URL. Fetched only when selected. */
+  model: string;
+  /** Sound pressure (Pa) at the listener that is full scale. */
+  fullScale: number;
+  /** ECU flap opening ranges: crank speed (rad/s), and pedal position. */
+  flapSpeed: [number, number];
+  flapThrottle: [number, number];
 }
 
 /**
@@ -373,15 +386,18 @@ function flowConstant(
 /** Flow constant passing `cfm` at a carburettor's 1.5 inHg. */
 /** The engine state engine/src/voice.rs's control stream carries after the cylinders. */
 export const VOICE_GLOBALS = 10;
+/** rpm/1000, manifold Pa/1e5, wastegate, pedal, flap opening. */
+export const SURROGATE_GLOBALS = 5;
 
 /**
- * The engine's audio channels (engine/src/engine.rs audio_channels): with a voice, its
- * control stream (each cylinder's exhaust valve flow, then VOICE_GLOBALS of state); else
- * engine-sim's, one per exhaust system.
+ * The engine's audio channels (engine/src/engine.rs audio_channels): raw per-cylinder
+ * exhaust mass flow plus five controls for the surrogate; the voice's own control stream
+ * otherwise; without either, engine-sim's one channel per exhaust system.
  */
 export function audioChannels(spec: EngineSpec): number {
-  if (!spec.audio.voice) return spec.exhausts.length;
-  return spec.banks.reduce((n, b) => n + b.cylinders.length, 0) + VOICE_GLOBALS;
+  const cylinders = spec.banks.reduce((n, b) => n + b.cylinders.length, 0);
+  if (spec.audio.surrogate) return cylinders + SURROGATE_GLOBALS;
+  return spec.audio.voice ? cylinders + VOICE_GLOBALS : spec.exhausts.length;
 }
 
 export function kCarb(cfm: number): number {

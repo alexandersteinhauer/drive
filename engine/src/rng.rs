@@ -1,6 +1,7 @@
 //! A small deterministic generator, in place of C's rand() (combustion efficiency scatter,
 //! air noise), so runs repeat exactly.
 
+#[derive(Clone)]
 pub struct Rng {
     state: u32,
 }

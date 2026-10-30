@@ -608,3 +608,24 @@ export const ferrari488Pista: CarConfig = {
   // rear overhang; 1975 mm wide without the mirrors.
   body: { center: [0, 0.205, -0.403], halfExtents: [0.987, 0.545, 2.3] },
 };
+
+/**
+ * The Pista's opt-in learned exhaust pilot. Its teacher ran at 20 kHz; the game keeps
+ * its existing engine rate and physics, and the audio adapter resamples to the model.
+ * This is pressure/exhaust only, not the voice's bay, turbo or mechanical sources.
+ */
+export function withPistaSurrogateExhaust(): CarConfig {
+  const out = structuredClone(ferrari488Pista);
+  if (
+    out.powertrain.type === "combustion" &&
+    out.powertrain.engine.type === "simulated"
+  ) {
+    out.powertrain.engine.spec.audio.surrogate = {
+      model: "audio/surrogate/pista-pilot.json",
+      fullScale: 16,
+      flapSpeed: [261.7993875, 366.5191425],
+      flapThrottle: [0.3, 0.6],
+    };
+  }
+  return out;
+}

@@ -74,7 +74,7 @@ impl Constraint {
     }
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct Output {
     c: [f64; 3],
     j: [[f64; 6]; 3],
@@ -199,7 +199,7 @@ fn calculate(constraint: &Constraint, s: &State, out: &mut Output) {
 }
 
 /// Per-step state of all bodies (SystemState).
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct State {
     pub p_x: Vec<f64>,
     pub p_y: Vec<f64>,
@@ -226,7 +226,7 @@ impl State {
     }
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct System {
     pub bodies: Vec<Body>,
     pub constraints: Vec<Constraint>,

@@ -236,6 +236,72 @@ the frequency-dependent wall losses of the acoustic boundary layer (Kirchhoff's,
 ~0.4-1 dB/m at 1 kHz in these pipes), the walls' own temperature (set per pipe), the
 intake's sound.
 
+### Learned exhaust surrogate (experimental)
+
+The reference is also a teacher for a per-car real-time approximation. This pipeline is
+experimental: **the voice remains the default**, and a good fit to the reference is not
+independent evidence of fidelity to a real car. The Pista can already audition the pilot:
+`?car=pista&exhaust=surrogate`, or Escape → Pista exhaust → Learned (experimental).
+The original mode is `?car=pista&exhaust=original`. Other cars keep their existing sound.
+
+The shipped pilot (`public/audio/surrogate/pista-pilot.json`, provenance alongside) predicts
+only the two tailpipes' radiated pressure before directivity. It does **not** yet include jet,
+mechanical or turbo noise, and it was trained before the sonic-boundary correction. It has
+known transient/high-band errors, not production fidelity. The actual game engine stays at
+its original frequency/fluid steps and keeps the same torque/boost physics; a separate
+physical kg/s + five-control stream feeds `src/surrogate_stream.rs`. That adapter resamples
+to the 20 kHz model and the audio device, divides by a fixed 16 Pa/full-scale calibration,
+then uses the game's existing loudness/output controls. It cannot recover source bandwidth
+missing from the game's 10 kHz control stream. Training also used the reference config's
+cycle variation and flat boost target, whereas the game keeps its original settings; this
+is an additional provisional input-distribution gap, not a hidden driving-physics change.
+Model load/init/runtime failure creates a new original-voice worklet and changes the simulation stream atomically, with a visible warning.
+Cached audio nodes are muted/suspended and their histories cleared when cars switch.
+
+- `examples/abtrace.rs`: paired game/reference traces, crank trajectory held by the dyno,
+  separate burn seeds for training and held-out drives. Records physical pressures before
+  listener directivity, and continuous exit states, not separate fictitious event targets.
+- `examples/superpose.rs`: a deep clone of one warm state, then independent single/pair
+  burn perturbations; `scripts/superpose_analyse.py` measures the second difference,
+  `y(a+b) - y(a) - y(b) + y(base)`. An unchanged branch must replay bit for bit. Small
+  perturbations test a local linearization, not full-amplitude superposition.
+- `scripts/surrogate_fit.py`: the first learned baseline, a control-gated bank of causal
+  FIRs with signed-power flow features. It is regularized regression, not a raw-waveform
+  neural network. Controls are game-available rpm, manifold pressure, wastegate, throttle,
+  and the flap actuator's state; the targets are each outlet's reference pressure. Gates
+  act on the current output, so already-running tails respond to changed controls.
+  Pressure filters are constrained to zero DC. Matrix-free least squares has an explicitly
+  tested adjoint; diagonal preconditioning preserves the original ridge penalty.
+- `src/surrogate.rs`: the same fitted model in Rust and WASM, with shared input FFTs,
+  summed frequency-domain MIMO convolution, bounded normalized gates, input validation
+  before state changes, and no allocations while processing. It does not use `voice.rs`
+  or `acoustics.rs`, resample, add noise, normalize levels or realign phase.
+- `src/jet.rs`: the reference's Stone mixing noise at runtime, from each outlet's continuous
+  velocity/density/temperature. Its 1/3-octave filters have analytically normalized white-noise
+  gain (no whole-clip normalization). Levels match the Python formula to roundoff; random
+  samples need not. New band levels ramp causally over 250 us, rather than using the future
+  control frame. `examples/jetnoise.rs` renders 4 kHz exit states at 48 kHz.
+
+Run the pressure-only pilot end to end (native data, fitting, held-out metrics and A/B WAVs,
+then native and WASM replay/benchmarks), writing large temporary files outside the repo:
+
+```sh
+bash engine/scripts/surrogate-pilot.sh /absolute/path/to/pilot
+```
+
+Or use the individual tools. `scripts/test_surrogate_fit.py` checks causality, indexing,
+identification on an independent synthetic trajectory, and preservation of the regularized
+objective under preconditioning. A local steady-state fit alone is not an acceptance test:
+hold out entire trajectories and random seeds, check shifts/lift/reapply/flaps/thermal
+history, compare game-input vs reference-input fits, inspect harmonic and band errors, and
+measure the actual WASM decoder. The optional exit-state fit also needs noise-level and
+modulation validation; do not feed reference-only exit states to a deployed student.
+
+Training is before `reference_sound.py`'s whole-record zero-phase directivity. That filter
+is not a causal runtime model. Listener directivity/resampling and their explicit latency
+remain separate from identifying the causal exhaust. The pressure pilot is 20 kHz (below
+10 kHz bandwidth); its WAVs are not a claim to reproduce the reference's full 24 kHz band.
+
 ## Physics beyond engine-sim's
 
 engine-sim's thermodynamics are simplified in ways that make an engine far too efficient

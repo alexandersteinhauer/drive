@@ -5,10 +5,11 @@
 //!   abtrace <spec.json> <reference.json> <out prefix> <ducted|lumped> <program>
 //! The reference config's keys merge into the spec as in examples/reference.rs; `lumped`
 //! drops its ducts. Programs: segments `seconds:rpm0:rpm1:throttle`, comma separated.
-//! env: FREQ (default 20000), FLUID (fluid substeps, default 12), DUCT_THREADS.
+//! env: FREQ (default 20000), FLUID (fluid substeps, default 12), DUCT_THREADS,
+//! SEED (burn randomness, default 1), MIN_SUBSTEPS (pipes per fluid step, default 1).
 //! Writes <out>.steps.f32 (per step: cycle angle, rpm, dyno torque, boost (gauge Pa),
-//! manifold pressure, turbo speed, wastegate, turbine power, throttle; then per cylinder
-//! its pressure, temperature and exhaust valve flow (kg/s)), <out>.steps.json (the layout);
+//! manifold pressure, turbo speed, wastegate, turbine power, throttle, flap; per cylinder
+//! pressure, temperature, exhaust flow (kg/s), effective valve area, volume, port pressure), <out>.steps.json (the layout);
 //! ducted, also <out>.ends.f32 (each open end's pressure at the listener, interleaved, at the
 //! fluid rate, before directivity), <out>.f32 (their sum) and <out>.exits.f32.
 use engine_sim::engine::Engine;
@@ -44,7 +45,11 @@ fn main() {
 
     let mut e = Engine::new(&spec);
     e.collect_audio = false;
+    e.seed_burns(env("SEED", 1.0) as u32);
     e.set_ignition(true);
+    if let Some(d) = &mut e.ducts {
+        d.net.min_substeps = env("MIN_SUBSTEPS", 1.0) as usize;
+    }
     if let Some(d) = &mut e.ducts {
         d.listening_ends = true;
     }
@@ -76,9 +81,10 @@ fn main() {
                 e.wastegate(),
                 e.turbine_power(),
                 thr,
+                e.ducts.as_ref().map_or(0.0, |d| d.flap),
             ].map(|v| v as f32));
             for i in 0..n {
-                steps.extend([e.cylinder_pressure(i), e.cylinder_temperature(i), e.cylinder_exhaust_flow(i)].map(|v| v as f32));
+                steps.extend([e.cylinder_pressure(i), e.cylinder_temperature(i), e.cylinder_exhaust_flow(i), e.cylinder_exhaust_area(i), e.cylinder_volume(i), e.exhaust_runner_pressure(i)].map(|v| v as f32));
             }
             if steps.len() > 1 << 20 {
                 f.write_all(&bytes(&steps)).unwrap();
@@ -102,11 +108,12 @@ fn main() {
     let mut layout = serde_json::json!({
         "rate": spec.simulation_frequency,
         "cylinders": n,
-        "global": ["cycleAngle", "rpm", "dynoTorque", "boost", "manifold", "turboSpeed", "wastegate", "turbinePower", "throttle"],
-        "cylinder": ["pressure", "temperature", "exhaustFlow"],
+        "global": ["cycleAngle", "rpm", "dynoTorque", "boost", "manifold", "turboSpeed", "wastegate", "turbinePower", "throttle", "flap"],
+        "cylinder": ["pressure", "temperature", "exhaustFlow", "exhaustArea", "volume", "portPressure"],
         "firingAngles": (0..n).map(|i| e.firing_angle(i)).collect::<Vec<_>>(),
         "program": program,
         "ducted": ducted,
+        "seed": env("SEED", 1.0) as u32,
     });
     if let Some(d) = &e.ducts {
         std::fs::write(format!("{out}.ends.f32"), bytes(&d.end_sound)).unwrap();
@@ -117,6 +124,9 @@ fn main() {
         layout["ends"] = d.outlets.len().into();
         layout["diameters"] = diameters.into();
         layout["distance"] = d.distance.into();
+        std::fs::write(format!("{out}.json"), serde_json::json!({"rate": rate}).to_string()).unwrap();
+        let diameters = d.outlets.iter().map(|&l| format!("{}", d.net.pipes[d.net.links[l].pipe].diameter)).collect::<Vec<_>>().join(" ");
+        std::fs::write(format!("{out}.exits.txt"), format!("rate {rate}\ndiameters {diameters}\ndistance {}\n", d.distance)).unwrap();
     }
     std::fs::write(format!("{out}.steps.json"), serde_json::to_string_pretty(&layout).unwrap()).unwrap();
     println!("{total} s in {:.1} s", started.elapsed().as_secs_f64());

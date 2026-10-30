@@ -42,6 +42,7 @@ interface Exports {
   engine_turbo_speed(e: number): number;
   engine_manifold_pressure(e: number): number;
   engine_set_audio(e: number, on: number): void;
+  engine_set_surrogate_audio(e: number, on: number): void;
   engine_audio_len(e: number): number;
   engine_audio_channels(e: number): number;
   engine_audio_ptr(e: number, channel: number): number;
@@ -83,6 +84,26 @@ interface Exports {
   voice_input_available(v: number): number;
   voice_drop_input(v: number, keep: number): void;
   voice_render(v: number, frames: number): number;
+  surrogate_voice_new(
+    modelPtr: number,
+    modelLen: number,
+    inputRate: number,
+    outputRate: number,
+    fullScale: number,
+  ): number;
+  surrogate_voice_free(v: number): void;
+  surrogate_voice_reset(v: number): void;
+  surrogate_voice_failed(v: number): number;
+  surrogate_voice_set_input_rate(v: number, rate: number): void;
+  surrogate_voice_write(
+    v: number,
+    ptr: number,
+    steps: number,
+    channels: number,
+  ): void;
+  surrogate_voice_input_available(v: number): number;
+  surrogate_voice_drop_input(v: number, keepAudioFrames: number): void;
+  surrogate_voice_render(v: number, frames: number): number;
 }
 
 /** One instance of the WebAssembly module (its own memory). */
@@ -259,7 +280,24 @@ export class EngineSim {
     this.module.exports.engine_set_audio(this.e, on ? 1 : 0);
   }
 
-  /** The exhaust signal since the last call, per exhaust system (one value per step). */
+  /** Select only the audio stream format, without resetting or changing the physics. */
+  set surrogateAudio(on: boolean) {
+    const select = this.module.exports.engine_set_surrogate_audio;
+    // An older cached WASM can still play the original voice after the optional model
+    // fails to initialize. Selecting that fallback must not require the new export.
+    if (typeof select !== "function") {
+      if (on)
+        throw new Error(
+          "Learned exhaust needs the updated engine WASM; reload the page.",
+        );
+      return;
+    }
+    select(this.e, on ? 1 : 0);
+    // Never deliver a previous format's buffered steps to a newly selected backend.
+    this.module.exports.engine_audio_clear(this.e);
+  }
+
+  /** The audio channels since the last call (audioChannels), one value per step. */
   takeAudio(): Float32Array[] {
     const x = this.module.exports;
     const n = x.engine_audio_len(this.e);

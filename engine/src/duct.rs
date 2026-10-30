@@ -257,6 +257,7 @@ impl Side {
     }
 }
 
+#[derive(Clone)]
 pub struct Pipe {
     pub length: f64,
     /// Hydraulic diameter (4 area / perimeter) at end A: a round pipe's own.
@@ -1213,6 +1214,7 @@ fn step_from(up: &EndGas, area_up: f64, down: &EndGas, area_down: f64, rest: f64
 
 
 /// A lumped volume of gas at rest, or the atmosphere (fixed, without bounds).
+#[derive(Clone)]
 pub struct Node {
     pub volume: f64,
     pub atmosphere: bool,
@@ -1298,6 +1300,7 @@ impl Node {
 
 /// An open end's radiation into the air outside: a piston's impedance at the end of an
 /// unflanged pipe, as a resistance in parallel with the end correction's mass (below).
+#[derive(Clone)]
 pub struct Radiation {
     /// The resistance (Pa s/m^3) and its ratio to the mass (1/s).
     pub resistance: f64,
@@ -1341,6 +1344,7 @@ impl Radiation {
 
 /// A pipe's end meeting a node through an opening of effective area `cda` (a valve's,
 /// set as it moves; the pipe's own section for a plain connection).
+#[derive(Clone)]
 pub struct Link {
     pub pipe: usize,
     pub side: Side,
@@ -1367,6 +1371,7 @@ pub enum Outer {
 /// corrections (0.85 diameters, reduced by the neighbouring holes as Ingard and Fok give,
 /// 1 - 1.47 sqrt(porosity) + 0.47 porosity^1.5). The gas leaving a side takes its momentum
 /// along the pipe; entering, radially, it brings none.
+#[derive(Clone)]
 pub struct Perforation {
     pub pipe: usize,
     pub first: usize,
@@ -1430,6 +1435,7 @@ impl Perforation {
 /// the quasi-two-dimensional volute, which the volute's averaging over its 360 degrees makes
 /// right up to ~2 kHz where a lumped one isn't). Out of the pipe, each cell's static state
 /// feeds its nozzle, and the gas takes its momentum along the pipe; into it, the node's.
+#[derive(Clone)]
 pub struct Nozzles {
     pub pipe: usize,
     pub first: usize,
@@ -1459,6 +1465,7 @@ impl Nozzles {
 
 /// Two nodes joined through an opening (from `a` to `b`, positive), optionally a turbine's
 /// nozzle taking `efficiency` of the isentropic work of what passes forward.
+#[derive(Clone)]
 pub struct Orifice {
     pub a: usize,
     pub b: usize,
@@ -1479,6 +1486,7 @@ pub struct Orifice {
     pub power: f64,
 }
 
+#[derive(Clone)]
 pub struct Network {
     pub pipes: Vec<Pipe>,
     pub nodes: Vec<Node>,
@@ -1491,6 +1499,8 @@ pub struct Network {
     /// Work taken by the orifices over the last call to `step` (J), and substeps taken.
     pub work: Vec<f64>,
     pub substeps: usize,
+    /// At least this many pipe substeps per fluid step (offline sensitivity probes).
+    pub min_substeps: usize,
     /// Substeps rejected (and done again in halves) so far.
     pub rejected: usize,
     debug_last: String,
@@ -1502,6 +1512,7 @@ pub struct Network {
 }
 
 /// The pipes (or their nozzles), for tasks each taking some of them (src/pool.rs).
+#[derive(Clone)]
 struct Each<T>(*mut T);
 unsafe impl<T> Sync for Each<T> {}
 unsafe impl<T> Send for Each<T> {}
@@ -1525,6 +1536,7 @@ impl Default for Network {
             cfl: 0.6,
             work: vec![],
             substeps: 0,
+            min_substeps: 1,
             rejected: 0,
             debug_last: String::new(),
             pipe_links: vec![],
@@ -1623,7 +1635,7 @@ impl Network {
 
     /// Advances by `dt`, in as many substeps as stability takes.
     pub fn step(&mut self, dt: f64) {
-        let n = (dt / self.stable_dt()).ceil().max(1.0) as usize;
+        let n = ((dt / self.stable_dt()).ceil() as usize).max(self.min_substeps);
         self.work.fill(0.0);
         let debug = std::env::var("DUCTCHECK").is_ok();
         if debug {
@@ -2027,6 +2039,7 @@ impl Network {
 }
 
 /// An engine's exhaust as a network (spec::DuctSpec), with what the engine sets and reads.
+#[derive(Clone)]
 pub struct Ducts {
     pub net: Network,
     /// Per cylinder: its node (its gas, set from the engine's each step) and its valve's link.

@@ -55,6 +55,7 @@ pub struct TurboInputs {
     pub turbine_power: Option<f64>,
 }
 
+#[derive(Clone)]
 pub struct Turbo {
     radius: f64,
     inertia: f64,

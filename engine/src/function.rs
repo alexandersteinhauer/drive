@@ -11,7 +11,7 @@ pub struct Function {
 }
 
 /// As written: samples in any order.
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct RawFunction {
     filter_radius: f64,

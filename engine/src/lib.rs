@@ -17,3 +17,6 @@ pub mod turbo;
 pub mod wasm;
 pub mod acoustics;
 pub mod voice;
+pub mod surrogate;
+pub mod surrogate_stream;
+pub mod jet;

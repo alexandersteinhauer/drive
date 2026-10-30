@@ -457,6 +457,21 @@ pub struct AudioSpec {
     /// sources follow) rather than an exhaust signal.
     #[serde(default)]
     pub voice: Option<VoiceSpec>,
+    /// Experimental learned exhaust, selected independently of the fallback voice.
+    #[serde(default)]
+    pub surrogate: Option<SurrogateAudioSpec>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SurrogateAudioSpec {
+    /// Asset fetched by the audio worklet host; not loaded by the gas simulation.
+    pub model: String,
+    /// Pascals per digital full scale (one fixed playback calibration, not a fit).
+    pub full_scale: f64,
+    /// Actuator control thresholds (rad/s and pedal), as in the reference exhaust.
+    pub flap_speed: [f64; 2],
+    pub flap_throttle: [f64; 2],
 }
 
 /// voice.rs's sources beyond the exhaust valves' flow, and its output level. Each level is

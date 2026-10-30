@@ -255,6 +255,7 @@ impl Default for GasSystem {
     }
 }
 
+#[derive(Clone)]
 pub struct FlowParameters {
     pub k_flow: f64,
     pub dt: f64,

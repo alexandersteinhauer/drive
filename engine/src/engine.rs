@@ -16,6 +16,7 @@ use std::collections::VecDeque;
 const STATE_SAMPLES: usize = 256;
 const CRANKCASE_PRESSURE: f64 = ATM;
 
+#[derive(Clone)]
 struct Bank {
     bore: f64,
     deck_height: f64,
@@ -31,6 +32,7 @@ impl Bank {
     }
 }
 
+#[derive(Clone)]
 struct Camshaft {
     advance: f64,
     profile: Function,
@@ -72,6 +74,7 @@ impl Camshaft {
     }
 }
 
+#[derive(Clone)]
 struct Head {
     chamber_volume: f64,
     intake_runner_volume: f64,
@@ -84,6 +87,7 @@ struct Head {
     exhaust_cam: Camshaft,
 }
 
+#[derive(Clone)]
 struct Intake {
     system: GasSystem,
     atmosphere: GasSystem,
@@ -140,6 +144,7 @@ impl Intake {
     }
 }
 
+#[derive(Clone)]
 struct Exhaust {
     system: GasSystem,
     atmosphere: GasSystem,
@@ -174,6 +179,7 @@ impl Exhaust {
     }
 }
 
+#[derive(Clone)]
 struct Fuel {
     molecular_mass: f64,
     energy_density: f64,
@@ -233,6 +239,7 @@ struct FlameEvent {
     global_mix: Mix,
 }
 
+#[derive(Clone)]
 struct DelayFilter {
     latency: usize,
     history: VecDeque<f64>,
@@ -255,6 +262,7 @@ impl DelayFilter {
 }
 
 /// A cylinder: piston, rod and combustion chamber.
+#[derive(Clone)]
 struct Cylinder {
     bank: usize,
     /// Index within the bank (camshaft lobe, head port).
@@ -294,6 +302,8 @@ struct Cylinder {
     step_exhaust_moles: f64,
     /// This cylinder's own random sequence for its burns, with cycle variation.
     rng: Rng,
+    /// Ignition events so far.
+    burns: u64,
     pressure_history: [f64; STATE_SAMPLES],
     piston_speed_history: [f64; STATE_SAMPLES],
     /// Combustion heat released so far (J).
@@ -312,6 +322,7 @@ struct Cylinder {
 }
 
 /// Inputs read by the cylinders during a step that live elsewhere in the engine.
+#[derive(Clone)]
 struct Context<'a> {
     /// Woschni's heat transfer to walls at this temperature (K); none: engine-sim's.
     wall_temperature: Option<f64>,
@@ -526,7 +537,6 @@ impl Cylinder {
 
             self.exhaust_flow = exhaust_flow;
             self.exhaust_moles += exhaust_flow;
-            self.step_exhaust_moles += exhaust_flow;
             // A plane wave's pressure is rho c times its particle velocity: for a mass flow m'
             // into a pipe of area A, c m' / A.
             self.exhaust_wave +=
@@ -609,6 +619,7 @@ fn positive_mod(mut x: f64, m: f64) -> f64 {
     x % m
 }
 
+#[derive(Clone)]
 struct Ignition {
     timing: Function,
     full_load: Option<crate::spec::FullLoadTiming>,
@@ -628,6 +639,7 @@ struct Ignition {
 }
 
 /// The engine and everything it drives, stepped at the simulation frequency.
+#[derive(Clone)]
 pub struct Engine {
     pub mech: Mechanism,
     banks: Vec<Bank>,
@@ -654,6 +666,10 @@ pub struct Engine {
     audio_flow: bool,
     /// The audio is voice.rs's control stream (voice_channels).
     voice: bool,
+    /// Which audio stream is collected; never changes the gas/torque model.
+    surrogate_audio: bool,
+    surrogate_config: Option<crate::spec::SurrogateAudioSpec>,
+    surrogate_flap: f64,
     /// Each exhaust's temperature averaged over MEAN_FLOW_TIME (for the voice).
     back_temperature: Vec<f64>,
     /// Moles drawn through the throttles over the step, and that flow (kg/s) averaged.
@@ -682,6 +698,9 @@ pub struct Engine {
     /// The exhaust as duct.rs's pipes (spec.ducts), in place of the runners and collectors.
     pub ducts: Option<crate::duct::Ducts>,
     cycle_variation: Option<f64>,
+    /// Burns scaled (cylinder, its burn's count, factor on the fuel it burns): to measure the
+    /// exhaust's response to one burn (examples/superpose.rs).
+    pub burn_scales: Vec<(usize, u64, f64)>,
 }
 
 impl Engine {
@@ -851,6 +870,7 @@ impl Engine {
                     exhaust_moles: 0.0,
                     step_exhaust_moles: 0.0,
                     rng: Rng::new(1 + cylinders.len() as u32),
+                    burns: 0,
                     pressure_history: [0.0; STATE_SAMPLES],
                     piston_speed_history: [0.0; STATE_SAMPLES],
                     released: 0.0,
@@ -903,6 +923,9 @@ impl Engine {
             collect_audio: true,
             audio_flow: spec.audio.source == crate::spec::AudioSource::Flow,
             voice: spec.audio.voice.is_some(),
+            surrogate_audio: spec.audio.surrogate.is_some(),
+            surrogate_config: spec.audio.surrogate.clone(),
+            surrogate_flap: 0.0,
             back_temperature: vec![celcius(25.0); spec.exhausts.len()],
             air_moles: 0.0,
             air_mass_flow: 0.0,
@@ -925,6 +948,7 @@ impl Engine {
             wall_temperature: spec.physics.wall_temperature,
             physical: spec.physics.real_gas || spec.physics.wall_temperature.is_some(),
             cycle_variation: spec.physics.cycle_variation,
+            burn_scales: Vec::new(),
             ducts: spec.ducts.as_ref().map(|d| {
                 assert!(spec.physics.real_gas, "ducts need physics.realGas (the gases must agree)");
                 let n = spec.banks.iter().map(|b| b.cylinders.len()).sum();
@@ -1128,6 +1152,29 @@ impl Engine {
         self.cylinders[i].step_exhaust_moles * AIR_MOLECULAR_MASS / self.timestep
     }
 
+    /// Reset the burn randomness (before a run), independently for each cylinder.
+    pub fn seed_burns(&mut self, seed: u32) {
+        self.rng = Rng::new(seed);
+        for (i, c) in self.cylinders.iter_mut().enumerate() {
+            c.rng = Rng::new(seed.wrapping_add(i as u32));
+        }
+    }
+
+    /// The exhaust valve's effective flow area (m^2).
+    pub fn cylinder_exhaust_area(&self, i: usize) -> f64 {
+        self.cylinders[i].exhaust_flow_rate * AIR_MOLECULAR_MASS.sqrt()
+    }
+
+    /// A cylinder's ignition events so far.
+    pub fn burns(&self, i: usize) -> u64 {
+        self.cylinders[i].burns
+    }
+
+    /// The bank a cylinder is on.
+    pub fn cylinder_bank(&self, i: usize) -> usize {
+        self.cylinders[i].bank
+    }
+
     pub fn cylinder_count(&self) -> usize {
         self.cylinders.len()
     }
@@ -1177,11 +1224,16 @@ impl Engine {
     }
 
     pub fn exhaust_runner_pressure(&self, i: usize) -> f64 {
-        self.cylinders[i].exhaust_runner.pressure()
+        self.ducts.as_ref().map_or_else(|| self.cylinders[i].exhaust_runner.pressure(), |d| {
+            d.net.links[d.cylinders[i].1].flow.p
+        })
     }
 
     pub fn exhaust_runner_temperature(&self, i: usize) -> f64 {
-        self.cylinders[i].exhaust_runner.temperature()
+        self.ducts.as_ref().map_or_else(|| self.cylinders[i].exhaust_runner.temperature(), |d| {
+            let f = &d.net.links[d.cylinders[i].1].flow;
+            f.p / (f.rho * crate::duct::RS)
+        })
     }
 
     /// Pressure behind the throttle, in the (first) intake plenum.
@@ -1255,6 +1307,10 @@ impl Engine {
         }
 
         self.simulate_step(dt);
+        // Both audio backends already accumulated the valve's moles over this step.
+        // Retain that exact sum for physical-flow diagnostics before audio clears it;
+        // do not duplicate an accumulator in every cylinder's fluid substep.
+        for c in &mut self.cylinders { c.step_exhaust_moles = c.exhaust_moles; }
         self.write_audio();
     }
 
@@ -1333,9 +1389,9 @@ impl Engine {
                 ducted: self.ducts.is_some(),
                 cycle_variation: self.cycle_variation,
             };
-            for c in cylinders.iter_mut() {
-                c.step_exhaust_moles = 0.0;
+            for (i, c) in cylinders.iter_mut().enumerate() {
                 if c.ignition_event {
+                    let lit = c.lit;
                     if self.cycle_variation.is_some() {
                         let mut own = std::mem::replace(&mut c.rng, Rng::new(0));
                         c.ignite(&ctx, &mut own);
@@ -1343,6 +1399,12 @@ impl Engine {
                     } else {
                         c.ignite(&ctx, &mut self.rng);
                     }
+                    if let Some(&(_, _, f)) = self.burn_scales.iter().find(|s| s.0 == i && s.1 == c.burns) {
+                        if c.lit && !lit {
+                            c.flame.efficiency *= f;
+                        }
+                    }
+                    c.burns += 1;
                 }
                 c.update(&ctx);
             }
@@ -1460,14 +1522,70 @@ impl Engine {
             c.system.set_totals(n, nd.e, Mix { p_fuel: f, p_inert: 1.0 - f - o, p_o2: o });
             c.exhaust_flow = n0 - n;
             c.exhaust_moles += n0 - n;
-            c.step_exhaust_moles += n0 - n;
         }
         d.listen();
         d.turbines.iter().map(|&o| d.net.work[o]).sum()
     }
 
+    /// Select the learned model's physical stream or the original voice/synth stream.
+    /// Pending audio is discarded so no packet contains both layouts. Gas state, forces,
+    /// combustion randomness and controllers are untouched.
+    pub fn set_surrogate_audio(&mut self, on: bool) {
+        let on = on && self.surrogate_config.is_some();
+        if on == self.surrogate_audio { return; }
+        self.surrogate_audio = on;
+        let channels = if on {
+            self.cylinders.len() + crate::surrogate_stream::CONTROLS
+        } else if self.voice {
+            self.cylinders.len() + crate::voice::GLOBALS
+        } else {
+            self.exhausts.len()
+        };
+        self.audio = vec![Vec::new(); channels];
+        self.staging = vec![0.0; channels];
+    }
+
+    #[inline(never)]
+    fn update_surrogate_flap(&mut self) {
+        if let Some(s) = &self.surrogate_config {
+            let ramp = |v: f64, [a,b]: [f64;2]| {
+                let x = ((v-a)/(b-a).max(1e-9)).clamp(0.0,1.0);
+                x*x*(3.0-2.0*x)
+            };
+            let target = ramp(self.mech.omega().abs(), s.flap_speed).max(ramp(self.speed_control, s.flap_throttle));
+            let alpha = 1.0-(1.0-(self.timestep/(self.fluid_steps as f64*0.15)).min(1.0)).powi(self.fluid_steps as i32);
+            self.surrogate_flap += alpha*(target-self.surrogate_flap);
+        }
+    }
+
+    #[inline(never)]
+    fn write_surrogate(&mut self) {
+        let n = self.cylinders.len();
+        for (i, c) in self.cylinders.iter_mut().enumerate() {
+            self.staging[i] = c.step_exhaust_moles * AIR_MOLECULAR_MASS / self.timestep;
+            c.exhaust_moles = 0.0;
+            c.exhaust_wave = 0.0;
+        }
+        self.staging[n] = self.rpm() / 1000.0;
+        self.staging[n+1] = self.manifold_pressure() / 1e5;
+        self.staging[n+2] = self.wastegate();
+        self.staging[n+3] = self.speed_control;
+        self.staging[n+4] = self.surrogate_flap;
+        self.exhaust_moles = 0.0;
+        self.air_moles = 0.0;
+        if self.collect_audio {
+            for (out, value) in self.audio.iter_mut().zip(&self.staging) {
+                out.push(*value as f32);
+            }
+        }
+    }
+
     /// The exhaust pulses as the synthesizer's input (writeToSynthesizer).
     fn write_audio(&mut self) {
+        if self.surrogate_config.is_some() { self.update_surrogate_flap(); }
+        if self.surrogate_audio {
+            return self.write_surrogate();
+        }
         if self.voice {
             return self.write_voice();
         }
@@ -1569,7 +1687,9 @@ const MEAN_FLOW_TIME: f64 = 0.03;
 /// valve flow, then crate::voice::GLOBALS of state); else engine-sim's, one per exhaust
 /// system.
 pub fn audio_channels(spec: &EngineSpec) -> usize {
-    if spec.audio.voice.is_some() {
+    if spec.audio.surrogate.is_some() {
+        spec.banks.iter().map(|b| b.cylinders.len()).sum::<usize>() + crate::surrogate_stream::CONTROLS
+    } else if spec.audio.voice.is_some() {
         spec.banks.iter().map(|b| b.cylinders.len()).sum::<usize>() + crate::voice::GLOBALS
     } else {
         spec.exhausts.len()

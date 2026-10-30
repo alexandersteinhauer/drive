@@ -23,6 +23,7 @@ import {
   ferrari488Pista,
   vwBeetle,
   withImpulseExhaust,
+  withPistaSurrogateExhaust,
   type CarConfig,
 } from "./sim/config";
 import { RoadView } from "./roadView";
@@ -34,6 +35,7 @@ import { CrashCard, Hud, type AssistMode } from "./hud";
 import { PauseMenu } from "./pauseMenu";
 import { Stats } from "./stats";
 import { EngineSound } from "./audio/engineSound";
+import { pistaExhaustMode, pistaExhaustUrl } from "./audio/exhaustOptions";
 import { loadEngineModule } from "./sim/engineSim";
 import type { EngineSpec } from "./sim/engineSpec";
 import { SimulatedEngine } from "./sim/powerplant";
@@ -153,8 +155,13 @@ let camSide = 0;
  * ?exhaust=impulse: the engines heard through engine-sim's exhaust impulse response
  * instead of the acoustics computed from each car's exhaust, to compare the two.
  */
+const gameUrl = new URL(location.href);
+const pistaExhaust = pistaExhaustMode(
+  gameUrl,
+  localStorage.getItem("pistaExhaust"),
+);
 const exhaust =
-  new URL(location.href).searchParams.get("exhaust") === "impulse"
+  gameUrl.searchParams.get("exhaust") === "impulse"
     ? withImpulseExhaust
     : (cfg: CarConfig) => cfg;
 // C switches between these; the first is the one to start in.
@@ -174,14 +181,23 @@ const models: {
     headlights: { x: 0.5, y: 0.78, z: -1.63 },
   },
   {
-    config: exhaust(ferrari488Pista),
+    config:
+      pistaExhaust === "surrogate"
+        ? withPistaSurrogateExhaust()
+        : exhaust(ferrari488Pista),
     url: "models/ferrari-488-pista.glb",
     // At the cover, 0.16 m ahead of the projector lens: further in, the beam would light the
     // bumper below from inside.
     headlights: { x: 0.7, y: 0.57, z: -2.2 },
   },
 ];
-let model = 0;
+// Shareable direct start, especially useful for comparing the optional Pista exhaust.
+let model =
+  gameUrl.searchParams.get("car") === "pista"
+    ? 2
+    : gameUrl.searchParams.get("car") === "beetle"
+      ? 1
+      : 0;
 // Driver assists, kept across car switches and reloads.
 const assists: Record<"abs" | "esc", AssistMode> = {
   abs: localStorage.getItem("abs") === "off" ? "off" : "on",
@@ -194,10 +210,17 @@ function applyAssists(target: Car): void {
   target.absEnabled = assists.abs !== "off";
   target.escMode = assists.esc as EscMode;
 }
-let car = new Car(models[0]!.config, land);
+// Direct combustion starts need the module first; the default electric car warms it
+// in the background, without delaying the first drive.
+if (model !== 0) await loadEngineModule();
+else
+  void loadEngineModule().catch((error: unknown) =>
+    console.warn("engine module unavailable:", error),
+  );
+let car = new Car(models[model]!.config, land);
 applyAssists(car);
 placeOnRoad(15);
-let view = makeView(0);
+let view = makeView(model);
 scene.add(view.group);
 const input = new Input(window);
 const stats = new Stats(renderer);
@@ -262,37 +285,81 @@ function heading(): number {
 
 /** The current car's engine sound, once loaded; null for a silent (electric) car. */
 let engineSound: EngineSound | null = null;
-/** How closed the throttle is with the engine driven by the car, for the sound (0..1). */
+/** A cached backend per engine spec; inactive cars are suspended, not left droning. */
 const engineSounds = new Map<EngineSpec, Promise<EngineSound | null>>();
 function simulatedEngine(of: Car): SimulatedEngine | null {
   return of.powerplant instanceof SimulatedEngine ? of.powerplant : null;
 }
 function loadEngineSound(): void {
-  engineSound?.setVolume(0);
+  if (engineSound) {
+    engineSound.onBackendChange = null;
+    engineSound.onWarning = null;
+    engineSound.stop();
+  }
   engineSound = null;
   const engine = simulatedEngine(car);
   if (!engine) return;
-  engine.sim.collectAudio = true;
+  // Do not buffer an unconfirmed stream format while the optional backend initializes.
+  engine.sim.collectAudio = false;
   const spec = engine.cfg.spec;
   let sound = engineSounds.get(spec);
   if (!sound) {
     sound = EngineSound.create(spec).catch((e: unknown) => {
       console.warn("engine sound unavailable:", e);
+      if (spec.audio.surrogate)
+        reportAudioWarning("Pista engine sound unavailable.");
       return null;
     });
     engineSounds.set(spec, sound);
   }
   const current = car;
   void sound.then((s) => {
-    if (car === current) engineSound = s;
+    if (car !== current || !s) return;
+    engineSound = s;
+    if (spec.audio.surrogate) engine.sim.surrogateAudio = s.surrogate;
+    engine.sim.collectAudio = true;
+    s.onBackendChange = (surrogate) => {
+      if (car !== current) return;
+      engine.sim.surrogateAudio = surrogate;
+      menu.setPistaExhaustStatus(
+        surrogate
+          ? "Exhaust-only pilot active; transients are experimental."
+          : "Pilot unavailable; original exhaust active.",
+      );
+    };
+    s.onWarning = reportAudioWarning;
+    if (spec.audio.surrogate)
+      menu.setPistaExhaustStatus(
+        s.surrogate
+          ? "Exhaust-only pilot active; transients are experimental."
+          : "Pilot unavailable; original exhaust active.",
+      );
+    if (s.warning) reportAudioWarning(s.warning);
+    if (audioInteracted) s.resume();
   });
 }
-// Browsers only start audio after the user interacts with the page.
+// An interaction may happen before the worklet is ready; honor it once loaded.
+let audioInteracted = false;
 for (const type of ["keydown", "pointerdown"])
-  addEventListener(type, () => engineSound?.resume());
-// Simulated engines need their WebAssembly module before such a car is made.
-void loadEngineModule();
-loadEngineSound();
+  addEventListener(type, () => {
+    audioInteracted = true;
+    engineSound?.resume();
+  });
+let audioNotice: HTMLElement | null = null;
+function reportAudioWarning(message: string): void {
+  menu.setPistaExhaustStatus(message);
+  audioNotice?.remove();
+  const notice = document.createElement("div");
+  notice.setAttribute("role", "status");
+  notice.textContent = message;
+  notice.style.cssText =
+    "position:fixed;bottom:90px;left:50%;transform:translateX(-50%);" +
+    "max-width:85vw;padding:10px 16px;border-radius:8px;background:#18202ded;color:white;" +
+    "font:13px/1.4 system-ui;pointer-events:none;z-index:10";
+  audioNotice = notice;
+  document.body.append(notice);
+  setTimeout(() => notice.remove(), 10000);
+}
 
 /** Set while the next car's model loads; the current one drives on meanwhile. */
 let switching = false;
@@ -358,7 +425,19 @@ const menu = new PauseMenu(
   },
   // Paused, no frames are drawn: redraw once to show a new setting.
   () => render(),
+  {
+    mode: pistaExhaust,
+    status:
+      pistaExhaust === "surrogate"
+        ? "Exhaust-only pilot; known transient and training-rate limits."
+        : "Original exhaust active.",
+    onChange: (mode) => {
+      localStorage.setItem("pistaExhaust", mode);
+      location.assign(pistaExhaustUrl(new URL(location.href), mode));
+    },
+  },
 );
+loadEngineSound();
 menu.enabled = false;
 let last = performance.now();
 let accumulator = 0;
@@ -568,8 +647,8 @@ last = performance.now();
 menu.enabled = true;
 loading.finish();
 // The other cars download in the background, ready for C.
-for (const { url } of models.slice(1))
-  void fetchModel(import.meta.env.BASE_URL + url);
+for (const [i, { url }] of models.entries())
+  if (i !== model) void fetchModel(import.meta.env.BASE_URL + url);
 if (bench) {
   paused = true;
   stats.visible = false;
