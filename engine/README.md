@@ -144,10 +144,23 @@ offline: `src/duct.rs` replaces the exhaust runners and collectors with pipes an
   discharge coefficient). The exhaust valve opens by the port's flow-bench curve. Into the
   pipe, the jet through the opening mixes out to the subsonic state with its mass flow and
   total enthalpy (at most sonic): out of a valve into a wider pipe it doesn't expand on
-  supersonically, as through a nozzle's diverging part.
-- Turbines: nozzles between volumes taking the turbo's efficiency of the isentropic work of
-  what passes, the wastegate beside them opened by the boost controller; the shaft gets
-  their power.
+  supersonically, as through a nozzle's diverging part. Through the pipe's own section the
+  inflow is isentropic, its face sonic at the critical pressure once it chokes (finding it
+  from its mass flux is ill-conditioned near sonic, and rang at kilohertz there); a wall is
+  exact, nothing passing.
+- Where a strong rarefaction outruns the high-order scheme (a stage would leave a cell
+  without internal energy), the substep is done again in halves, at the last with
+  first-order fluxes, which HLLC keeps positive.
+- Turbines: a quasi-two-dimensional volute (Galindo, Tiseira, Fajardo and García-Cuevas,
+  Energy Convers. Manage. 85, 2014): each scroll a tapered duct to its tongue, every cell of it
+  discharging through its own stator channel (`nozzles`) into the stator and rotor's space, a
+  quasi-steady rotor nozzle from there (reaction 0.5: each nozzle half the expansion), the
+  stage's isentropic work at the turbo's efficiency taken in between, the wastegate's ports in
+  the volutes' feeds, opened by the boost controller; the shaft gets the power. A lumped
+  turbine (one nozzle between small volumes) let the kilohertz through almost whole; the
+  volute's averaging over its 360 degrees takes 24 dB at 3 kHz off them here, as measured
+  turbines do (17-33 dB at 1-2 kHz: Kabral et al., ETC 2017; Tiikoja et al., SAE
+  2011-01-1525).
 - Perforated walls (a silencer's core): each cell's holes a slug of gas driven by the
   pressure across it against its jet's loss and viscous drag, its mass the holes' gas over
   the wall and their end corrections.

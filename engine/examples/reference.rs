@@ -80,6 +80,20 @@ fn main() {
         d.names.get(&alt).or_else(|| d.names.get(name)).map_or(0.0, |&n| d.net.nodes[n].pressure())
     };
     let (mut p_in, mut p_out, mut power, mut gate, mut n_mean) = (0.0, 0.0, 0.0, 0.0, 0usize);
+    // PROBE=name,name,...: those nodes' mean pressures in the log too.
+    let probes: Vec<String> = std::env::var("PROBE").map(|v| v.split(',').map(String::from).collect()).unwrap_or_default();
+    let mut probe_sums = vec![0.0; probes.len()];
+    // HFMAP=<seconds>: from then on, each pipe cell's and node's pressure fluctuation above
+    // ~1 kHz (rms, sampled each step), printed at the end, strongest first.
+    let hf_from = std::env::var("HFMAP").ok().map(|v| v.parse::<f64>().unwrap());
+    // TRACE=pipe:cell,pipe:cell,...: those cells' pressures each step, to <out>.trace.f32
+    // (frames of one value per cell, at the simulation frequency).
+    let traces: Vec<(usize, usize)> = std::env::var("TRACE")
+        .map(|v| v.split(',').map(|x| { let (a, b) = x.split_once(':').unwrap(); (a.parse().unwrap(), b.parse().unwrap()) }).collect())
+        .unwrap_or_default();
+    let mut trace_out: Vec<f32> = Vec::new();
+    let mut hf: Vec<Vec<(f64, f64, f64)>> = Vec::new();
+    let mut hf_nodes: Vec<(f64, f64, f64)> = Vec::new();
     let started = std::time::Instant::now();
     for &(dur, r0, r1, thr) in &program {
         let mut s = 0.0;
@@ -99,10 +113,41 @@ fn main() {
                 }
                 substeps += d.net.substeps;
                 steps += 1;
+                for &(k, i) in &traces {
+                    trace_out.push(d.net.pipes[k].prim[i.min(d.net.pipes[k].cells() - 1)].p as f32);
+                }
+                if let Some(from) = hf_from {
+                    if hf.is_empty() {
+                        hf = d.net.pipes.iter().map(|p| vec![(p.prim[0].p, 0.0, 0.0); p.cells()]).collect();
+                        hf_nodes = d.net.nodes.iter().map(|n| (n.pressure(), 0.0, 0.0)).collect();
+                    }
+                    let a = 1.0 - (-2.0 * std::f64::consts::PI * 1000.0 / spec.simulation_frequency).exp();
+                    let on = t + s >= from;
+                    let update = |st: &mut (f64, f64, f64), x: f64| {
+                        st.0 += a * (x - st.0);
+                        if on {
+                            st.1 += (x - st.0).powi(2);
+                            st.2 += 1.0;
+                        }
+                    };
+                    for (k, p) in d.net.pipes.iter().enumerate() {
+                        for (i, c) in p.prim.iter().enumerate() {
+                            update(&mut hf[k][i], c.p);
+                        }
+                    }
+                    for (k, n) in d.net.nodes.iter().enumerate() {
+                        if !n.atmosphere {
+                            update(&mut hf_nodes[k], n.pressure());
+                        }
+                    }
+                }
                 p_in += probe(&e, "right scroll A");
                 p_out += probe(&e, "right turbine out");
                 power += d.turbines.iter().map(|&o| d.net.orifices[o].power).sum::<f64>();
                 gate += d.wastegates.first().map_or(0.0, |&(o, a)| d.net.orifices[o].cda / a);
+                for (sum, name) in probe_sums.iter_mut().zip(&probes) {
+                    *sum += d.names.get(name).map_or(f64::NAN, |&n| d.net.nodes[n].pressure());
+                }
                 n_mean += 1;
             }
             s += frame;
@@ -113,7 +158,7 @@ fn main() {
                 let (boost, _) = e.turbo_state();
                 let k = n_mean.max(1) as f64;
                 log += &format!(
-                    "{t:.2} rpm {:.0} thr {thr} torque {:.0} air {:.3} kg/s boost {:.2} map {:.2} turbine {:.2}->{:.2} bar {:.0} kW gate {:.2} port {:.2}..{:.2} bar {:.0} K substeps {:.1} wall {:.1}s\n",
+                    "{t:.2} rpm {:.0} thr {thr} torque {:.0} air {:.3} kg/s boost {:.2} map {:.2} turbine {:.2}->{:.2} bar {:.0} kW gate {:.2} port {:.2}..{:.2} bar {:.0} K substeps {:.1} rejected {} wall {:.1}s\n",
                     -e.crank_speed() / rpm,
                     e.filtered_dyno_torque(),
                     e.air_mass_flow(),
@@ -127,16 +172,44 @@ fn main() {
                     p1.prim.iter().map(|p| p.p).fold(0.0, f64::max) / 1e5,
                     p1.prim[0].t,
                     substeps as f64 / steps.max(1) as f64,
+                    d.net.rejected,
                     started.elapsed().as_secs_f64(),
                 );
+                if !probes.is_empty() {
+                    let d = e.ducts.as_ref().unwrap();
+                    let parts: Vec<String> = probes.iter().zip(&probe_sums).map(|(n, s)| format!("{n} {:.3}", s / k / 1e5)).collect();
+                    log += &format!("    {} | flap {:.2}\n", parts.join(", "), d.flap);
+                }
+                probe_sums.iter_mut().for_each(|s| *s = 0.0);
                 (p_in, p_out, power, gate, n_mean) = (0.0, 0.0, 0.0, 0.0, 0);
-                print!("{}", log.lines().last().unwrap());
-                println!();
+                let lines: Vec<&str> = log.lines().collect();
+                let tail = if probes.is_empty() { 1 } else { 2 };
+                for l in &lines[lines.len() - tail..] {
+                    println!("{l}");
+                }
                 std::io::stdout().flush().unwrap();
             }
         }
     }
     let d = e.ducts.as_ref().unwrap();
+    if hf_from.is_some() {
+        // Each pipe's strongest cell, and every volume.
+        let names: std::collections::HashMap<usize, &String> = d.names.iter().map(|(n, &i)| (i, n)).collect();
+        for (k, cells) in hf.iter().enumerate() {
+            let (i, v) = cells.iter().enumerate().map(|(i, st)| (i, (st.1 / st.2.max(1.0)).sqrt())).fold((0, 0.0), |a, b| if b.1 > a.1 { b } else { a });
+            let mean: f64 = cells.iter().map(|st| (st.1 / st.2.max(1.0)).sqrt()).sum::<f64>() / cells.len() as f64;
+            println!("hf pipe {k:2}: max {v:7.0} Pa at cell {i}/{} ({:.3} m), mean {mean:7.0} Pa", cells.len(), (i as f64 + 0.5) * d.net.pipes[k].dx);
+        }
+        for (k, st) in hf_nodes.iter().enumerate() {
+            if st.2 > 0.0 {
+                println!("hf node {:24}: {:7.0} Pa", names.get(&k).map_or("?", |s| s.as_str()), (st.1 / st.2).sqrt());
+            }
+        }
+    }
+    if !traces.is_empty() {
+        let bytes: Vec<u8> = trace_out.iter().flat_map(|v| v.to_le_bytes()).collect();
+        std::fs::write(format!("{out}.trace.f32"), bytes).unwrap();
+    }
     write_wav(&format!("{out}.wav"), &d.sound, rate as u32);
     // Each open end's outward velocity, density and temperature per sample (f32 triples),
     // and the ends' diameters.

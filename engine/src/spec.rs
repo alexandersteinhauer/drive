@@ -53,6 +53,8 @@ pub struct DuctSpec {
     pub perforations: Vec<DuctPerforationSpec>,
     #[serde(default)]
     pub flaps: Vec<DuctFlapSpec>,
+    #[serde(default)]
+    pub nozzles: Vec<DuctNozzlesSpec>,
     /// The listener's distance from the open ends (m).
     pub listener_distance: f64,
     /// The highest frequency the cells resolve (Hz): 30 cells to its wavelength at each
@@ -175,8 +177,9 @@ pub struct DuctFlapSpec {
 }
 
 /// A turbine from node `a` to node `b`: a nozzle of effective area `area` taking the turbo's
-/// turbine efficiency of the isentropic work of what passes, and beside it a wastegate of
-/// effective area `wastegate` when fully open, opened by the boost controller (turbo.rs).
+/// turbine efficiency of the isentropic work of what passes (with `nozzles` from volutes into
+/// `a`, the rotor of a two-nozzle turbine), and beside it a wastegate of effective area
+/// `wastegate` when fully open, opened by the boost controller (turbo.rs).
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DuctTurbineSpec {
@@ -184,6 +187,25 @@ pub struct DuctTurbineSpec {
     pub b: String,
     pub area: f64,
     pub wastegate: f64,
+    /// A two-nozzle turbine's rotor: the nodes whose mean pressure is the stage's inlet (its
+    /// work the stage's isentropic work from there); none: its own drop.
+    #[serde(default)]
+    pub stage: Vec<String>,
+    /// The wastegate's ports (in the volutes), its area shared between them; none: from `a`.
+    #[serde(default)]
+    pub wastegate_from: Vec<String>,
+}
+
+/// Nozzles from a stretch of pipe `pipe` (`from` to `to`, m) into `node`, `area` the total
+/// effective area spread evenly over its cells: a turbine volute's stator channels.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DuctNozzlesSpec {
+    pub pipe: String,
+    pub from: f64,
+    pub to: f64,
+    pub node: String,
+    pub area: f64,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]

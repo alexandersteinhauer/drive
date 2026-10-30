@@ -102,7 +102,8 @@ fn friction_factor_with(re: f64, rough_term: f64, laminar: f64) -> f64 {
 #[inline]
 pub fn orifice(p0: f64, t0: f64, g: f64, p: f64) -> f64 {
     let critical = (2.0 / (g + 1.0)).powf(g / (g - 1.0));
-    let r = (p / p0).clamp(critical, 1.0);
+    // (max and min, not clamp: a NaN passes through to be caught, rather than panicking.)
+    let r = (p / p0).max(critical).min(1.0);
     let psi = 2.0 * g / (g - 1.0) * (r.powf(2.0 / g) - r.powf((g + 1.0) / g));
     p0 / (RS * t0).sqrt() * psi.max(0.0).sqrt()
 }
@@ -255,6 +256,8 @@ pub struct Pipe {
     padded: Vec<[f64; NQ]>,
     /// Per face, the mass flow last solved across it where the section steps.
     step_flow: Vec<f64>,
+    /// The cells' own values at the faces (first order), for a substep done again.
+    first_order: bool,
     /// Flux (x-ward, per area) through end A and end B, set by what they meet.
     face: [[f64; NQ]; 2],
 }
@@ -382,6 +385,7 @@ impl Pipe {
             prim: vec![state; n],
             padded: Vec::with_capacity(n + 6),
             step_flow: vec![0.0; n + 1],
+            first_order: false,
             face: [[0.0; NQ]; 2],
         }
     }
@@ -492,7 +496,7 @@ impl Pipe {
             Side::A => self.prim[0],
             Side::B => self.prim[n - 1],
         };
-        let p = if x[0] > 0.0 && x[2] > 0.0 { Prim::new(x[0], x[1], x[2], x[3], x[4]) } else { cell };
+        let p = if x[0] > 0.0 && x[2] > 0.0 && !self.first_order { Prim::new(x[0], x[1], x[2], x[3], x[4]) } else { cell };
         EndGas { rho: p.rho, un: side.sign() * p.u, p: p.p, t: p.t, g: p.g, c: p.c, yf: p.yf, yo: p.yo }
     }
 
@@ -532,10 +536,10 @@ impl Pipe {
             }
             // Where the reconstruction would leave a vacuum (never in smooth flow), the
             // cells' own values.
-            if l[0] <= 0.0 || l[2] <= 0.0 {
+            if l[0] <= 0.0 || l[2] <= 0.0 || self.first_order {
                 l = v[2];
             }
-            if r[0] <= 0.0 || r[2] <= 0.0 {
+            if r[0] <= 0.0 || r[2] <= 0.0 || self.first_order {
                 r = v[3];
             }
             let l = Prim::new(l[0], l[1], l[2], l[3], l[4]);
@@ -694,13 +698,48 @@ fn solve_end(s: &EndGas, area: f64, cda: f64, res: &Reservoir, z: f64) -> EndFlo
             // (a jet into a pipe wider than it mixes out; it doesn't expand on supersonically
             // as in a nozzle's diverging part), at most sonic. The residual: how far the
             // end's velocity from the wave curve is from that, as a mass flow.
-            let g = if p < pn { cda * orifice(pn, res.t, res_g, p) / area } else { 0.0 };
-            let (v, rho) = inflow_state(g, p, res_h, res.t);
+            // The face's own pressure: below the critical pressure a plain entry chokes, its
+            // face sonic at the critical pressure (the pipe expanding on beyond it).
+            let (v, rho, p_face) = if p >= pn {
+                // Nothing drives gas in.
+                (0.0, p / (RS * res.t), p)
+            } else if cda >= area {
+                // Through the pipe's own section (or wider): isentropic from the node's
+                // stagnation state to the end's pressure, at most sonic. (Finding the state
+                // from its mass flux instead is ill-conditioned near sonic, where the flux
+                // hardly changes with the velocity.)
+                isentropic_inflow(p, pn, res.t, res_h)
+            } else {
+                let g = if p < pn { cda * orifice(pn, res.t, res_g, p) / area } else { 0.0 };
+                let (v, rho) = inflow_state(g, p, res_h, res.t);
+                (v, rho, p)
+            };
             let m = -rho * v * area;
-            let f = EndFlow { m, energy: m * res_h, yf: res.yf, yo: res.yo, p, un: -v, rho };
+            let f = EndFlow { m, energy: m * res_h, yf: res.yf, yo: res.yo, p: p_face, un: -v, rho };
             ((un + v) * rho * area, f)
         }
     };
+    if cda == 0.0 && z == 0.0 {
+        // A wall: nothing passes, the gas brought to rest against it.
+        let p = rest_pressure(s);
+        return EndFlow { m: 0.0, energy: 0.0, yf: s.yf, yo: s.yo, p, un: 0.0, rho: wave(s, p).1 };
+    }
+    if s.un <= -s.c && res.p + z * s.un > s.p {
+        // Supersonic inflow: nothing from inside reaches the end, the node sets it, choked
+        // through the opening (sonic in the pipe's own section, or mixed out from a narrower
+        // opening's choked jet at the pipe's pressure).
+        let pn = res.p + z * s.un;
+        let (v, rho, p) = if cda >= area {
+            let g = gamma(res.t);
+            let critical = pn * (2.0 / (g + 1.0)).powf(g / (g - 1.0));
+            isentropic_inflow(critical, pn, res.t, res_h)
+        } else {
+            let (v, rho) = inflow_state(cda * orifice(pn, res.t, res_g, 0.0) / area, s.p, res_h, res.t);
+            (v, rho, s.p)
+        };
+        let m = -rho * v * area;
+        return EndFlow { m, energy: m * res_h, yf: res.yf, yo: res.yo, p, un: -v, rho };
+    }
     if s.un >= s.c {
         // Supersonic outflow: nothing reaches the end from the node.
         let m = s.rho * s.un * area;
@@ -754,6 +793,17 @@ fn solve_end(s: &EndGas, area: f64, cda: f64, res: &Reservoir, z: f64) -> EndFlo
     best
 }
 
+/// Gas accelerated isentropically from rest at `p0`, `t0` (enthalpy `h0`) to static pressure
+/// `p`: its velocity, density and pressure; below the critical pressure, the sonic state.
+fn isentropic_inflow(p: f64, p0: f64, t0: f64, h0: f64) -> (f64, f64, f64) {
+    let g = gamma(t0);
+    let critical = p0 * (2.0 / (g + 1.0)).powf(g / (g - 1.0));
+    let ps = p.max(critical);
+    let t = t0 * (ps / p0).powf((g - 1.0) / g);
+    let v = (2.0 * (h0 - enthalpy(t))).max(0.0).sqrt();
+    (v, ps / (RS * t), ps)
+}
+
 /// The subsonic state carrying mass flux `g` (kg/s m^2) at static pressure `p` with total
 /// enthalpy `h0`: its velocity and density; the sonic state if `g` is more than the most it
 /// can carry. `t0` is a guess at the temperature (the stagnation temperature).
@@ -799,6 +849,13 @@ fn inflow_state(g: f64, p: f64, h0: f64, t0: f64) -> (f64, f64) {
         v = g / rho_at(v);
     }
     (v, rho_at(v))
+}
+
+/// DUCTCHECK set: every stage's flows are checked, the first not finite reported with what
+/// made it.
+fn debug_checks() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("DUCTCHECK").is_ok())
 }
 
 /// The pressure at which the gas at an end comes to rest against it (no flow through it):
@@ -1199,6 +1256,22 @@ impl Perforation {
     }
 }
 
+/// A stretch of a pipe's wall opening, cell by cell, through quasi-steady nozzles into a node:
+/// a turbine volute's outflow into its stator channels, each channel fed by its own stretch of
+/// the volute (Galindo, Tiseira, Fajardo and García-Cuevas, Energy Convers. Manage. 85, 2014:
+/// the quasi-two-dimensional volute, which the volute's averaging over its 360 degrees makes
+/// right up to ~2 kHz where a lumped one isn't). Out of the pipe, each cell's static state
+/// feeds its nozzle, and the gas takes its momentum along the pipe; into it, the node's.
+pub struct Nozzles {
+    pub pipe: usize,
+    pub first: usize,
+    pub node: usize,
+    /// Effective area per cell (m^2).
+    pub cda: Vec<f64>,
+    /// The last total flow into the node (kg/s).
+    pub flow: f64,
+}
+
 /// Two nodes joined through an opening (from `a` to `b`, positive), optionally a turbine's
 /// nozzle taking `efficiency` of the isentropic work of what passes forward.
 pub struct Orifice {
@@ -1206,6 +1279,10 @@ pub struct Orifice {
     pub b: usize,
     pub cda: f64,
     pub efficiency: f64,
+    /// A turbine's stage: the nodes whose mean pressure is its inlet's (the volutes' feeds),
+    /// the work being the stage's isentropic work from there to `b`, taken from the gas
+    /// passing (the rotor nozzle of a two-nozzle turbine); none: this opening's own drop.
+    pub stage: Vec<usize>,
     /// The last mass flow (kg/s) and the work taken (W).
     pub flow: f64,
     pub power: f64,
@@ -1217,11 +1294,14 @@ pub struct Network {
     pub links: Vec<Link>,
     pub orifices: Vec<Orifice>,
     pub perforations: Vec<Perforation>,
+    pub nozzles: Vec<Nozzles>,
     /// Courant number of each step.
     pub cfl: f64,
     /// Work taken by the orifices over the last call to `step` (J), and substeps taken.
     pub work: Vec<f64>,
     pub substeps: usize,
+    /// Substeps rejected (and done again in halves) so far.
+    pub rejected: usize,
     debug_last: String,
 }
 
@@ -1233,9 +1313,11 @@ impl Default for Network {
             links: vec![],
             orifices: vec![],
             perforations: vec![],
+            nozzles: vec![],
             cfl: 0.6,
             work: vec![],
             substeps: 0,
+            rejected: 0,
             debug_last: String::new(),
         }
     }
@@ -1271,7 +1353,7 @@ impl Network {
     }
 
     pub fn orifice(&mut self, a: usize, b: usize, cda: f64, efficiency: f64) -> usize {
-        self.orifices.push(Orifice { a, b, cda, efficiency, flow: 0.0, power: 0.0 });
+        self.orifices.push(Orifice { a, b, cda, efficiency, stage: vec![], flow: 0.0, power: 0.0 });
         self.work.push(0.0);
         self.orifices.len() - 1
     }
@@ -1298,7 +1380,7 @@ impl Network {
             self.debug_last = format!("on entry:\n{}", self.snapshot());
         }
         for _ in 0..n {
-            self.substep(dt / n as f64);
+            self.checked_substep(dt / n as f64, 0);
             if debug {
                 if let Some(w) = self.check() {
                     panic!("{w}\nbefore:\n{}", self.debug_last);
@@ -1309,7 +1391,58 @@ impl Network {
         self.substeps = n;
     }
 
-    fn substep(&mut self, dt: f64) {
+    /// A substep, rejected where it would leave a gas without mass or internal energy (a
+    /// strong rarefaction outrunning the high-order scheme's positivity) and done again in
+    /// halves; at the last, with first-order fluxes, which HLLC keeps positive.
+    fn checked_substep(&mut self, dt: f64, depth: u32) {
+        let work = self.work.clone();
+        let hints: Vec<Vec<f64>> = self.pipes.iter().map(|p| p.step_flow.clone()).collect();
+        if self.substep(dt) {
+            return;
+        }
+        // Back to the start of the substep (substep saved it).
+        for (p, h) in self.pipes.iter_mut().zip(hints) {
+            p.q.clone_from(&p.q0);
+            p.step_flow = h;
+        }
+        for n in &mut self.nodes {
+            if !n.atmosphere {
+                n.set_state(n.s0);
+            }
+        }
+        for l in &mut self.links {
+            if let Some(r) = &mut l.radiation {
+                r.ql = r.ql0;
+            }
+        }
+        for f in &mut self.perforations {
+            f.v.clone_from(&f.v0);
+        }
+        self.work = work;
+        self.rejected += 1;
+        if depth < 4 {
+            self.checked_substep(0.5 * dt, depth + 1);
+            self.checked_substep(0.5 * dt, depth + 1);
+        } else {
+            for p in &mut self.pipes {
+                p.first_order = true;
+            }
+            let _ = self.substep(dt);
+            for p in &mut self.pipes {
+                p.first_order = false;
+            }
+        }
+    }
+
+    /// Every cell and volume with mass and internal energy.
+    fn physical(&self) -> bool {
+        let cells = self.pipes.iter().all(|p| {
+            p.q.iter().all(|q| q[0] > 0.0 && q[2] - 0.5 * q[1] * q[1] / q[0] > 0.0 && q[2].is_finite())
+        });
+        cells && self.nodes.iter().all(|n| n.atmosphere || (n.m > 0.0 && n.e > 0.0))
+    }
+
+    fn substep(&mut self, dt: f64) -> bool {
         for p in &mut self.pipes {
             p.q0.clone_from(&p.q);
         }
@@ -1326,17 +1459,21 @@ impl Network {
         }
         // Shu and Osher's third-order strong-stability-preserving Runge-Kutta: the stages'
         // rates weigh 1/6, 1/6 and 2/3 in the step.
-        self.rates(dt, 1.0 / 6.0);
-        self.advance(dt, 0.0);
-        self.rates(dt, 1.0 / 6.0);
-        self.advance(dt, 0.75);
-        self.rates(dt, 2.0 / 3.0);
-        self.advance(dt, 1.0 / 3.0);
+        // A stage leaving a gas without mass or internal energy stops it (checked_substep
+        // does it again in halves).
+        for (weight, keep) in [(1.0 / 6.0, 0.0), (1.0 / 6.0, 0.75), (2.0 / 3.0, 1.0 / 3.0)] {
+            self.rates(dt, weight);
+            self.advance(dt, keep);
+            if !self.physical() {
+                return false;
+            }
+        }
         for l in &mut self.links {
             if let Some(r) = &mut l.radiation {
                 r.pressure = r.coefficient * (l.flow.un * self.pipes[l.pipe].end_area(l.side) - r.ql);
             }
         }
+        true
     }
 
     /// The rates of change of everything; `weight` of the stage's work and flows is kept.
@@ -1369,6 +1506,9 @@ impl Network {
                 z = r.resistance * area;
             }
             let f = solve_end(&s, area, l.cda, &res, z);
+            if debug_checks() && !(f.m.is_finite() && f.energy.is_finite() && f.p.is_finite() && f.un.is_finite()) {
+                panic!("link pipe {} {:?} node {}: end {:?} reservoir {:?} area {area} cda {} z {z} -> {:?}", l.pipe, l.side, l.node, s, res, l.cda, f);
+            }
             pipe.set_end(l.side, &f);
             if !node.atmosphere {
                 node.gain(f.m, f.energy, f.yf, f.yo);
@@ -1386,7 +1526,12 @@ impl Network {
             let h0 = enthalpy(up.t);
             let mut w = 0.0;
             if forward && o.efficiency > 0.0 {
-                let ts = up.t * (down.p / up.p).powf((g - 1.0) / g);
+                let p_in = if o.stage.is_empty() {
+                    up.p
+                } else {
+                    o.stage.iter().map(|&n| self.nodes[n].pressure()).sum::<f64>() / o.stage.len() as f64
+                };
+                let ts = up.t * (down.p / p_in.max(down.p)).powf((g - 1.0) / g);
                 w = o.efficiency * (h0 - enthalpy(ts));
             }
             let (from, to) = if forward { (o.a, o.b) } else { (o.b, o.a) };
@@ -1395,6 +1540,9 @@ impl Network {
             }
             if !self.nodes[to].atmosphere {
                 self.nodes[to].gain(m, m * (h0 - w), up.yf, up.yo);
+            }
+            if debug_checks() && !(m.is_finite() && w.is_finite()) {
+                panic!("orifice {} -> {}: {:?} {:?} cda {} m {m} w {w}", o.a, o.b, a, b, o.cda);
             }
             o.flow = if forward { m } else { -m };
             o.power = m * w;
@@ -1411,6 +1559,55 @@ impl Network {
         }
         for k in 0..self.perforations.len() {
             self.perforate(k);
+        }
+        for k in 0..self.nozzles.len() {
+            self.discharge(k);
+        }
+        if debug_checks() {
+            for (k, p) in self.pipes.iter().enumerate() {
+                if let Some(i) = p.rate.iter().position(|r| r.iter().any(|v| !v.is_finite())) {
+                    let lo = i.saturating_sub(2);
+                    panic!("pipe {k} rate at cell {i}: {:?}; cells {:?}; ends {:?}", p.rate[i], &p.prim[lo..(i + 3).min(p.cells())], p.face);
+                }
+            }
+        }
+    }
+
+    /// A row of nozzles' flows: their rates added to its pipe's cells and its node.
+    fn discharge(&mut self, k: usize) {
+        let z = &mut self.nozzles[k];
+        let res = self.nodes[z.node].reservoir();
+        let res_h = enthalpy(res.t);
+        let res_g = gamma(res.t);
+        let pipe = &mut self.pipes[z.pipe];
+        let mut total = 0.0;
+        let (mut m_sum, mut e_sum, mut f_sum, mut o_sum) = (0.0, 0.0, 0.0, 0.0);
+        for (c, &cda) in z.cda.iter().enumerate() {
+            let i = z.first + c;
+            let cell = pipe.prim[i];
+            let (m, h0, yf, yo, u) = if cell.p >= res.p {
+                let m = cda * orifice(cell.p, cell.t, cell.g, res.p);
+                (m, cell.e + RS * cell.t + 0.5 * cell.u * cell.u, cell.yf, cell.yo, cell.u)
+            } else {
+                (-cda * orifice(res.p, res.t, res_g, cell.p), res_h, res.yf, res.yo, 0.0)
+            };
+            let inv_v = 1.0 / pipe.cell_volume(i);
+            let r = &mut pipe.rate[i];
+            r[0] -= m * inv_v;
+            r[1] -= m * u * inv_v;
+            r[2] -= m * h0 * inv_v;
+            r[3] -= m * yf * inv_v;
+            r[4] -= m * yo * inv_v;
+            m_sum += m;
+            e_sum += m * h0;
+            f_sum += m * yf;
+            o_sum += m * yo;
+            total += m;
+        }
+        z.flow = total;
+        let node = &mut self.nodes[z.node];
+        if !node.atmosphere && m_sum != 0.0 {
+            node.gain(m_sum, e_sum, f_sum / m_sum, o_sum / m_sum);
         }
     }
 
@@ -1684,6 +1881,18 @@ impl Ducts {
             let perf = Perforation::new(&net.pipes, pipe, f.from, f.to, outer, f.porosity, f.hole_diameter, f.thickness)?;
             net.perforations.push(perf);
         }
+        for z in &spec.nozzles {
+            let pipe = *pipe_names.get(&z.pipe).ok_or_else(|| format!("no pipe {}", z.pipe))?;
+            let p = &net.pipes[pipe];
+            let first = (z.from / p.dx).round() as usize;
+            let last = ((z.to / p.dx).round() as usize).min(p.cells());
+            if last <= first {
+                return Err(format!("nozzles on {}: no cells", z.pipe));
+            }
+            let n = (last - first) as f64;
+            let cda = vec![z.area / n; last - first];
+            net.nozzles.push(Nozzles { pipe, first, node: node(&z.node)?, cda, flow: 0.0 });
+        }
         let mut flaps = Vec::new();
         for f in &spec.flaps {
             let pipe = *pipe_names.get(&f.pipe).ok_or_else(|| format!("no pipe {}", f.pipe))?;
@@ -1704,8 +1913,17 @@ impl Ducts {
         for t in &spec.turbines {
             let (a, b) = (node(&t.a)?, node(&t.b)?);
             // The efficiency is the turbo's, set by the engine.
-            turbines.push(net.orifice(a, b, t.area, 1.0));
-            wastegates.push((net.orifice(a, b, 0.0, 0.0), t.wastegate));
+            let o = net.orifice(a, b, t.area, 1.0);
+            net.orifices[o].stage = t.stage.iter().map(|n| node(n)).collect::<Result<_, _>>()?;
+            turbines.push(o);
+            if t.wastegate_from.is_empty() {
+                wastegates.push((net.orifice(a, b, 0.0, 0.0), t.wastegate));
+            } else {
+                let share = t.wastegate / t.wastegate_from.len() as f64;
+                for n in &t.wastegate_from {
+                    wastegates.push((net.orifice(node(n)?, b, 0.0, 0.0), share));
+                }
+            }
         }
         let cylinders = cylinder_nodes
             .iter()

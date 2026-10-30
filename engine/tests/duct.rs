@@ -574,3 +574,32 @@ fn blowdown_into_wider_pipe() {
     println!("highest Mach number at the valve end: {mach:.3}");
     assert!(mach <= 1.0 + 1e-6);
 }
+
+#[test]
+fn nozzles_conserve() {
+    // A closed, pressurised pipe discharging along its length into a closed volume through
+    // nozzles: mass and energy stay, and the two settle at one pressure.
+    let mut net = Network::default();
+    let atm = net.add_node(Node::atmosphere(ATM, 600.0, 0.0, 0.25));
+    let plenum = net.add_node(Node::volume(5e-5, ATM, 600.0, 0.0, 0.25));
+    let mut pipe = Pipe::with_sections(&[Section { diameter_b: 0.015, ..Section::round(0.3, 0.037) }], 0.006, 2.0 * ATM, 1000.0, 0.0, 0.0);
+    pipe.friction = false;
+    let p = net.add_pipe(pipe);
+    net.link(p, Side::A, atm, 0.0);
+    net.link(p, Side::B, atm, 0.0);
+    let n = net.pipes[p].cells();
+    net.nozzles.push(Nozzles { pipe: p, first: 0, node: plenum, cda: vec![4.8e-4 / n as f64; n], flow: 0.0 });
+    let (m0, e0) = net.totals();
+    for (k, span) in [0.01, 0.04].iter().enumerate() {
+        run(&mut net, *span);
+        let (m1, e1) = net.totals();
+        println!("after {:.2} s: mass {:.1e}, energy {:.1e}", [0.01, 0.05][k], m1 / m0 - 1.0, e1 / e0 - 1.0);
+    }
+    run(&mut net, 0.05);
+    let (m1, e1) = net.totals();
+    let pp = net.nodes[plenum].pressure();
+    let pmean = net.pipes[p].prim.iter().map(|c| c.p).sum::<f64>() / n as f64;
+    println!("mass {:.1e}, energy {:.1e}; plenum {:.0} Pa, pipe {:.0} Pa", m1 / m0 - 1.0, e1 / e0 - 1.0, pp, pmean);
+    assert!((m1 / m0 - 1.0).abs() < 1e-10 && (e1 / e0 - 1.0).abs() < 1e-10);
+    assert!((pp / pmean - 1.0).abs() < 0.01);
+}
