@@ -2,12 +2,22 @@
 # dependencies = ["numpy", "scipy", "soundfile"]
 # ///
 # The reference simulation's sound at 48 kHz: the pressure its open ends radiate (the
-# simulated waves leaving the tailpipes), and the tailpipe jets' turbulent mixing noise from
-# the simulated exit flow (Stone, Groesbeck & Zola, NASA TM-82712, 1981: eq. A1 for the
-# overall level of a static round jet, hot or cold, and Table I for its 1/3-octave spectrum
-# by corrected angle and temperature-corrected Strouhal number), quasi-steady: each 1/4 ms,
-# each tailpipe's bands at the level its exit velocity, density and temperature give then.
-#   uv run engine/scripts/jetnoise.py <prefix> [listener angle from the inlet axis, deg (160)]
+# simulated waves leaving the tailpipes) as heard off their axis, and the tailpipe jets'
+# turbulent mixing noise from the simulated exit flow.
+#
+# - Radiation: the simulation spreads each open end's power evenly over a sphere; an
+#   unflanged pipe beams it forward above ka ~ 1. Its power gain at the listener's angle
+#   (Levine and Schwinger, Phys. Rev. 73, 383, 1948, eq. VI.8 with the misprinted root
+#   corrected to sqrt(ka^2 - x^2), checked against their identities and normalisation and an
+#   independent Wiener-Hopf solution, Rienstra 2022, to 4e-8 dB; tabulated by ka and angle in
+#   directivity.csv), applied as a zero-phase filter, ka in the air outside. Without the jet's
+#   flow, which would quieten the axis itself (Munt 1977), so near it an overestimate.
+# - Jet noise: Stone, Groesbeck & Zola, NASA TM-82712, 1981: eq. A1 for the overall level of
+#   a static round jet, hot or cold, and Table I for its 1/3-octave spectrum by corrected
+#   angle and temperature-corrected Strouhal number), quasi-steady: each 1/4 ms, each
+#   tailpipe's bands at the level its exit velocity, density and temperature give then.
+#
+#   uv run engine/scripts/reference_sound.py <prefix> [listener angle from the jet axis, deg (20)]
 # Reads <prefix>.wav (examples/reference.rs) or <prefix>.f32 and <prefix>.json (a drive), and
 # <prefix>.exits.f32 (and <prefix>.exits.txt, or the tailpipe diameter in DIAMETER and the
 # listener's distance in DISTANCE). Writes <prefix>-tonal/-jet/-mix.wav (Pa, 48 kHz floats).
@@ -15,7 +25,9 @@ import sys, os, json, numpy as np, soundfile as sf
 from scipy.signal import resample_poly, butter, sosfilt
 from fractions import Fraction
 pre = sys.argv[1]
-theta = float(sys.argv[2]) if len(sys.argv) > 2 else 160.0
+# Stone's angles are from the inlet axis; Levine and Schwinger's from the outlet's.
+off_axis = float(sys.argv[2]) if len(sys.argv) > 2 else 20.0
+theta = 180.0 - off_axis
 here = os.path.dirname(os.path.abspath(sys.argv[0]))
 # Stone, Groesbeck & Zola's Table I (1/3-octave SPL - OASPL_u by log S and corrected angle),
 # transcribed; its columns sum to the printed overall levels within 0.05 dB.
@@ -41,6 +53,17 @@ FS = 48000
 f = Fraction(FS, int(rate)).limit_denominator(2000)
 tonal = resample_poly(p, f.numerator, f.denominator)
 N = len(tonal)
+
+# The open ends' directivity at the listener (power gain over the sphere's mean).
+rows = [l for l in open(os.path.join(here, "directivity.csv")) if not l.startswith("#")]
+head = rows[0].strip().split(",")
+q = np.array([[float(v) for v in l.strip().split(",")] for l in rows[1:]])
+ka_grid, angles = q[:, 0], np.array([float(a) for a in head[1:]])
+q_db = np.array([np.interp(off_axis, angles, row[1:]) for row in q])
+freqs = np.fft.rfftfreq(N, 1 / FS)
+ka = 2 * np.pi * freqs / 346.1 * (D / 2)
+gain = 10 ** (np.interp(ka, ka_grid, q_db) / 20)
+tonal = np.fft.irfft(np.fft.rfft(tonal) * gain, N)
 
 # Control rate: 4 kHz, the exit state averaged over each 1/4 ms.
 CR = 4000
@@ -102,6 +125,6 @@ mix = tonal + jet
 def level(x):
     r = np.sqrt(np.mean(x[int(0.3 * FS):] ** 2))
     return f"{20 * np.log10(r / 2e-5 + 1e-30):.1f} dB"
-print(f"{pre}: tonal {level(tonal)}, jet {level(jet)}, mix {level(mix)}; jet {D*1000:.0f} mm at {R} m, {theta:.0f} deg from the inlet axis")
+print(f"{pre}: tonal {level(tonal)}, jet {level(jet)}, mix {level(mix)}; {D*1000:.0f} mm tailpipes, listener at {R} m, {off_axis:.0f} deg off their axis")
 for name, x in [("tonal", tonal), ("jet", jet), ("mix", mix)]:
     sf.write(f"{pre}-{name}.wav", x.astype(np.float32), FS, subtype="FLOAT")

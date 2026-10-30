@@ -153,6 +153,9 @@ offline: `src/duct.rs` replaces the exhaust runners and collectors with pipes an
 - Open ends radiate: a resistance in parallel with the end correction's mass, the
   monopole's power at low frequency (within 1 % of Levine and Schwinger's reflection up to
   ka = 0.8, ~1.1 kHz for an 80 mm tailpipe; too reflective above, 0.57 for 0.50 at ka = 1.5).
+  The listener hears that power as an unflanged pipe beams it (`scripts/reference_sound.py`:
+  Levine and Schwinger's power gain at the listener's angle, +2.6 dB at ka = 1 and +8.3 dB at
+  ka = 3, 20 degrees off the axis; without the jet's flow, which quietens the axis itself).
 - Combustion varies from cycle to cycle (`physics.cycleVariation`): each burn's flame speed
   scaled by a normal factor, sigma 0.1 for the F154, which gives the literature's
   coefficients of variation (IMEP 1.6-2.6 %, peak pressure 9-11 % at full load; IMEP ~9 % at
@@ -166,7 +169,7 @@ shock tubes across steps, a catalyst heating its gas, and a blowdown into a wide
 end subsonic) stay bounded.
 
 The pipes carry no turbulence: the tailpipe jets' mixing noise is worked out afterwards
-(`scripts/jetnoise.py`) from the simulated exit flow (each open end's velocity, density and temperature, recorded with
+(`scripts/reference_sound.py`) from the simulated exit flow (each open end's velocity, density and temperature, recorded with
 the sound), quasi-steadily, by Stone, Groesbeck and Zola's method for static round jets, hot
 or cold (NASA TM-82712, 1981: eq. A1 for the level, Table I for the 1/3-octave spectrum by
 angle and Strouhal number), which agrees within 1-3 dB with NASA's SHJAR measurements of hot
