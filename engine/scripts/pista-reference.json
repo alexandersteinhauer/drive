@@ -138,77 +138,25 @@
     ]
    },
    {
-    "a": "right merge A",
-    "b": "right nozzle A",
-    "temperature": 1050,
-    "wallTemperature": 1000,
-    "sections": [
-     {
-      "length": 0.15,
-      "diameter": 0.042,
-      "diameterB": 0.03
-     }
-    ]
-   },
-   {
-    "a": "right merge B",
-    "b": "right nozzle B",
-    "temperature": 1050,
-    "wallTemperature": 1000,
-    "sections": [
-     {
-      "length": 0.15,
-      "diameter": 0.042,
-      "diameterB": 0.03
-     }
-    ]
-   },
-   {
-    "a": "left merge A",
-    "b": "left nozzle A",
-    "temperature": 1050,
-    "wallTemperature": 1000,
-    "sections": [
-     {
-      "length": 0.15,
-      "diameter": 0.042,
-      "diameterB": 0.03
-     }
-    ]
-   },
-   {
-    "a": "left merge B",
-    "b": "left nozzle B",
-    "temperature": 1050,
-    "wallTemperature": 1000,
-    "sections": [
-     {
-      "length": 0.15,
-      "diameter": 0.042,
-      "diameterB": 0.03
-     }
-    ]
-   },
-   {
     "name": "right exhaust",
     "a": "right turbine out",
-    "b": "right box out",
+    "b": "right split",
     "temperature": 800,
     "sections": [
      {
-      "length": 0.1,
-      "diameter": 0.055,
-      "diameterB": 0.063,
-      "wallTemperature": 900
-     },
-     {
-      "length": 0.25,
-      "diameter": 0.063,
-      "wallTemperature": 900
-     },
-     {
       "length": 0.08,
-      "diameter": 0.063,
+      "diameter": 0.062,
+      "diameterB": 0.07,
+      "wallTemperature": 900
+     },
+     {
+      "length": 0.15,
+      "diameter": 0.07,
+      "wallTemperature": 900
+     },
+     {
+      "length": 0.06,
+      "diameter": 0.07,
       "diameterB": 0.11,
       "wallTemperature": 900
      },
@@ -218,9 +166,9 @@
       "wallTemperature": 1000
      },
      {
-      "length": 0.12,
-      "diameter": 0.00096,
-      "area": 0.008172853288313846,
+      "length": 0.11,
+      "diameter": 0.0014164696837416493,
+      "area": 0.008866324885237377,
       "square": true,
       "wallTemperature": 1000,
       "roughness": 0
@@ -231,73 +179,56 @@
       "wallTemperature": 950
      },
      {
-      "length": 0.08,
+      "length": 0.06,
       "diameter": 0.11,
-      "diameterB": 0.076,
+      "diameterB": 0.072,
       "wallTemperature": 900
      },
      {
-      "length": 0.9,
-      "diameter": 0.076,
+      "length": 0.5,
+      "diameter": 0.072,
       "wallTemperature": 750
-     },
-     {
-      "length": 0.35,
-      "diameter": 0.076,
-      "wallTemperature": 700
      }
     ]
    },
    {
-    "name": "right outlet",
-    "a": "right box out",
-    "b": "atmosphere",
-    "temperature": 700,
-    "sections": [
-     {
-      "length": 0.35,
-      "diameter": 0.076,
-      "wallTemperature": 680
-     },
-     {
-      "length": 0.2,
-      "diameter": 0.076,
-      "diameterB": 0.085,
-      "wallTemperature": 650
-     }
-    ]
-   },
-   {
-    "name": "right packing",
-    "a": "closed",
-    "b": "closed",
-    "length": 0.7,
-    "diameter": 0.112,
-    "area": 0.023574511272537808,
+    "name": "right main",
+    "a": "right split",
+    "b": "right join",
+    "length": 0.32,
+    "diameter": 0.072,
     "temperature": 750,
-    "wallTemperature": 680,
-    "flowResistivity": 10000
+    "wallTemperature": 720
+   },
+   {
+    "a": "right join",
+    "b": "atmosphere",
+    "length": 0.25,
+    "diameter": 0.072,
+    "diameterB": 0.084,
+    "temperature": 700,
+    "wallTemperature": 650
    },
    {
     "name": "left exhaust",
     "a": "left turbine out",
-    "b": "left box out",
+    "b": "left split",
     "temperature": 800,
     "sections": [
      {
-      "length": 0.1,
-      "diameter": 0.055,
-      "diameterB": 0.063,
-      "wallTemperature": 900
-     },
-     {
-      "length": 0.25,
-      "diameter": 0.063,
-      "wallTemperature": 900
-     },
-     {
       "length": 0.08,
-      "diameter": 0.063,
+      "diameter": 0.062,
+      "diameterB": 0.07,
+      "wallTemperature": 900
+     },
+     {
+      "length": 0.15,
+      "diameter": 0.07,
+      "wallTemperature": 900
+     },
+     {
+      "length": 0.06,
+      "diameter": 0.07,
       "diameterB": 0.11,
       "wallTemperature": 900
      },
@@ -307,9 +238,9 @@
       "wallTemperature": 1000
      },
      {
-      "length": 0.12,
-      "diameter": 0.00096,
-      "area": 0.008172853288313846,
+      "length": 0.11,
+      "diameter": 0.0014164696837416493,
+      "area": 0.008866324885237377,
       "square": true,
       "wallTemperature": 1000,
       "roughness": 0
@@ -320,52 +251,132 @@
       "wallTemperature": 950
      },
      {
-      "length": 0.08,
+      "length": 0.06,
       "diameter": 0.11,
-      "diameterB": 0.076,
+      "diameterB": 0.072,
       "wallTemperature": 900
      },
      {
-      "length": 1.0,
-      "diameter": 0.076,
+      "length": 0.55,
+      "diameter": 0.072,
       "wallTemperature": 750
-     },
-     {
-      "length": 0.35,
-      "diameter": 0.076,
-      "wallTemperature": 700
      }
     ]
    },
    {
-    "name": "left outlet",
-    "a": "left box out",
+    "name": "left main",
+    "a": "left split",
+    "b": "left join",
+    "length": 0.32,
+    "diameter": 0.072,
+    "temperature": 750,
+    "wallTemperature": 720
+   },
+   {
+    "a": "left join",
     "b": "atmosphere",
+    "length": 0.25,
+    "diameter": 0.072,
+    "diameterB": 0.084,
     "temperature": 700,
+    "wallTemperature": 650
+   },
+   {
+    "a": "right split",
+    "b": "box right",
+    "length": 0.12,
+    "diameter": 0.05,
+    "temperature": 750,
+    "wallTemperature": 720
+   },
+   {
+    "a": "box right",
+    "b": "right join",
+    "length": 0.12,
+    "diameter": 0.05,
+    "temperature": 720,
+    "wallTemperature": 700
+   },
+   {
+    "a": "left split",
+    "b": "box left",
+    "length": 0.12,
+    "diameter": 0.05,
+    "temperature": 750,
+    "wallTemperature": 720
+   },
+   {
+    "a": "box left",
+    "b": "left join",
+    "length": 0.12,
+    "diameter": 0.05,
+    "temperature": 720,
+    "wallTemperature": 700
+   },
+   {
+    "a": "box right",
+    "b": "box left",
+    "length": 0.11,
+    "diameter": 0.27678571428571425,
+    "area": 0.0775,
+    "temperature": 700,
+    "wallTemperature": 680
+   },
+   {
+    "name": "right volute A",
+    "a": "right merge A",
+    "b": "closed",
+    "temperature": 1050,
+    "wallTemperature": 1000,
     "sections": [
      {
-      "length": 0.35,
-      "diameter": 0.076,
-      "wallTemperature": 680
-     },
-     {
-      "length": 0.2,
-      "diameter": 0.076,
-      "diameterB": 0.085,
-      "wallTemperature": 650
+      "length": 0.29,
+      "diameter": 0.037,
+      "diameterB": 0.015
      }
     ]
    },
    {
-    "name": "left packing",
-    "a": "closed",
+    "name": "right volute B",
+    "a": "right merge B",
     "b": "closed",
-    "length": 0.7,
-    "diameter": 0.112,
-    "area": 0.023574511272537808,
-    "temperature": 750,
-    "wallTemperature": 680,
-    "flowResistivity": 10000
+    "temperature": 1050,
+    "wallTemperature": 1000,
+    "sections": [
+     {
+      "length": 0.29,
+      "diameter": 0.037,
+      "diameterB": 0.015
+     }
+    ]
+   },
+   {
+    "name": "left volute A",
+    "a": "left merge A",
+    "b": "closed",
+    "temperature": 1050,
+    "wallTemperature": 1000,
+    "sections": [
+     {
+      "length": 0.29,
+      "diameter": 0.037,
+      "diameterB": 0.015
+     }
+    ]
+   },
+   {
+    "name": "left volute B",
+    "a": "left merge B",
+    "b": "closed",
+    "temperature": 1050,
+    "wallTemperature": 1000,
+    "sections": [
+     {
+      "length": 0.29,
+      "diameter": 0.037,
+      "diameterB": 0.015
+     }
+    ]
    }
   ],
   "volumes": [
@@ -375,33 +386,13 @@
     "temperature": 1050
    },
    {
-    "node": "right nozzle A",
-    "volume": 2e-05,
-    "temperature": 1050
-   },
-   {
     "node": "right merge B",
     "volume": 4e-05,
     "temperature": 1050
    },
    {
-    "node": "right nozzle B",
-    "volume": 2e-05,
-    "temperature": 1050
-   },
-   {
-    "node": "right turbine out",
-    "volume": 6e-05,
-    "temperature": 900
-   },
-   {
     "node": "left merge A",
     "volume": 4e-05,
-    "temperature": 1050
-   },
-   {
-    "node": "left nozzle A",
-    "volume": 2e-05,
     "temperature": 1050
    },
    {
@@ -410,103 +401,96 @@
     "temperature": 1050
    },
    {
-    "node": "left nozzle B",
-    "volume": 2e-05,
-    "temperature": 1050
+    "node": "right split",
+    "volume": 0.0001,
+    "temperature": 750
    },
    {
-    "node": "left turbine out",
-    "volume": 6e-05,
+    "node": "right join",
+    "volume": 0.0001,
+    "temperature": 720
+   },
+   {
+    "node": "left split",
+    "volume": 0.0001,
+    "temperature": 750
+   },
+   {
+    "node": "left join",
+    "volume": 0.0001,
+    "temperature": 720
+   },
+   {
+    "node": "box right",
+    "volume": 0.003875,
+    "temperature": 700
+   },
+   {
+    "node": "box left",
+    "volume": 0.003875,
+    "temperature": 700
+   },
+   {
+    "node": "right rotor",
+    "volume": 5e-05,
+    "temperature": 1000
+   },
+   {
+    "node": "right turbine out",
+    "volume": 3e-05,
     "temperature": 900
    },
    {
-    "node": "right box out",
-    "volume": 0.00015,
-    "temperature": 700
+    "node": "left rotor",
+    "volume": 5e-05,
+    "temperature": 1000
    },
    {
-    "node": "left box out",
-    "volume": 0.00015,
-    "temperature": 700
+    "node": "left turbine out",
+    "volume": 3e-05,
+    "temperature": 900
    }
   ],
   "turbines": [
    {
-    "a": "right nozzle A",
+    "a": "right rotor",
     "b": "right turbine out",
-    "area": 0.00034,
-    "wastegate": 0.00048
+    "area": 0.0009616652224137048,
+    "wastegate": 0.00096,
+    "stage": [
+     "right merge A",
+     "right merge B"
+    ],
+    "wastegateFrom": [
+     "right merge A",
+     "right merge B"
+    ]
    },
    {
-    "a": "right nozzle B",
-    "b": "right turbine out",
-    "area": 0.00034,
-    "wastegate": 0.00048
-   },
-   {
-    "a": "left nozzle A",
+    "a": "left rotor",
     "b": "left turbine out",
-    "area": 0.00034,
-    "wastegate": 0.00048
-   },
-   {
-    "a": "left nozzle B",
-    "b": "left turbine out",
-    "area": 0.00034,
-    "wastegate": 0.00048
+    "area": 0.0009616652224137048,
+    "wastegate": 0.00096,
+    "stage": [
+     "left merge A",
+     "left merge B"
+    ],
+    "wastegateFrom": [
+     "left merge A",
+     "left merge B"
+    ]
    }
   ],
-  "perforations": [
-   {
-    "pipe": "right exhaust",
-    "from": 1.5850000000000002,
-    "to": 1.8850000000000002,
-    "outer": "right packing",
-    "outerFrom": 0.025,
-    "porosity": 0.1,
-    "holeDiameter": 0.004,
-    "thickness": 0.001
-   },
-   {
-    "pipe": "right outlet",
-    "from": 0.025,
-    "to": 0.325,
-    "outer": "right packing",
-    "outerFrom": 0.375,
-    "porosity": 0.1,
-    "holeDiameter": 0.004,
-    "thickness": 0.001
-   },
-   {
-    "pipe": "left exhaust",
-    "from": 1.6849999999999998,
-    "to": 1.9849999999999999,
-    "outer": "left packing",
-    "outerFrom": 0.025,
-    "porosity": 0.1,
-    "holeDiameter": 0.004,
-    "thickness": 0.001
-   },
-   {
-    "pipe": "left outlet",
-    "from": 0.025,
-    "to": 0.325,
-    "outer": "left packing",
-    "outerFrom": 0.375,
-    "porosity": 0.1,
-    "holeDiameter": 0.004,
-    "thickness": 0.001
-   }
-  ],
+  "perforations": [],
   "listenerDistance": 5,
   "resolution": 3000,
   "flaps": [
    {
-    "pipe": "right exhaust",
+    "pipe": "right main",
     "end": "b",
     "speed": [
-     314.159265,
-     397.935069
+     261.79938749999997,
+     366.5191425
     ],
     "throttle": [
      0.3,
@@ -514,16 +498,46 @@
     ]
    },
    {
-    "pipe": "left exhaust",
+    "pipe": "left main",
     "end": "b",
     "speed": [
-     314.159265,
-     397.935069
+     261.79938749999997,
+     366.5191425
     ],
     "throttle": [
      0.3,
      0.6
     ]
+   }
+  ],
+  "nozzles": [
+   {
+    "pipe": "right volute A",
+    "from": 0.0,
+    "to": 0.29,
+    "node": "right rotor",
+    "area": 0.0004808326112068524
+   },
+   {
+    "pipe": "right volute B",
+    "from": 0.0,
+    "to": 0.29,
+    "node": "right rotor",
+    "area": 0.0004808326112068524
+   },
+   {
+    "pipe": "left volute A",
+    "from": 0.0,
+    "to": 0.29,
+    "node": "left rotor",
+    "area": 0.0004808326112068524
+   },
+   {
+    "pipe": "left volute B",
+    "from": 0.0,
+    "to": 0.29,
+    "node": "left rotor",
+    "area": 0.0004808326112068524
    }
   ]
  },
