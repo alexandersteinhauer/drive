@@ -51,6 +51,8 @@ pub struct DuctSpec {
     pub turbines: Vec<DuctTurbineSpec>,
     #[serde(default)]
     pub perforations: Vec<DuctPerforationSpec>,
+    #[serde(default)]
+    pub flaps: Vec<DuctFlapSpec>,
     /// The listener's distance from the open ends (m).
     pub listener_distance: f64,
     /// The highest frequency the cells resolve (Hz): 30 cells to its wavelength at each
@@ -157,6 +159,19 @@ pub struct DuctPerforationSpec {
     pub porosity: f64,
     pub hole_diameter: f64,
     pub thickness: f64,
+}
+
+/// A flap (a silencer's bypass valve) at end `end` ("a" or "b") of pipe `pipe`, where it
+/// meets its node: shut, a wall; opening with the crank speed from `speed[0]` to `speed[1]`
+/// (rad/s) or the pedal from `throttle[0]` to `throttle[1]`, whichever opens it more (an
+/// ECU's flap logic), its actuator taking ~0.15 s.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DuctFlapSpec {
+    pub pipe: String,
+    pub end: String,
+    pub speed: [f64; 2],
+    pub throttle: [f64; 2],
 }
 
 /// A turbine from node `a` to node `b`: a nozzle of effective area `area` taking the turbo's

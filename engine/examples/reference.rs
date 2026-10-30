@@ -3,7 +3,10 @@
 //!   reference <spec.json> <ducts.json> <out prefix> [program]
 //! The second file holds the ducts, or a reference config whose keys merge into the spec
 //! ("ducts", "physics", ...).
-//! env: FREQ (simulation frequency, default 20000), FLUID (fluid substeps, default 1).
+//! env: FREQ (simulation frequency, default 20000), FLUID (fluid substeps, default 1; 12 at
+//! 20 kHz records the sound at 240 kHz), CHECK / DUCTCHECK (stop at a state that isn't finite).
+//! Programs: dyno (as the voice's renders), short, hold (6000 rpm), hold3, diag6, idle,
+//! hold:<rpm>:<seconds> (full throttle).
 //! Writes <out>.wav (32-bit float at the fluid rate: resample to listen) and <out>.txt (log).
 use engine_sim::engine::Engine;
 use engine_sim::spec::EngineSpec;
@@ -31,6 +34,11 @@ fn program(name: &str) -> Vec<Segment> {
         "hold3" => vec![(4.0, 3000.0, 3000.0, 1.0)],
         "diag6" => vec![(2.0, 6000.0, 6000.0, 1.0)],
         "idle" => vec![(3.0, 1000.0, 1000.0, 0.0)],
+        // hold:<rpm>:<seconds>, full throttle.
+        _ if name.starts_with("hold:") => {
+            let v: Vec<f64> = name[5..].split(':').map(|x| x.parse().unwrap()).collect();
+            vec![(v[1], v[0], v[0], 1.0)]
+        }
         _ => panic!("no program {name}"),
     }
 }
@@ -63,7 +71,6 @@ fn main() {
     let per_frame = (spec.simulation_frequency * frame).round() as usize;
     let mut log = String::new();
     let (mut t, mut substeps, mut steps) = (0.0, 0usize, 0usize);
-    let mut last_good = String::new();
     // Means over each log interval: turbine inlet (scroll) and outlet pressures, turbine
     // power, wastegate opening.
     let probe = |e: &Engine, name: &str| {
@@ -83,22 +90,12 @@ fn main() {
             for _ in 0..per_frame {
                 e.step();
                 let d = e.ducts.as_ref().unwrap();
-                if std::env::var("TRACEU").is_ok() && steps % 50 == 0 {
-                    for k in [10usize, 14] {
-                        let p = &d.net.pipes[k];
-                        let (i, um) = p.prim.iter().enumerate().map(|(i, c)| (i, c.u.abs())).fold((0, 0.0), |a, b| if b.1 > a.1 { b } else { a });
-                        eprint!("pipe {k} max|u| {um:.1} at {i}  ");
-                    }
-                    eprintln!("step {steps}");
-                }
+                // CHECK=1: stop at the first state that isn't finite (DUCTCHECK=1 checks every
+                // substep, with the state before).
                 if std::env::var("CHECK").is_ok() {
                     if let Some(w) = d.net.check() {
-                        eprintln!("before: {last_good}");
                         panic!("step {steps}: {w}");
                     }
-                    let p = &d.net.pipes[14];
-                    let n = d.names["left turbine out"];
-                    last_good = format!("orifices {:?}\nnodes {:?}\ncells {:?}\nnode p {:.0} T {:.0} links {:?}", d.net.orifices.iter().map(|o| (o.a, o.b, o.cda, o.flow, o.power, o.efficiency)).collect::<Vec<_>>(), d.net.nodes.iter().map(|n| (n.volume, n.m, n.e)).collect::<Vec<_>>(), &p.prim[..3].iter().map(|c| (c.p as i64, c.u as i64, c.t as i64)).collect::<Vec<_>>(), d.net.nodes[n].pressure(), d.net.nodes[n].temperature(), d.net.links.iter().filter(|l| l.pipe == 14).map(|l| (l.flow.m, l.flow.p as i64, l.flow.un as i64)).collect::<Vec<_>>());
                 }
                 substeps += d.net.substeps;
                 steps += 1;

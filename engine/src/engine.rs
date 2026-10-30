@@ -1342,6 +1342,7 @@ impl Engine {
                 c.flow(fluid_dt, &ctx, intake, exhaust);
             }
             if let Some(d) = &mut self.ducts {
+                d.set_flaps(self.mech.omega().abs(), self.speed_control, fluid_dt);
                 turbine_work += Self::step_ducts(d, &mut cylinders, fluid_dt);
                 self.exhaust_moles += d.outlets.iter().map(|&l| d.net.links[l].flow.m).sum::<f64>() * fluid_dt / AIR_MOLECULAR_MASS;
             }

@@ -550,3 +550,27 @@ fn step_shock_tube() {
     }
 }
 
+
+/// A blowdown: a vessel at 7 bar opening through half the pipe's section into it. The jet
+/// mixes out into the wider pipe (the end subsonic), not on as in a nozzle's diverging part.
+#[test]
+fn blowdown_into_wider_pipe() {
+    let mut net = Network::default();
+    let tank = net.add_node(Node::volume(5e-4, 7e5, 1500.0, 0.0, 0.0));
+    let atm = net.add_node(Node::atmosphere(ATM, 600.0, 0.0, 0.25));
+    let pipe = Pipe::new(1.0, 0.036, 0.005, ATM, 600.0, 0.0, 0.25);
+    let area = pipe.area;
+    let p = net.add_pipe(pipe);
+    let valve = net.link(p, Side::A, tank, 0.5 * area);
+    net.connect(p, Side::B, atm);
+    let mut mach: f64 = 0.0;
+    for _ in 0..400 {
+        net.step(1e-5);
+        assert!(net.check().is_none());
+        let f = &net.links[valve].flow;
+        let c_end = (gamma(f.p / (f.rho * RS)) * RS * f.p / (f.rho * RS)).sqrt();
+        mach = mach.max(-f.un / c_end);
+    }
+    println!("highest Mach number at the valve end: {mach:.3}");
+    assert!(mach <= 1.0 + 1e-6);
+}

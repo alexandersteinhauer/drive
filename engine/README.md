@@ -138,13 +138,18 @@ offline: `src/duct.rs` replaces the exhaust runners and collectors with pipes an
 - A pipe's end meets a node (a cylinder, a junction or chamber's volume, the atmosphere)
   through an opening: a half Riemann problem, the end's state on its gas's wave curve, passing
   what the opening does, quasi-steady and compressible (as a flow bench defines the port's
-  discharge coefficient). The exhaust valve opens by the port's flow-bench curve.
+  discharge coefficient). The exhaust valve opens by the port's flow-bench curve. Into the
+  pipe, the jet through the opening mixes out to the subsonic state with its mass flow and
+  total enthalpy (at most sonic): out of a valve into a wider pipe it doesn't expand on
+  supersonically, as through a nozzle's diverging part.
 - Turbines: nozzles between volumes taking the turbo's efficiency of the isentropic work of
   what passes, the wastegate beside them opened by the boost controller; the shaft gets
   their power.
 - Perforated walls (a silencer's core): each cell's holes a slug of gas driven by the
   pressure across it against its jet's loss and viscous drag, its mass the holes' gas over
   the wall and their end corrections.
+- Flaps (a silencer's bypass valves, `ducts.flaps`): a pipe's end shut or opening by the
+  crank speed or the pedal, whichever opens it more, as the voice's valves.
 - Open ends radiate: a resistance in parallel with the end correction's mass, the
   monopole's power at low frequency (within 1 % of Levine and Schwinger's reflection up to
   ka = 0.8, ~1.1 kHz for an 80 mm tailpipe; too reflective above, 0.57 for 0.50 at ka = 1.5).
@@ -157,12 +162,23 @@ offline: `src/duct.rs` replaces the exhaust runners and collectors with pipes an
 reflections off closed and open ends, a choked nozzle's flow, Darcy's friction, a
 perforation's Helmholtz resonance, a pulse through a cone (pressure as A^-1/2), a sudden
 expansion's loss (Borda-Carnot, within 0.5 %), and conservation of mass and energy; and that
-shock tubes across steps and a catalyst heating its gas stay bounded.
+shock tubes across steps, a catalyst heating its gas, and a blowdown into a wider pipe (its
+end subsonic) stay bounded.
 
-Not yet modelled: the jets' and the flow's turbulence noise (the pipes carry no
-turbulence), the frequency-dependent wall losses of the acoustic boundary layer (Kirchhoff's,
+The pipes carry no turbulence: the tailpipe jets' mixing noise is worked out afterwards
+(`scripts/jetnoise.py`) from the simulated exit flow (each open end's velocity, density and temperature, recorded with
+the sound), quasi-steadily, by Stone, Groesbeck and Zola's method for static round jets, hot
+or cold (NASA TM-82712, 1981: eq. A1 for the level, Table I for the 1/3-octave spectrum by
+angle and Strouhal number), which agrees within 1-3 dB with NASA's SHJAR measurements of hot
+subsonic jets (Khavaran and Bridges, NASA/TM-2009-215608) at 150-300 m/s. (Tam's
+similarity spectra fit its shapes; his own level fits, made for supersonic and cold jets, have
+heating quieten a slow jet, where measurements show it louder.) Quasi-steady is marginal:
+an engine's pulses come within a factor of a few of the noise's peak frequency.
+
+Not yet modelled: turbulence noise from the flow inside (at the catalyst, the perforations),
+the frequency-dependent wall losses of the acoustic boundary layer (Kirchhoff's,
 ~0.4-1 dB/m at 1 kHz in these pipes), the walls' own temperature (set per pipe), the
-intake's sound, and the bypass valves' closed path.
+intake's sound.
 
 ## Physics beyond engine-sim's
 

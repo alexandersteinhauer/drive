@@ -112,6 +112,19 @@ engine_fns! {
             a.clear();
         }
     }
+    /// With ducts (the reference simulation, duct.rs): the pressure their open ends radiate
+    /// to the listener (Pa) since the last clear, one sample per fluid substep; and each open
+    /// end's outward velocity, density and temperature per sample.
+    fn engine_duct_sound_len(e) -> usize { e.ducts.as_ref().map_or(0, |d| d.sound.len()) }
+    fn engine_duct_sound_ptr(e) -> *const f32 { e.ducts.as_ref().map_or(std::ptr::null(), |d| d.sound.as_ptr()) }
+    fn engine_duct_exits_len(e) -> usize { e.ducts.as_ref().map_or(0, |d| d.exits.len()) }
+    fn engine_duct_exits_ptr(e) -> *const f32 { e.ducts.as_ref().map_or(std::ptr::null(), |d| d.exits.as_ptr()) }
+    fn engine_duct_clear(e) {
+        if let Some(d) = &mut e.ducts {
+            d.sound.clear();
+            d.exits.clear();
+        }
+    }
 }
 
 /// engine-sim's synthesizer for an engine (JSON spec) without a voice: one channel per

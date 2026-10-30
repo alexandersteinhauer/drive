@@ -689,15 +689,16 @@ fn solve_end(s: &EndGas, area: f64, cda: f64, res: &Reservoir, z: f64) -> EndFlo
             let f = EndFlow { m, energy: m * (enthalpy(t) + 0.5 * un * un), yf: s.yf, yo: s.yo, p, un, rho: rho_w };
             (m - through, f)
         } else {
-            // Past the speed the node's enthalpy allows (only far from the solution, as the
-            // bracket widens): the coldest gas, so the residual keeps its sign.
-            let h = (res_h - 0.5 * un * un).max(0.01 * res_h);
-            let t = temperature_of_enthalpy(h, res.t);
-            let rho = p / (RS * t);
-            let through = if p < pn { -cda * orifice(pn, res.t, res_g, p) } else { 0.0 };
-            let m = rho * un * area;
-            let f = EndFlow { m, energy: m * res_h, yf: res.yf, yo: res.yo, p, un, rho };
-            (m - through, f)
+            // Into the pipe: what the opening passes at this end pressure, carried at the
+            // end by the subsonic state with that mass flux and the node's total enthalpy
+            // (a jet into a pipe wider than it mixes out; it doesn't expand on supersonically
+            // as in a nozzle's diverging part), at most sonic. The residual: how far the
+            // end's velocity from the wave curve is from that, as a mass flow.
+            let g = if p < pn { cda * orifice(pn, res.t, res_g, p) / area } else { 0.0 };
+            let (v, rho) = inflow_state(g, p, res_h, res.t);
+            let m = -rho * v * area;
+            let f = EndFlow { m, energy: m * res_h, yf: res.yf, yo: res.yo, p, un: -v, rho };
+            ((un + v) * rho * area, f)
         }
     };
     if s.un >= s.c {
@@ -751,6 +752,53 @@ fn solve_end(s: &EndGas, area: f64, cda: f64, res: &Reservoir, z: f64) -> EndFlo
         }
     }
     best
+}
+
+/// The subsonic state carrying mass flux `g` (kg/s m^2) at static pressure `p` with total
+/// enthalpy `h0`: its velocity and density; the sonic state if `g` is more than the most it
+/// can carry. `t0` is a guess at the temperature (the stagnation temperature).
+fn inflow_state(g: f64, p: f64, h0: f64, t0: f64) -> (f64, f64) {
+    let rho_at = |v: f64| {
+        let h = (h0 - 0.5 * v * v).max(1e-3 * h0);
+        p / (RS * temperature_of_enthalpy(h, t0))
+    };
+    if g <= 0.0 {
+        return (0.0, rho_at(0.0));
+    }
+    // The sonic state: h(T) + gamma R T / 2 = h0.
+    let mut ts = t0 * 0.85;
+    for _ in 0..20 {
+        let r = enthalpy(ts) + 0.5 * gamma(ts) * RS * ts - h0;
+        let dr = cp(ts) + 0.5 * RS * (gamma(ts) - GAMMA_SLOPE * ts);
+        ts -= r / dr;
+        if r.abs() < 1e-9 * h0 {
+            break;
+        }
+    }
+    let vs = (gamma(ts) * RS * ts).sqrt();
+    if g >= rho_at(vs) * vs {
+        return (vs, rho_at(vs));
+    }
+    // The mass flux rises with the velocity up to the sonic point.
+    let (mut lo, mut hi) = (0.0, vs);
+    let mut v = g / rho_at(0.0);
+    for _ in 0..60 {
+        if !(v > lo && v < hi) {
+            v = 0.5 * (lo + hi);
+        }
+        let r = rho_at(v) * v - g;
+        if r.abs() <= 1e-12 * g {
+            break;
+        }
+        if r > 0.0 {
+            hi = v;
+        } else {
+            lo = v;
+        }
+        // Fixed point (rho falls as v rises): a good next guess.
+        v = g / rho_at(v);
+    }
+    (v, rho_at(v))
 }
 
 /// The pressure at which the gas at an end comes to rest against it (no flow through it):
@@ -1174,6 +1222,7 @@ pub struct Network {
     /// Work taken by the orifices over the last call to `step` (J), and substeps taken.
     pub work: Vec<f64>,
     pub substeps: usize,
+    debug_last: String,
 }
 
 impl Default for Network {
@@ -1187,6 +1236,7 @@ impl Default for Network {
             cfl: 0.6,
             work: vec![],
             substeps: 0,
+            debug_last: String::new(),
         }
     }
 }
@@ -1240,8 +1290,21 @@ impl Network {
     pub fn step(&mut self, dt: f64) {
         let n = (dt / self.stable_dt()).ceil().max(1.0) as usize;
         self.work.fill(0.0);
+        let debug = std::env::var("DUCTCHECK").is_ok();
+        if debug {
+            if let Some(w) = self.check() {
+                panic!("on entry: {w}\nbefore:\n{}", self.debug_last);
+            }
+            self.debug_last = format!("on entry:\n{}", self.snapshot());
+        }
         for _ in 0..n {
             self.substep(dt / n as f64);
+            if debug {
+                if let Some(w) = self.check() {
+                    panic!("{w}\nbefore:\n{}", self.debug_last);
+                }
+                self.debug_last = self.snapshot();
+            }
         }
         self.substeps = n;
     }
@@ -1448,6 +1511,23 @@ impl Network {
         }
     }
 
+    /// The nodes' and the links' states (for debugging).
+    pub fn snapshot(&self) -> String {
+        let mut out = String::new();
+        for (k, n) in self.nodes.iter().enumerate().filter(|(_, n)| !n.atmosphere) {
+            out += &format!("node {k}: V {:.2e} p {:.0} T {:.0}\n", n.volume, n.pressure(), n.temperature());
+        }
+        for l in &self.links {
+            let p = &self.pipes[l.pipe];
+            let c = match l.side { Side::A => p.prim[0], Side::B => p.prim[p.cells() - 1] };
+            out += &format!("link pipe {} {:?} node {} cda {:.2e}: cell p {:.0} u {:.1} T {:.0}; flow m {:.4} p {:.0} un {:.1}\n", l.pipe, l.side, l.node, l.cda, c.p, c.u, c.t, l.flow.m, l.flow.p, l.flow.un);
+        }
+        for o in &self.orifices {
+            out += &format!("orifice {}->{} cda {:.2e} flow {:.4}\n", o.a, o.b, o.cda, o.flow);
+        }
+        out
+    }
+
     /// Every pipe and node whose state isn't finite (for debugging).
     pub fn check(&self) -> Option<String> {
         let mut out = Vec::new();
@@ -1489,6 +1569,9 @@ pub struct Ducts {
     /// Turbines' nozzles, and their wastegates with their fully open areas.
     pub turbines: Vec<usize>,
     pub wastegates: Vec<(usize, f64)>,
+    /// Flaps: their links, full areas and schedules (crank speed, pedal), and how far open.
+    pub flaps: Vec<(usize, f64, [f64; 2], [f64; 2])>,
+    pub flap: f64,
     /// Open ends, and the listener's distance from them.
     pub outlets: Vec<usize>,
     pub distance: f64,
@@ -1530,6 +1613,7 @@ impl Ducts {
         let mut valves = vec![None; cylinders];
         let mut outlets = Vec::new();
         let mut pipe_names: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+        let mut end_links: std::collections::HashMap<(usize, bool), usize> = std::collections::HashMap::new();
         for p in &spec.pipes {
             let c = (gamma(p.temperature) * RS * p.temperature).sqrt();
             let dx = c / (spec.resolution * CELLS_PER_WAVELENGTH);
@@ -1568,21 +1652,26 @@ impl Ducts {
                 }
             }
             for (end, side) in [(&p.a, Side::A), (&p.b, Side::B)] {
-                if end == "closed" {
-                    net.link(i, side, air, 0.0);
-                    continue;
-                }
-                let n = node(end)?;
-                if n == air {
-                    outlets.push(net.open_end(i, side, n));
-                } else if let Some(k) = cylinder_nodes.iter().position(|&c| c == n) {
-                    if valves[k].is_some() {
-                        return Err(format!("{end} has two pipes"));
-                    }
-                    valves[k] = Some(net.link(i, side, n, 0.0));
+                let l = if end == "closed" {
+                    net.link(i, side, air, 0.0)
                 } else {
-                    net.connect(i, side, n);
-                }
+                    let n = node(end)?;
+                    if n == air {
+                        let l = net.open_end(i, side, n);
+                        outlets.push(l);
+                        l
+                    } else if let Some(k) = cylinder_nodes.iter().position(|&c| c == n) {
+                        if valves[k].is_some() {
+                            return Err(format!("{end} has two pipes"));
+                        }
+                        let l = net.link(i, side, n, 0.0);
+                        valves[k] = Some(l);
+                        l
+                    } else {
+                        net.connect(i, side, n)
+                    }
+                };
+                end_links.insert((i, side == Side::B), l);
             }
         }
         for f in &spec.perforations {
@@ -1594,6 +1683,19 @@ impl Ducts {
             };
             let perf = Perforation::new(&net.pipes, pipe, f.from, f.to, outer, f.porosity, f.hole_diameter, f.thickness)?;
             net.perforations.push(perf);
+        }
+        let mut flaps = Vec::new();
+        for f in &spec.flaps {
+            let pipe = *pipe_names.get(&f.pipe).ok_or_else(|| format!("no pipe {}", f.pipe))?;
+            let b = match f.end.as_str() {
+                "a" => false,
+                "b" => true,
+                e => return Err(format!("flap end {e}")),
+            };
+            let l = end_links[&(pipe, b)];
+            let area = net.links[l].cda;
+            net.links[l].cda = 0.0;
+            flaps.push((l, area, f.speed, f.throttle));
         }
         for o in &spec.orifices {
             net.orifice(node(&o.a)?, node(&o.b)?, o.area * o.discharge, 0.0);
@@ -1616,6 +1718,8 @@ impl Ducts {
             cylinders,
             turbines,
             wastegates,
+            flaps,
+            flap: 0.0,
             outlets,
             distance: spec.listener_distance,
             names,
@@ -1623,6 +1727,22 @@ impl Ducts {
             exits: Vec::new(),
             listening: true,
         })
+    }
+
+    /// Moves the flaps over `dt` towards how far the ECU's logic opens them at crank speed
+    /// `speed` (rad/s) and pedal `pedal`: whichever of the two opens them more, each
+    /// smoothly between its thresholds, the actuators taking ~0.15 s.
+    pub fn set_flaps(&mut self, speed: f64, pedal: f64, dt: f64) {
+        let Some(&(_, _, s, t)) = self.flaps.first() else { return };
+        let step = |x: f64, [from, at]: [f64; 2]| {
+            let x = ((x - from) / (at - from).max(1e-9)).clamp(0.0, 1.0);
+            x * x * (3.0 - 2.0 * x)
+        };
+        let open = step(speed, s).max(step(pedal, t));
+        self.flap += (open - self.flap) * (dt / 0.15).min(1.0);
+        for &(l, area, _, _) in &self.flaps {
+            self.net.links[l].cda = self.flap * area;
+        }
     }
 
     /// Records the pressure at the listener: each open end's far field, summed.
