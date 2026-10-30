@@ -679,3 +679,126 @@ fn closing_orifice() {
         assert!(net.orifices[o].flow <= 1.0001 * cda * orifice(ra.p, ra.t, gamma(ra.t), 0.0) + 1e-9);
     }
 }
+
+/// A narrow inlet with initially sonic gas inside: the boundary can choke without
+/// creating or losing mass/energy, even while the downstream closed end sends a shock back.
+#[test]
+fn sonic_inlet_conservation() {
+    let mut net = Network::default();
+    let tank = net.add_node(Node::volume(5e-4, 7.9e5, 1530.0, 0.0, 0.0));
+    let wall = net.add_node(Node::atmosphere(ATM, 600.0, 0.0, 0.25));
+    let mut pipe = Pipe::new(0.4, 0.034, 0.005, 2.7e5, 1330.0, 0.0, 0.0);
+    pipe.friction = false;
+    let area = pipe.area;
+    let rho = 2.7e5 / (RS * 1330.0);
+    let speed = (gamma(1330.0) * RS * 1330.0).sqrt();
+    for i in 0..pipe.cells() {
+        set_cell(&mut pipe, i, rho, speed, 2.7e5);
+    }
+    let p = net.add_pipe(pipe);
+    let valve = net.link(p, Side::A, tank, 0.65 * area);
+    net.link(p, Side::B, wall, 0.0);
+    let (m0, e0) = net.totals();
+    let mut choked = false;
+    for _ in 0..500 {
+        net.step(2e-6);
+        assert!(net.check().is_none());
+        let f = net.links[valve].flow;
+        if f.m < 0.0 {
+            let t = f.p / (RS * f.rho);
+            let mach = -f.un / (gamma(t) * RS * t).sqrt();
+            assert!(mach <= 1.0 + 1e-10);
+            choked |= mach > 1.0 - 1e-8;
+        }
+    }
+    let (m1, e1) = net.totals();
+    assert!(choked, "the test must exercise sonic inflow");
+    assert_eq!(net.rejected, 0);
+    assert!((m1 / m0 - 1.0).abs() < 1e-11);
+    assert!((e1 / e0 - 1.0).abs() < 1e-11);
+}
+
+/// An acoustic packet imposed through a reservoir inlet, compared with linear
+/// acoustics before it reaches the far end. This exercises the lower-order incoming
+/// ghost extension, rather than only interior propagation or reflection at rest.
+#[test]
+fn prescribed_inlet_packet_converges_with_mesh_refinement() {
+    let t = 900.0;
+    let c = (gamma(t) * RS * t).sqrt();
+    let final_time = 1.2e-3;
+    let packet = |time: f64| 10.0 * (-((time - 4e-4) / 8e-5).powi(2)).exp();
+    let mut errors = Vec::new();
+    for dx in [0.01, 0.005, 0.0025, 0.00125] {
+        // Refine time with space so frozen-midpoint source data does not set the
+        // error floor while measuring the inlet's spatial approximation.
+        let steps = (final_time / (0.1 * dx / c)).ceil() as usize;
+        let dt = final_time / steps as f64;
+        let mut net = Network::default();
+        let source = net.add_node(Node::atmosphere(ATM, t, 0.0, 0.25));
+        let outlet = net.add_node(Node::atmosphere(ATM, t, 0.0, 0.25));
+        let mut pipe = Pipe::new(1.0, 0.05, dx, ATM, t, 0.0, 0.25);
+        pipe.friction = false;
+        let p = net.add_pipe(pipe);
+        net.connect(p, Side::A, source);
+        net.connect(p, Side::B, outlet);
+        for k in 0..steps {
+            net.nodes[source].p_fixed = ATM + packet((k as f64 + 0.5) * dt);
+            net.step(dt);
+        }
+        let pipe = &net.pipes[p];
+        let (mut error, mut exact) = (0.0, 0.0);
+        for i in 0..pipe.cells() {
+            let x = (i as f64 + 0.5) * pipe.dx;
+            let expected = (packet(final_time - (x - 0.5 * pipe.dx) / c)
+                + 4.0 * packet(final_time - x / c)
+                + packet(final_time - (x + 0.5 * pipe.dx) / c)) / 6.0;
+            let found = Prim::of(&pipe.q[i]).p - ATM;
+            error += (found - expected).powi(2);
+            exact += expected.powi(2);
+        }
+        errors.push((error / exact).sqrt());
+        assert_eq!(net.rejected, 0);
+    }
+    eprintln!("inlet packet relative L2 errors: {errors:?}");
+    assert!(errors[1] < 0.75 * errors[0], "{errors:?}");
+    assert!(errors[2] < 0.75 * errors[1], "{errors:?}");
+    assert!(errors[3] < errors[2], "{errors:?}");
+    assert!(errors[3] < 0.01, "{errors:?}");
+}
+
+/// Both inlet ghost regions overlap in the shortest pipes. Reordering link registration
+/// must not let whichever inlet was processed last change the conservative solution.
+#[test]
+fn overlapping_inlet_stencils_are_link_order_independent() {
+    for cells in [2, 3, 4, 10] {
+        let make = |reverse: bool| {
+            let mut net = Network::default();
+            let left = net.add_node(Node::atmosphere(1.3e5, 1000.0, 0.0, 0.25));
+            let right = net.add_node(Node::atmosphere(1.5e5, 1100.0, 0.0, 0.25));
+            let dx = 1.0 / 128.0;
+            let mut pipe = Pipe::new(cells as f64 * dx, 0.034, dx, 1e5, 900.0, 0.0, 0.25);
+            pipe.friction = false;
+            assert_eq!(pipe.cells(), cells);
+            let p = net.add_pipe(pipe);
+            if reverse {
+                net.connect(p, Side::B, right);
+                net.connect(p, Side::A, left);
+            } else {
+                net.connect(p, Side::A, left);
+                net.connect(p, Side::B, right);
+            }
+            net
+        };
+        let (mut a, mut b) = (make(false), make(true));
+        for k in 0..16 {
+            a.step(2e-7);
+            b.step(2e-7);
+            if k == 0 {
+                assert!(a.links.iter().all(|l| l.flow.m < 0.0), "both ends must supply incoming gas");
+            }
+            assert_eq!(a.pipes[0].q, b.pipes[0].q, "{cells} cells, step {k}");
+            assert!(a.check().is_none() && b.check().is_none());
+        }
+        assert_eq!((a.rejected, b.rejected), (0, 0));
+    }
+}

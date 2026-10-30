@@ -2,8 +2,14 @@
 //! (offline) simulation, whose sound is the waves that leave its tailpipes.
 //!
 //! Each pipe is cut into cells, finite volumes of the one-dimensional Euler equations (mass,
-//! momentum, energy, and the gas's composition carried along), fifth order in space (WENO-Z)
-//! and third in time (strong-stability-preserving Runge-Kutta), with HLLC fluxes (Toro, "Riemann Solvers and Numerical Methods for Fluid Dynamics", 3rd ed., 10.4).
+//! momentum, energy, and the gas's composition carried along), using fifth-order WENO-Z
+//! reconstruction and third-order strong-stability-preserving Runge-Kutta time steps,
+//! with HLLC fluxes (Toro, "Riemann Solvers and Numerical Methods for Fluid Dynamics", 3rd ed., 10.4).
+//! WENO acts on primitives inferred from conservative cell averages, not on exact primitive
+//! cell averages; fifth-order convergence of general nonlinear flow is not claimed. Incoming
+//! boundary ghosts use a constant extension of the solved state (lower order). The tests
+//! quantify linear-wave propagation, damping, conservation, and strong-flow boundedness.
+//!
 //! The gas is the cylinders' (gas.rs): thermally perfect, its heat capacity ratio falling
 //! with temperature, so energy passes between them exactly. The walls drag on the gas and
 //! exchange heat with it by the steady-flow correlations at the local Reynolds number
@@ -102,10 +108,12 @@ fn friction_factor_with(re: f64, rough_term: f64, laminar: f64) -> f64 {
 #[inline]
 pub fn orifice(p0: f64, t0: f64, g: f64, p: f64) -> f64 {
     let critical = (2.0 / (g + 1.0)).powf(g / (g - 1.0));
-    // (max and min, not clamp: a NaN passes through to be caught, rather than panicking.)
-    let r = (p / p0).max(critical).min(1.0);
-    let lr = r.ln();
-    let psi = 2.0 * g / (g - 1.0) * ((2.0 / g * lr).exp() - ((g + 1.0) / g * lr).exp());
+    // max/min avoid clamp's bound-check panic if a rejected stage supplied invalid data.
+    let relative_drop = ((p - p0) / p0).max(critical - 1.0).min(0.0);
+    let lr = relative_drop.ln_1p();
+    // exp(a) - exp(b) loses the small kinetic head near rest. Factor it and
+    // use expm1; ln1p likewise retains the pressure difference before dividing.
+    let psi = -2.0 * g / (g - 1.0) * (2.0 / g * lr).exp() * ((g - 1.0) / g * lr).exp_m1();
     p0 / (RS * t0).sqrt() * psi.max(0.0).sqrt()
 }
 
@@ -501,9 +509,10 @@ impl Pipe {
     }
 
     /// The cells' primitive variables (density, velocity, pressure, fuel, oxygen), padded
-    /// with three ghost cells at each end extrapolated from the four nearest (cubic), for the
-    /// stencils near the ends: where the ends' gas isn't smooth, WENO takes the stencils
-    /// inside. Ghosts that would hold a vacuum copy the end cell instead.
+    /// with three cubic-extrapolated ghost cells at each end. These supply the interior-only
+    /// trace for the boundary solve and the outgoing stencils. After solving the ends,
+    /// incoming stencils use the supplied boundary gas (`inflow_ghosts`) instead.
+    /// Extrapolated ghosts that would hold a vacuum copy the end cell instead.
     fn pad(&mut self) {
         let n = self.prim.len();
         let w = |p: &Prim| [p.rho, p.u, p.p, p.yf, p.yo];
@@ -540,6 +549,36 @@ impl Pipe {
             // Cell i is x[i + 3].
             for i in 0..n {
                 (l[i], r[i]) = weno5z(x[i + 1], x[i + 2], x[i + 3], x[i + 4], x[i + 5]);
+            }
+        }
+    }
+
+    /// The incoming state outside an inlet is supplied by its boundary problem,
+    /// not by extrapolating the downstream gas back through the inlet. Extend the
+    /// solved state constantly into the ghost cells and reconstruct only the two
+    /// cell stencils reaching outside. This is a low-order boundary extension;
+    /// interior WENO reconstruction is unchanged. The outgoing characteristic used to solve
+    /// the boundary itself is still reconstructed from the interior by `pad`.
+    fn inflow_ghosts(&mut self, side: Side, f: &EndFlow) {
+        let n = self.cells();
+        let m = n + 6;
+        let w = [f.rho, side.sign() * f.un, f.p, f.yf, f.yo];
+        let (ghost, cells) = match side {
+            Side::A => (0..3, 0..2),
+            Side::B => (n + 3..n + 6, n - 2..n),
+        };
+        for j in ghost {
+            self.padded[j] = w;
+            for k in 0..NQ {
+                self.columns[k * m + j] = w[k];
+            }
+        }
+        for k in 0..NQ {
+            let x = &self.columns[k * m..(k + 1) * m];
+            for i in cells.clone() {
+                let (l, r) = weno5z(x[i + 1], x[i + 2], x[i + 3], x[i + 4], x[i + 5]);
+                self.faces[k * n + i] = l;
+                self.faces[(NQ + k) * n + i] = r;
             }
         }
     }
@@ -748,6 +787,17 @@ fn solve_end(s: &EndGas, area: f64, cda: f64, res: &Reservoir, z: f64, hint: f64
             v
         })
     };
+    // A restricted entry's mixed-out sonic pressure as a fraction of its upstream
+    // stagnation pressure. Like the sonic temperature it is independent of the
+    // trial end pressure; find it only if the incoming branch needs it.
+    let mixed_critical = std::cell::Cell::new(None);
+    let mixed_critical = || {
+        mixed_critical.get().unwrap_or_else(|| {
+            let v = mixed_sonic_ratio(cda / area, res.t, sonic());
+            mixed_critical.set(Some(v));
+            v
+        })
+    };
     let eval = |p: f64| -> (f64, EndFlow) {
         let (un, rho_w) = wave(s, p);
         let pn = res.p + z * un;
@@ -782,11 +832,18 @@ fn solve_end(s: &EndGas, area: f64, cda: f64, res: &Reservoir, z: f64, hint: f64
                 // stagnation state to the end's pressure, at most sonic. (Finding the state
                 // from its mass flux instead is ill-conditioned near sonic, where the flux
                 // hardly changes with the velocity.)
-                isentropic_inflow(p, pn, res.t, res_h)
+                isentropic_inflow(p, pn, res.t)
             } else {
-                let g = if p < pn { cda * orifice(pn, res.t, res_g, p) / area } else { 0.0 };
-                let (v, rho) = inflow_state_with(g, p, res_h, res.t, sonic());
-                (v, rho, p)
+                // The opening fixes the incoming mass and total enthalpy. Their
+                // mixed-out subsonic state exists only above this pressure. If the
+                // wave would draw the end below it, the incoming characteristic is
+                // sonic: sample that state, not a sonic velocity at an arbitrary
+                // lower pressure (which would no longer pass the opening's mass).
+                let ps = pn * mixed_critical();
+                let pf = p.max(ps);
+                let g = cda * orifice(pn, res.t, res_g, pf) / area;
+                let (v, rho) = inflow_state_with(g, pf, res_h, res.t, sonic());
+                (v, rho, pf)
             };
             let m = -rho * v * area;
             let f = EndFlow { m, energy: m * res_h, yf: res.yf, yo: res.yo, p: p_face, un: -v, rho };
@@ -798,31 +855,53 @@ fn solve_end(s: &EndGas, area: f64, cda: f64, res: &Reservoir, z: f64, hint: f64
         let p = rest_pressure(s);
         return (EndFlow { m: 0.0, energy: 0.0, yf: s.yf, yo: s.yo, p, un: 0.0, rho: wave(s, p).1 }, 0.0);
     }
-    if s.un <= -s.c && res.p + z * s.un > s.p {
-        // Supersonic inflow: nothing from inside reaches the end, the node sets it, choked
-        // through the opening (sonic in the pipe's own section, or mixed out from a narrower
-        // opening's choked jet at the pipe's pressure).
-        let pn = res.p + z * s.un;
-        let (v, rho, p) = if cda >= area {
-            let g = gamma(res.t);
-            let critical = pn * (2.0 / (g + 1.0)).powf(g / (g - 1.0));
-            isentropic_inflow(critical, pn, res.t, res_h)
-        } else {
-            let (v, rho) = inflow_state(cda * orifice(pn, res.t, res_g, 0.0) / area, s.p, res_h, res.t);
-            (v, rho, s.p)
-        };
-        let m = -rho * v * area;
-        return (EndFlow { m, energy: m * res_h, yf: res.yf, yo: res.yo, p, un: -v, rho }, 0.0);
-    }
+    // Do not select an inflow state from the interior's Mach number. A restricted
+    // opening's jet can mix to a subsonic end even when the reconstructed interior
+    // is sonic: its pressure must still satisfy the wave curve and the opening's
+    // flow. Selecting the interior pressure there makes the flux discontinuous at
+    // Mach -1. Below, sample the source's critical state if the incoming wave is
+    // choked; otherwise solve the subsonic compatibility condition.
     if s.un >= s.c {
         // Supersonic outflow: nothing reaches the end from the node.
         let m = s.rho * s.un * area;
         let h0 = enthalpy(s.t) + 0.5 * s.un * s.un;
         return (EndFlow { m, energy: m * h0, yf: s.yf, yo: s.yo, p: s.p, un: s.un, rho: s.rho }, 0.0);
     }
+    let mut inlet_critical = None;
+    if cda > 0.0 && (s.un < 0.0 || res.p > s.p) {
+        // Sample a choked incoming state where its outgoing characteristic no
+        // longer reaches the boundary. This classification uses the boundary's
+        // critical state, not the reconstructed interior Mach number. In particular
+        // an interior withdrawing faster than a rarefaction's escape speed has no
+        // outward-sonic wave pressure with which to bracket a root below it.
+        let (v, rho, p) = if cda >= area {
+            let (v, _, _) = isentropic_inflow(0.0, 1.0, res.t);
+            let pn = res.p - z * v;
+            if pn > 0.0 { isentropic_inflow(0.0, pn, res.t) } else { (0.0, 0.0, 0.0) }
+        } else {
+            let (ts, v) = sonic();
+            let pn = res.p - z * v;
+            let p = pn * mixed_critical();
+            (v, p / (RS * ts), p)
+        };
+        if p > 0.0 {
+            inlet_critical = Some(p);
+            if wave(s, p).0 + v <= 0.0 {
+                let m = -rho * v * area;
+                return (EndFlow { m, energy: m * res_h, yf: res.yf, yo: res.yo, p, un: -v, rho }, p);
+            }
+        }
+    }
     let g = s.g;
     let x = (g - 1.0) / (g + 1.0) * (s.un / s.c) + 2.0 / (g + 1.0);
-    let p_sonic = s.p * x.powf(2.0 * g / (g - 1.0));
+    let p_sonic = if x > 0.0 {
+        s.p * x.powf(2.0 * g / (g - 1.0))
+    } else {
+        // Beyond the interior's rarefaction escape speed no outward-sonic state
+        // exists. A hotter source can still supply subsonic inflow: its critical
+        // pressure is a positive lower bracket (its residual was tested above).
+        inlet_critical.expect("incoming flow has neither an outward-sonic wave nor a positive source critical pressure")
+    };
     // The residual falls as the end pressure rises: a bracket near last time's, which also
     // shows the end isn't choked; else from the sonic pressure up.
     let near = if hint > p_sonic { bracket_near(|p| eval(p).0, hint, p_sonic, f64::INFINITY, false) } else { None };
@@ -853,19 +932,24 @@ fn solve_end(s: &EndGas, area: f64, cda: f64, res: &Reservoir, z: f64, hint: f64
         -ra,
         b,
         -rb,
-        1e-10,
+        1e-13,
     );
     (f, c)
 }
 
-/// Gas accelerated isentropically from rest at `p0`, `t0` (enthalpy `h0`) to static pressure
+/// Gas accelerated isentropically from rest at `p0`, `t0` to static pressure
 /// `p`: its velocity, density and pressure; below the critical pressure, the sonic state.
-fn isentropic_inflow(p: f64, p0: f64, t0: f64, h0: f64) -> (f64, f64, f64) {
+fn isentropic_inflow(p: f64, p0: f64, t0: f64) -> (f64, f64, f64) {
     let g = gamma(t0);
     let critical = p0 * (2.0 / (g + 1.0)).powf(g / (g - 1.0));
     let ps = p.max(critical);
-    let t = t0 * (ps / p0).powf((g - 1.0) / g);
-    let v = (2.0 * (h0 - enthalpy(t))).max(0.0).sqrt();
+    let lr = ((ps - p0) / p0).ln_1p();
+    let dt = -t0 * ((g - 1.0) / g * lr).exp_m1();
+    let t = t0 - dt;
+    // h(t0)-h(t), evaluated as an integral over dt, not a subtraction of two
+    // stagnation-sized enthalpies. Near rest the kinetic head is much smaller.
+    let dh = RS * dt + RS / GAMMA_SLOPE * (GAMMA_SLOPE * dt / (g - 1.0)).ln_1p();
+    let v = (2.0 * dh).max(0.0).sqrt();
     (v, ps / (RS * t), ps)
 }
 
@@ -884,14 +968,33 @@ fn sonic_state(h0: f64, t0: f64) -> (f64, f64) {
     (ts, (gamma(ts) * RS * ts).sqrt())
 }
 
-/// The subsonic state carrying mass flux `g` (kg/s m^2) at static pressure `p` with total
-/// enthalpy `h0`: its velocity and density; the sonic state if `g` is more than the most it
-/// can carry. `t0` is a guess at the temperature (the stagnation temperature).
-fn inflow_state(g: f64, p: f64, h0: f64, t0: f64) -> (f64, f64) {
-    inflow_state_with(g, p, h0, t0, sonic_state(h0, t0))
+/// A restricted entry's mixed-out sonic pressure / upstream stagnation pressure.
+/// At this pressure the pipe's sonic mass flux equals the opening's. Below it no
+/// subsonic inlet can carry what the opening supplies. Usually the opening itself
+/// is choked too, making this explicit; near equal areas bracket its unchoked law.
+fn mixed_sonic_ratio(area_ratio: f64, t0: f64, (ts, vs): (f64, f64)) -> f64 {
+    let g = gamma(t0);
+    let critical = (2.0 / (g + 1.0)).powf(g / (g - 1.0));
+    // Per unit upstream pressure, the pipe's sonic flux and the opening's maximum.
+    let sonic = vs / (RS * ts);
+    let capacity = area_ratio * choked(1.0, t0, g);
+    let ratio = capacity / sonic;
+    if ratio <= critical {
+        return ratio;
+    }
+    illinois(
+        |r| (sonic * r - area_ratio * orifice(1.0, t0, g, r), ()),
+        critical,
+        sonic * critical - capacity,
+        1.0,
+        sonic,
+        1e-12,
+    ).0
 }
 
-/// inflow_state, given the sonic state (`sonic_state`, the same for every pressure).
+/// The subsonic state carrying mass flux `g` (kg/s m^2) at static pressure `p` with total
+/// enthalpy `h0`: its velocity and density, limited to the sonic state supplied (`sonic_state`,
+/// the same for every pressure). `t0` is the stagnation temperature.
 fn inflow_state_with(g: f64, p: f64, h0: f64, t0: f64, (ts, vs): (f64, f64)) -> (f64, f64) {
     // At rest the gas is at its stagnation temperature.
     let rho0 = p / (RS * t0);
@@ -902,16 +1005,15 @@ fn inflow_state_with(g: f64, p: f64, h0: f64, t0: f64, (ts, vs): (f64, f64)) -> 
     if g >= rho_s * vs {
         return (vs, rho_s);
     }
-    // Newton's method for the mass flux rho v = g over the velocity. The flux rises with the
-    // velocity up to the sonic point, concave: from below the root (v = g / rho0, rho falling
-    // as v rises), each step lands below it again, closer. d(rho v)/dv = rho (1 - v^2 / (cp
-    // T)), as dT/dv = -v / cp. The temperature from the last one's (Newton's method again).
-    // (Kept to a bracket, halved should a step leave it, as round-off near the sonic point
-    // could make it.)
+    // At fixed static pressure, cooling as the velocity rises increases the density:
+    // d(rho v)/dv = rho (1 + v^2 / (cp T)), since dT/dv = -v / cp. The flux is
+    // increasing and convex. g/rho0 is above the root; Newton's steps from above
+    // approach it monotonically. Keep the initial guess inside the sonic bracket,
+    // and bisect if round-off takes a step outside it.
     let (mut lo, mut hi) = (0.0, vs);
-    let (mut v, mut t, mut rho) = (g / rho0, t0, rho0);
+    let (mut v, mut t, mut rho) = ((g / rho0).min(vs), t0, rho0);
     for _ in 0..60 {
-        t = temperature_of_enthalpy((h0 - 0.5 * v * v).max(1e-3 * h0), t);
+        t = temperature_of_enthalpy(h0 - 0.5 * v * v, t);
         rho = p / (RS * t);
         let r = rho * v - g;
         if r.abs() <= 1e-12 * g {
@@ -922,7 +1024,7 @@ fn inflow_state_with(g: f64, p: f64, h0: f64, t0: f64, (ts, vs): (f64, f64)) -> 
         } else {
             lo = v;
         }
-        v -= r / (rho * (1.0 - v * v / (cp(t) * t)));
+        v -= r / (rho * (1.0 + v * v / (cp(t) * t)));
         if !(v > lo && v < hi) {
             v = 0.5 * (lo + hi);
         }
@@ -1149,8 +1251,9 @@ fn step_from(up: &EndGas, area_up: f64, down: &EndGas, area_down: f64, rest: f64
             } else if g_down <= 0.0 {
                 (p0, 0.0, p0 / (RS * t0))
             } else {
-                // Newton's method over the velocity, as inflow_state_with: the flux rises with
-                // it, concave, to the critical point. Along the isentrope rho ~ T^(1 / (g0 -
+                // Newton's method over an isentropic contraction's velocity: unlike the
+                // fixed-static-pressure inlet, its flux is concave up to the critical
+                // point. Along the isentrope rho ~ T^(1 / (g0 -
                 // 1)), so d(rho v)/dv = rho (1 - v^2 / ((g0 - 1) cp T)).
                 let rho0 = p0 / (RS * t0);
                 let (mut lo, mut hi) = (0.0, vc);
@@ -1196,7 +1299,7 @@ fn step_from(up: &EndGas, area_up: f64, down: &EndGas, area_down: f64, rest: f64
         }
     };
     // (Illinois takes a rising function.)
-    // (To 1e-10 of the pressure, as solve_end: ~1e-5 Pa.)
+    // Tight enough to resolve quiet pipe ends' dynamic heads, as solve_end.
     let (p, (fu, fd)) = illinois(
         |p| {
             let (r, fu, fd) = solve(p);
@@ -1206,7 +1309,7 @@ fn step_from(up: &EndGas, area_up: f64, down: &EndGas, area_down: f64, rest: f64
         -r_lo,
         hi,
         -r_hi,
-        1e-10,
+        1e-13,
     );
     (fu, fd, p)
 }
@@ -1499,7 +1602,8 @@ pub struct Network {
     /// Work taken by the orifices over the last call to `step` (J), and substeps taken.
     pub work: Vec<f64>,
     pub substeps: usize,
-    /// At least this many pipe substeps per fluid step (offline sensitivity probes).
+    /// At least this many substeps a step (a fixed count, set above what stability takes,
+    /// keeps the time discretization the same from run to run: examples/superpose.rs).
     pub min_substeps: usize,
     /// Substeps rejected (and done again in halves) so far.
     pub rejected: usize,
@@ -1776,6 +1880,15 @@ impl Network {
                     }
                     pipe.set_end(l.side, &f);
                     pipe.end_flow[(l.side == Side::B) as usize] = f;
+                }
+                // Solve both ends from interior-only traces before changing any
+                // ghost stencil (the stencils overlap in a two-cell pipe).
+                for &i in &pipe_links[k] {
+                    let l = &links[i];
+                    let f = pipe.end_flow[(l.side == Side::B) as usize];
+                    if f.m < 0.0 {
+                        pipe.inflow_ghosts(l.side, &f);
+                    }
                 }
                 pipe.rates();
                 // Its volute's stator channels (into nodes that stand still through the stage).
@@ -2061,6 +2174,9 @@ pub struct Ducts {
     pub exits: Vec<f32>,
     /// Each open end's share of `sound`, the ends interleaved, kept while `listening_ends`.
     pub end_sound: Vec<f32>,
+    /// Optional full-precision end pressures for small-perturbation experiments.
+    pub end_sound_f64: Vec<f64>,
+    pub listening_ends_f64: bool,
     pub listening: bool,
     pub listening_ends: bool,
 }
@@ -2231,6 +2347,8 @@ impl Ducts {
             sound: Vec::new(),
             exits: Vec::new(),
             end_sound: Vec::new(),
+            end_sound_f64: Vec::new(),
+            listening_ends_f64: false,
             listening_ends: false,
             listening: true,
         })
@@ -2262,10 +2380,230 @@ impl Ducts {
         for &l in &self.outlets {
             let f = &self.net.links[l].flow;
             self.exits.extend([f.un as f32, f.rho as f32, (f.p / (f.rho * RS)) as f32]);
-            if self.listening_ends {
-                let p = self.net.links[l].radiation.as_ref().map_or(0.0, |r| r.pressure);
-                self.end_sound.push((p / self.distance) as f32);
+            if self.listening_ends || self.listening_ends_f64 {
+                let p = self.net.links[l].radiation.as_ref().map_or(0.0, |r| r.pressure) / self.distance;
+                if self.listening_ends { self.end_sound.push(p as f32); }
+                if self.listening_ends_f64 { self.end_sound_f64.push(p); }
             }
         }
     }
+}
+
+
+#[cfg(test)]
+mod boundary_tests {
+    use super::*;
+
+    /// A valve's mixed-out state is solved against the outgoing characteristic. The
+    /// reconstructed interior crossing Mach -1 is not itself a boundary transition.
+    #[test]
+    fn restricted_inflow_is_continuous_at_interior_sonic_speed() {
+        let (p, t) = (2.3e5, 1300.0);
+        let s = EndGas { rho: p / (RS * t), un: 0.0, p, t, g: gamma(t),
+            c: (gamma(t) * RS * t).sqrt(), yf: 0.0, yo: 0.0 };
+        let res = Reservoir { p: 6e5, t: 1600.0, yf: 0.0, yo: 0.0 };
+        let area = 9e-4;
+        for ratio in [0.25, 0.5, 0.75, 1.0] {
+            let a = EndGas { un: -s.c * (1.0 - 1e-8), ..s };
+            let b = EndGas { un: -s.c * (1.0 + 1e-8), ..s };
+            let fa = solve_end(&a, area, ratio * area, &res, 0.0, 0.0).0;
+            let fb = solve_end(&b, area, ratio * area, &res, 0.0, 0.0).0;
+            assert!((fb.p / fa.p - 1.0).abs() < 1e-6, "area ratio {ratio}: {fa:?} -> {fb:?}");
+            assert!((fb.m / fa.m - 1.0).abs() < 1e-6, "area ratio {ratio}: {fa:?} -> {fb:?}");
+            assert!((fb.un / fa.un - 1.0).abs() < 1e-6, "area ratio {ratio}: {fa:?} -> {fb:?}");
+        }
+    }
+
+    #[test]
+    fn recorded_sonic_inlet_obeys_opening_mass_and_total_enthalpy() {
+        // Primary 4 at the sensitivity experiment's first sonic crossing (6000 rpm,
+        // 11.05 ms into the record). The old interior-Mach shortcut changed the end's
+        // pressure there; the old velocity-only sonic cap also lost 3.5% of valve flow.
+        let s = EndGas {
+            rho: 0.7085055538110921, un: -701.7076430834122,
+            p: 270363.16516514204, t: 1329.5925510256918,
+            g: 1.284094125601611, c: 700.0040636726338, yf: 0.0, yo: 0.0,
+        };
+        let res = Reservoir { p: 788510.995887338, t: 1527.959626832258, yf: 0.0, yo: 0.0 };
+        let area = 0.0009079202768874504;
+        let cda = 0.0005918913086597051;
+        for mach in [0.5, 0.9, 0.99999999, 1.0, 1.00000001, 1.1, 1.5, 10.0] {
+            let interior = EndGas { un: -mach * s.c, ..s };
+            let f = solve_end(&interior, area, cda, &res, 0.0, 0.0).0;
+            let t = f.p / (RS * f.rho);
+            let sound = (gamma(t) * RS * t).sqrt();
+            let expected = -cda * orifice(res.p, res.t, gamma(res.t), f.p);
+            for x in [f.m, f.energy, f.p, f.un, f.rho] { assert!(x.is_finite()); }
+            assert!(f.p > 0.0 && f.rho > 0.0 && f.m < 0.0);
+            assert!(-f.un <= sound * (1.0 + 1e-12));
+            assert!((f.m / expected - 1.0).abs() < 2e-12, "Mach {mach}: {f:?}, opening {expected}");
+            assert!((f.energy / (f.m * enthalpy(res.t)) - 1.0).abs() < 1e-12);
+            assert!(((enthalpy(t) + 0.5 * f.un * f.un) / enthalpy(res.t) - 1.0).abs() < 1e-12);
+            if -f.un < sound * (1.0 - 1e-8) {
+                assert!((wave(&interior, f.p).0 - f.un).abs() < 1e-6);
+            } else {
+                // At a choked inlet the outgoing characteristic cannot demand faster
+                // incoming gas than the sonic state fixed by the source.
+                assert!(wave(&interior, f.p).0 <= f.un + 1e-6);
+            }
+        }
+    }
+
+    #[test]
+    fn fixed_pressure_inflow_inverts_mass_flux_and_has_positive_density_derivative() {
+        for t0 in [300.0, 1500.0, 2500.0] {
+            let h0 = enthalpy(t0);
+            let sonic = sonic_state(h0, t0);
+            let p = 2e5;
+            let flux = |v: f64| {
+                let t = temperature_of_enthalpy(h0 - 0.5 * v * v, t0);
+                p / (RS * t) * v
+            };
+            for fraction in [1e-4, 0.2, 0.9, 0.999999999] {
+                let v = fraction * sonic.1;
+                let t = temperature_of_enthalpy(h0 - 0.5 * v * v, t0);
+                let rho = p / (RS * t);
+                let mass = flux(v);
+                let (found, density) = inflow_state_with(mass, p, h0, t0, sonic);
+                assert!((found / v - 1.0).abs() < 2e-12, "T0 {t0}, fraction {fraction}: {found} vs {v}");
+                assert!((density * found / mass - 1.0).abs() < 2e-12);
+                let dv = 1e-5 * v;
+                let numerical = (flux(v + dv) - flux(v - dv)) / (2.0 * dv);
+                let analytic = rho * (1.0 + v * v / (cp(t) * t));
+                assert!((numerical / analytic - 1.0).abs() < 2e-8);
+                assert!(analytic >= rho);
+            }
+        }
+    }
+
+    #[test]
+    fn mixed_sonic_pressure_matches_opening_from_small_to_full_area() {
+        for t0 in [300.0, 1500.0, 2500.0] {
+            let (ts, vs) = sonic_state(enthalpy(t0), t0);
+            for area_ratio in [1e-6, 0.25, 0.65, 0.9, 0.99999999, 1.0] {
+                let r = mixed_sonic_ratio(area_ratio, t0, (ts, vs));
+                let from_pipe = r / (RS * ts) * vs;
+                let from_opening = area_ratio * orifice(1.0, t0, gamma(t0), r);
+                assert!((from_pipe / from_opening - 1.0).abs() < 2e-11);
+            }
+        }
+    }
+
+
+    #[test]
+    fn sonic_inlet_handles_withdrawal_beyond_rarefaction_escape_speed() {
+        // The first cold 6000-rpm warm-up failure: this positive reconstructed state
+        // has M=-8.12, beyond the wave's escape speed -2/(gamma-1)=-5.18. There is
+        // no outward-sonic rarefaction pressure; sample the incoming critical state.
+        let s = EndGas {
+            rho: 0.36095900559980926, un: -1370.3665957146104,
+            p: 7419.54927800821, t: 71.61993989516232,
+            g: 1.3863672988865232, c: 168.8103125477957, yf: 0.0, yo: 0.0,
+        };
+        let res = Reservoir { p: 463067.2649543128, t: 1301.777692622685, yf: 0.0, yo: 0.0 };
+        let area = 0.0009079202768874504;
+        for ratio in [0.1, 0.5, 0.937, 1.0] {
+            let f = solve_end(&s, area, ratio * area, &res, 0.0, 0.0).0;
+            for x in [f.m, f.energy, f.p, f.un, f.rho] { assert!(x.is_finite()); }
+            assert!(f.m < 0.0 && f.p > 0.0 && f.rho > 0.0);
+            if ratio < 1.0 {
+                let expected = -ratio * area * orifice(res.p, res.t, gamma(res.t), f.p);
+                assert!((f.m / expected - 1.0).abs() < 2e-12);
+            }
+        }
+    }
+
+
+    #[test]
+    fn escaping_interior_can_still_take_subsonic_flow_from_hotter_source() {
+        let (p, t) = (1e5, 100.0);
+        let c = (gamma(t) * RS * t).sqrt();
+        let s = EndGas { rho: p / (RS * t), un: -6.0 * c, p, t, g: gamma(t), c, yf: 0.0, yo: 0.0 };
+        let res = Reservoir { p: 2e5, t: 3000.0, yf: 0.0, yo: 0.0 };
+        let area = 9e-4;
+        // Sets the source's mixed-out critical pressure to 1000 Pa.
+        let cda = 0.00878766430143544 * area;
+        assert!(s.un < -2.0 * c / (s.g - 1.0));
+        let f = solve_end(&s, area, cda, &res, 0.0, 0.0).0;
+        let t = f.p / (RS * f.rho);
+        let sound = (gamma(t) * RS * t).sqrt();
+        assert!(f.p.is_finite() && f.m.is_finite() && f.energy.is_finite());
+        assert!(f.m < 0.0 && -f.un < sound);
+        assert!((f.p / 1367.125606785868 - 1.0).abs() < 1e-9);
+        assert!((-f.un / 730.0907267349717 - 1.0).abs() < 1e-9);
+        assert!((wave(&s, f.p).0 - f.un).abs() < 1e-6);
+        let expected = -cda * orifice(res.p, res.t, gamma(res.t), f.p);
+        assert!((f.m / expected - 1.0).abs() < 2e-12);
+    }
+
+
+    #[test]
+    fn incoming_boundary_ghosts_fix_recorded_near_inlet_positivity_failure() {
+        // Freeze the first failing stage's conservative means and boundary flux.
+        // Only the ghost-dependent interior reconstructions change. A downstream
+        // cubic continuation must not stand in for the known incoming gas.
+        let dx = 0.44 / 62.0;
+        let mut p = Pipe::new(8.0 * dx, 0.034, dx, 1e5, 1000.0, 0.0, 0.0);
+        p.friction = false;
+        let q = [
+            [0.6675406046559218, 640.8235396380678, 918683.1193521208, 0.0038660167162336834, 0.01006276398004939],
+            [0.2032748531847154, 252.38842773684743, 174026.490487648, 0.0011772527018144817, 0.0030642433679840798],
+            [0.8722526373101663, 579.7366781523108, 1065609.8041418376, 0.00505159274671859, 0.013148671944460916],
+            [0.9095857241506274, 439.16840475695676, 982030.6366416498, 0.005267804819493136, 0.013711445263270302],
+        ];
+        p.q.fill(q[3]);
+        p.q[..4].copy_from_slice(&q);
+        p.update_prim();
+        p.pad();
+        let inlet = EndFlow { m: -0.2749822729292176, energy: -404180.59177731344,
+            yf: 0.0057914330443260085, yo: 0.015074384853691607,
+            p: 402452.0574851477, un: -272.55341633623107, rho: 1.1112335675588858 };
+        p.set_end(Side::A, &inlet);
+        let internal_after = |p: &Pipe| {
+            let q: [f64; NQ] = std::array::from_fn(|k| p.q[1][k] + 2.0833333333333334e-6 * p.rate[1][k]);
+            q[2] - 0.5 * q[1] * q[1] / q[0]
+        };
+        p.rates();
+        assert!(internal_after(&p) < 0.0, "the frozen fixture must reproduce the old failure");
+        let before = p.q.clone();
+        p.inflow_ghosts(Side::A, &inlet);
+        p.rates();
+        assert!(internal_after(&p) > 0.0);
+        assert_eq!(p.q, before, "changing exterior ghost data must not change conservative means");
+    }
+
+
+    #[test]
+    fn near_rest_orifice_and_isentropic_entry_retain_small_kinetic_heads() {
+        let (p0, t0) = (101325.0, 900.0);
+        let rho0 = p0 / (RS * t0);
+        for relative in [1e-6, 1e-8, 1e-10, 1e-12, 1e-14] {
+            let p = p0 * (1.0 - relative);
+            let expected_velocity = (2.0 * (p0 - p) / rho0).sqrt();
+            let mass = orifice(p0, t0, gamma(t0), p);
+            let (v, _, _) = isentropic_inflow(p, p0, t0);
+            // The compressible correction vanishes linearly with pressure drop.
+            let tolerance = 2.0 * relative + 1e-12;
+            assert!((mass / (rho0 * expected_velocity) - 1.0).abs() < tolerance);
+            assert!((v / expected_velocity - 1.0).abs() < tolerance);
+        }
+    }
+
+
+    #[test]
+    fn quiet_entry_root_resolves_mass_compatibility_below_pascal_heads() {
+        let (p0, t0) = (101325.0, 900.0);
+        let res = Reservoir { p: p0, t: t0, yf: 0.0, yo: 0.25 };
+        let area = 0.05;
+        for relative in [1e-6, 1e-8, 1e-10] {
+            let (v, rho, p) = isentropic_inflow(p0 * (1.0 - relative), p0, t0);
+            let t = p / (RS * rho);
+            let s = EndGas { rho, un: -v, p, t, g: gamma(t), c: (gamma(t) * RS * t).sqrt(), yf: 0.0, yo: 0.25 };
+            let f = solve_end(&s, area, area, &res, 0.0, 0.0).0;
+            let residual = (wave(&s, f.p).0 - f.un).abs();
+            assert!(residual < 1e-8 * s.c, "relative head {relative}: velocity residual {residual}, {f:?}");
+            assert!((f.energy / (f.m * enthalpy(t0)) - 1.0).abs() < 1e-12);
+        }
+    }
+
 }

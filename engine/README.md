@@ -128,10 +128,13 @@ same to the bit): 3.9 times as fast on 8 threads of an M-series Mac (18 cores; p
 faster, a stage being ~100 microseconds of work).
 
 - Each pipe is a column of finite volumes of the one-dimensional Euler equations with the
-  gas's composition, fifth order in space (WENO-Z, a cell's values at both its faces from one
-  set of smoothness indicators, by variable along the pipe) and third in time (SSP
-  Runge-Kutta), HLLC fluxes, in the cylinders' real gas (so energy passes between them exactly). Cells are sized
-  for 30 to the wavelength at 3 kHz in each pipe's gas: numerical damping ~0.02 dB/m there.
+  gas's composition, WENO-Z reconstruction (a cell's values at both faces from one set of
+  smoothness indicators, by variable along the pipe), third-order SSP Runge-Kutta and HLLC
+  fluxes, in the cylinders' real gas. WENO's reconstruction is fifth order, but it acts on
+  primitives inferred from conservative cell averages, and incoming boundary ghosts use a
+  lower-order constant extension: general nonlinear fifth-order convergence is **not**
+  established. Cells are sized for 30 to the wavelength at 3 kHz in each pipe's gas; the
+  linear propagation test gives numerical damping ~0.02 dB/m there.
 - A pipe is a run of sections: straight, cones (the area varying cell to cell, the walls
   pushing on the gas by p dA), a catalyst's monolith (its channels' open area and hydraulic
   diameter), packed. Lumped volumes are kept to real junctions: at kilohertz a volume isn't
@@ -154,16 +157,25 @@ faster, a stage being ~100 microseconds of work).
   supersonically, as through a nozzle's diverging part. Through the pipe's own section the
   inflow is isentropic, its face sonic at the critical pressure once it chokes (finding it
   from its mass flux is ill-conditioned near sonic, and rang at kilohertz there); a wall is
-  exact, nothing passing. Each end's and each step's solution is found within a bracket about
-  its last (0.1 % either side, widened fourfold until it holds; else over the whole range),
-  by Illinois's regula falsi till a step moves it less than 1e-10 of the pressure (~1e-5 Pa;
-  against bisection to 1e-15 it is then within 1e-8, where waiting for the bracket itself to
-  close took a third more evaluations); a step's over its upstream end's pressure, whose wave
-  curve gives the mass flow directly. (Searching over the mass flow instead, each trial
-  inverted the wave curve: twice the work.) The states carrying a given mass flux (into a pipe
-  through a narrower opening; into a step's narrower side) by Newton's method over the
-  velocity: the flux is concave in it below sonic, so from rest each step lands below the
-  root, closer.
+  exact, nothing passing. For a restricted inlet, the critical pressure equates the
+  opening's supply with the pipe's sonic mass capacity at the incoming total enthalpy.
+  The wave's feasibility at that state selects sonic versus subsonic inflow, not a switch
+  on the interior Mach number. The boundary therefore cannot jump at Mach 1 or silently
+  cap velocity while passing the wrong valve mass. A source-based lower bracket also
+  handles an interior withdrawal beyond its rarefaction escape speed.
+  Each end's and each step's solution is bracketed near its last (0.1 % either side,
+  widened fourfold; otherwise the full range) and solved by Illinois's regula falsi to
+  relative pressure tolerance 1e-13. Near rest, `log1p`/`expm1` retain small pressure and
+  kinetic heads instead of subtracting stagnation-sized quantities. A step's root is its
+  upstream end pressure, whose wave curve gives the mass flow directly. Inverting a
+  restricted entry's mass flux at fixed static pressure uses bracketed Newton iterations
+  with d(rho v)/dv = rho (1 + v^2/(cp T)); a contraction along an isentrope has a different,
+  decreasing-density derivative.
+- After solving both ends from interior-only traces, the gas entering through each end
+  supplies its ghost cells. A constant extension replaces extrapolation of downstream gas
+  through an inlet; only stencils reaching outside are rebuilt. This is an explicitly
+  lower-order boundary approximation, with conservation, positivity and linear acoustic
+  mesh tests, not a claim to a globally fifth-order boundary scheme.
 - Where a strong rarefaction outruns the high-order scheme (a stage would leave a cell
   without internal energy), the substep is done again in halves, at the last with
   first-order fluxes, which HLLC keeps positive.
@@ -219,7 +231,22 @@ reflections off closed and open ends, a choked nozzle's flow, Darcy's friction, 
 perforation's Helmholtz resonance, a pulse through a cone (pressure as A^-1/2), a sudden
 expansion's loss (Borda-Carnot, within 0.5 %), and conservation of mass and energy; and that
 shock tubes across steps, a catalyst heating its gas, and a blowdown into a wider pipe (its
-end subsonic) stay bounded.
+end subsonic) stay bounded. Sonic-inlet regressions additionally check the opening's
+mass and total enthalpy, continuity through the interior Mach-1 crossing, the rarefaction
+bracket's domain, and a frozen incoming-ghost positivity failure. The prescribed-inlet
+linear-wave test refines both mesh and time: relative L2 errors at 10/5/2.5/1.25 mm were
+2.75/0.187/0.065/0.052 %, with no rejected steps. This is linear boundary consistency
+evidence, not nonlinear full-engine convergence.
+
+**Remaining validation limit:** the 6000 rpm cold-start/perturbed-burn runs stay bounded
+with zero retries and identical crank/burn schedules; serial and 8-thread outputs replay
+bit for bit. However, very small burn perturbations (1e-7 to 1e-4) do not yet demonstrate a
+linear waveform limit. Their response norms grew by factors 6.47, 4.97 and 2.38 for
+successive tenfold perturbations, rather than ten. The residual mechanism is not fully
+localized. Do not infer an LTI Jacobian from those data, label it physical turbulence, or
+claim the remaining difference is only roundoff. These corrections address demonstrated
+boundary/algebra defects; they do not prove complete physical fidelity or resolve the
+remaining frozen-gamma/full-area, transition-friction and laminar-heat approximations.
 
 The pipes carry no turbulence: the tailpipe jets' mixing noise is worked out afterwards
 (`scripts/reference_sound.py`) from the simulated exit flow (each open end's velocity, density and temperature, recorded with

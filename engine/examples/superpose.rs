@@ -10,6 +10,7 @@
 //! env: FREQ (default 20000), FLUID (default 12), JOBS (branches, default 15;
 //! forced to 1 when the duct solver uses its process-global parallel pool),
 //! BRANCHES (optional comma-separated subset: A,B,C,A2,A+B,A+C,A+A2).
+//! TRACE_F64 additionally writes full-precision ends/flow for sensitivity below f32 resolution.
 //! TRACE_STATE records p,u,T,Re for TRACE_FROM..TRACE_TO engine steps (default 200..240).
 //! Writes <out>.json and per branch <out>.<branch>.ends.f32 (the ends interleaved, at the
 //! fluid rate) and <out>.<branch>.flow.f32 (each step, each cylinder's exhaust valve flow).
@@ -20,6 +21,8 @@ use std::io::Write;
 struct Run {
     ends: Vec<f32>,
     flow: Vec<f32>,
+    ends_f64: Vec<f64>,
+    flow_f64: Vec<f64>,
     /// Per step, each cylinder's burns so far.
     burns: Vec<Vec<u64>>,
     angles: Vec<f64>,
@@ -31,6 +34,8 @@ fn run(mut e: Engine, steps: usize, scales: Vec<(usize, u64, f64)>) -> Run {
     e.burn_scales = scales;
     let n = e.cylinder_count();
     let mut flow = Vec::with_capacity(steps * n);
+    let full_precision = std::env::var_os("TRACE_F64").is_some();
+    let mut flow_f64 = Vec::new();
     let mut burns = Vec::with_capacity(steps);
     let mut angles = Vec::with_capacity(steps);
     let trace = std::env::var("TRACE_STATE").is_ok();
@@ -49,12 +54,15 @@ fn run(mut e: Engine, steps: usize, scales: Vec<(usize, u64, f64)>) -> Run {
         }
         angles.push(e.cycle_angle());
         for i in 0..n {
-            flow.push(e.cylinder_exhaust_flow(i) as f32);
+            let value = e.cylinder_exhaust_flow(i);
+            flow.push(value as f32);
+            if full_precision { flow_f64.push(value); }
         }
         burns.push((0..n).map(|i| e.burns(i)).collect());
     }
     let ends = std::mem::take(&mut e.ducts.as_mut().unwrap().end_sound);
-    Run { ends, flow, burns, angles, states, rejections: e.ducts.as_ref().unwrap().net.rejected }
+    let ends_f64 = std::mem::take(&mut e.ducts.as_mut().unwrap().end_sound_f64);
+    Run { ends, flow, ends_f64, flow_f64, burns, angles, states, rejections: e.ducts.as_ref().unwrap().net.rejected }
 }
 
 fn main() {
@@ -107,6 +115,7 @@ fn main() {
         let d = e.ducts.as_mut().unwrap();
         (d.sound.clear(), d.exits.clear());
         d.listening_ends = true;
+        d.listening_ends_f64 = std::env::var_os("TRACE_F64").is_some();
     }
     let n = e.cylinder_count();
     let steps = (record * rate).round() as usize;
@@ -169,6 +178,10 @@ fn main() {
     let write = |name: &str, r: &Run| {
         std::fs::write(format!("{out}.{name}.ends.f32"), bytes(&r.ends)).unwrap();
         std::fs::write(format!("{out}.{name}.flow.f32"), bytes(&r.flow)).unwrap();
+        if !r.ends_f64.is_empty() {
+            std::fs::write(format!("{out}.{name}.ends.f64"), bytes_f64(&r.ends_f64)).unwrap();
+            std::fs::write(format!("{out}.{name}.flow.f64"), bytes_f64(&r.flow_f64)).unwrap();
+        }
         if !r.states.is_empty() {
             let bytes: Vec<_> = r.states.iter().flat_map(|v| v.to_le_bytes()).collect();
             std::fs::write(format!("{out}.{name}.states.f64"), bytes).unwrap();
@@ -204,6 +217,10 @@ fn main() {
 }
 
 fn bytes(v: &[f32]) -> Vec<u8> {
+    v.iter().flat_map(|x| x.to_le_bytes()).collect()
+}
+
+fn bytes_f64(v: &[f64]) -> Vec<u8> {
     v.iter().flat_map(|x| x.to_le_bytes()).collect()
 }
 
