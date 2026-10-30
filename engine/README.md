@@ -263,6 +263,22 @@ the frequency-dependent wall losses of the acoustic boundary layer (Kirchhoff's,
 ~0.4-1 dB/m at 1 kHz in these pipes), the walls' own temperature (set per pipe), the
 intake's sound.
 
+A short actual-gearbox reference capture can stop one second after reaching a selected
+gear, without scripting the engine speed:
+
+```sh
+OUT=/absolute/path/to/shift-capture
+DUCT_THREADS=8 FREQ=20000 FLUID=12 THROUGH_GEAR=4 MAX_SECONDS=12 \
+  bun engine/scripts/reference-drive.ts "$OUT" drive
+DIAMETER=0.084 DISTANCE=5 uv run engine/scripts/reference_sound.py "$OUT" 20
+```
+
+`MAX_SECONDS` bounds the driving program, excluding the engine's settling period.
+The capture metadata records the actual settling sample count and gear-change times, so
+playback cuts need not assume a fixed settling length. The standard reference configuration
+is merged unchanged; the simulated gearbox, spark cuts/retard and boost response drive the
+sound. The 240 kHz fluid rate also divides exactly into the 4 kHz jet-noise control clock.
+
 ### Learned exhaust surrogate (experimental)
 
 The reference is also a teacher for a per-car real-time approximation. This pipeline is

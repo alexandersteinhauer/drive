@@ -8,8 +8,15 @@
 // drive: idle 2 s, full throttle up through the gears until 3 s into 7th, lift, brake to a
 // stop (the gearbox downshifting), then 2 s more (holding the brake there, the game selects
 // reverse: cut the sound at the stop, as the log shows it).
+// Optional short capture: THROUGH_GEAR=4 stops 1 s after entering fourth; MAX_SECONDS=12
+// bounds the driving program (settling is recorded separately in the metadata).
 import { appendFileSync, writeFileSync } from "node:fs";
 const [out, scenario, refArg] = process.argv.slice(2) as [string, string, string | undefined];
+if (!out || !["idle", "drive"].includes(scenario)) throw new Error("reference-drive <out> <idle|drive> [reference.json]");
+const maxSeconds = process.env.MAX_SECONDS === undefined ? Infinity : Number(process.env.MAX_SECONDS);
+const throughGear = process.env.THROUGH_GEAR === undefined ? 0 : Number(process.env.THROUGH_GEAR);
+if (!(maxSeconds > 0) || (process.env.MAX_SECONDS !== undefined && !Number.isFinite(maxSeconds))) throw new Error("MAX_SECONDS must be positive and finite");
+if (!Number.isInteger(throughGear) || throughGear < 0 || throughGear > 7) throw new Error("THROUGH_GEAR must be 1..7 (or 0 to disable)");
 const here = new URL(".", import.meta.url).pathname;
 const repo = `${here}/../..`;
 const refPath = refArg ?? `${here}/pista-reference.json`;
@@ -54,8 +61,10 @@ const take = () => {
   x.engine_duct_clear(sim.e);
   appendFileSync(`${out}.f32`, new Uint8Array(sound.buffer));
   appendFileSync(`${out}.exits.f32`, new Uint8Array(exits.buffer));
+  if (!sound.every(Number.isFinite) || !exits.every(Number.isFinite)) throw new Error("reference capture contains nonfinite pressure/exit state");
+  return n;
 };
-take(); // the engine's settling, dropped below by the WAV's start
+const settlingSamples = take(); // Retain settling, but tag its actual length for playback cuts.
 const settled = performance.now();
 
 const DT = 1 / 480;
@@ -67,12 +76,18 @@ let phase = "idle";
 let seventh = -1;
 let stopped = -1;
 let nextLog = 0;
+let reachedGearAt = -1;
+let previousGear = car.gear;
+const shifts: {time: number; from: number; to: number; rpm: number; kmh: number}[] = [];
 const log = (s: string) => {
   console.log(s);
   appendFileSync(`${out}.log`, s + "\n");
 };
 log(`settled in ${((settled - started) / 1000).toFixed(0)} s`);
 for (;;) {
+  if (t >= maxSeconds) break;
+  if (throughGear && car.gear >= throughGear && reachedGearAt < 0) reachedGearAt = t;
+  if (reachedGearAt >= 0 && t >= reachedGearAt + 1) break;
   if (scenario === "idle") {
     if (t >= 8) break;
   } else {
@@ -95,6 +110,11 @@ for (;;) {
   for (let i = 0; i < FRAME / DT; i++) car.step(DT, { throttle: pedal, brake, steer: 0, handbrake: 0 });
   t += FRAME;
   take();
+  if (car.gear !== previousGear) {
+    shifts.push({time: t, from: previousGear, to: car.gear, rpm: car.rpm, kmh: car.speed*3.6});
+    log(`${t.toFixed(3)} shift ${previousGear}->${car.gear} at ${car.rpm.toFixed(0)} rpm`);
+    previousGear = car.gear;
+  }
   if (!Number.isFinite(car.rpm) || !Number.isFinite(sim.boost)) {
     log(`not finite at ${t.toFixed(2)} s: stopping`);
     process.exit(1);
@@ -109,3 +129,12 @@ for (;;) {
   }
 }
 log(`done: ${t.toFixed(2)} s simulated in ${((performance.now() - started) / 1000).toFixed(0)} s`);
+
+writeFileSync(`${out}.json`, JSON.stringify({
+  rate, scenario, outlets: 2, simulationFrequency: spec.simulationFrequency, fluidSteps: spec.fluidSteps,
+  settlingSamples, settlingSeconds: settlingSamples/rate, programSeconds: t, shifts,
+  throughGear: throughGear || null, maxSeconds: Number.isFinite(maxSeconds) ? maxSeconds : null,
+  referenceFile: refPath, sourceRevision: process.env.SOURCE_REVISION ?? null,
+  listenerDistance: ref.ducts?.listenerDistance ?? null,
+}, null, 2));
+car.dispose();
