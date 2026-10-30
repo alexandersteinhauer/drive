@@ -194,6 +194,10 @@ pub struct DuctTurbineSpec {
     /// The wastegate's ports (in the volutes), its area shared between them; none: from `a`.
     #[serde(default)]
     pub wastegate_from: Vec<String>,
+    /// The rotor's gas slug length (its blade passages and end corrections, m); none: a thin
+    /// plate's end corrections.
+    #[serde(default)]
+    pub length: Option<f64>,
 }
 
 /// Nozzles from a stretch of pipe `pipe` (`from` to `to`, m) into `node`, `area` the total
@@ -206,6 +210,8 @@ pub struct DuctNozzlesSpec {
     pub to: f64,
     pub node: String,
     pub area: f64,
+    /// The channels' gas slug length (passage and end corrections, m).
+    pub length: f64,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]

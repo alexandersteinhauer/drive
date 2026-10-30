@@ -154,13 +154,22 @@ offline: `src/duct.rs` replaces the exhaust runners and collectors with pipes an
 - Turbines: a quasi-two-dimensional volute (Galindo, Tiseira, Fajardo and García-Cuevas,
   Energy Convers. Manage. 85, 2014): each scroll a tapered duct to its tongue, every cell of it
   discharging through its own stator channel (`nozzles`) into the stator and rotor's space, a
-  quasi-steady rotor nozzle from there (reaction 0.5: each nozzle half the expansion), the
+  rotor nozzle from there (reaction 0.5: each nozzle half the expansion), the
   stage's isentropic work at the turbo's efficiency taken in between, the wastegate's ports in
   the volutes' feeds, opened by the boost controller; the shaft gets the power. A lumped
   turbine (one nozzle between small volumes) let the kilohertz through almost whole; the
   volute's averaging over its 360 degrees takes 24 dB at 3 kHz off them here, as measured
   turbines do (17-33 dB at 1-2 kHz: Kabral et al., ETC 2017; Tiikoja et al., SAE
   2011-01-1525).
+- Orifices between nodes (turbine rotors, wastegates) and a volute's stator channels: the gas
+  in the opening moves as a slug, d m/dt = Cd A / l (dp - m|m| / (2 rho Cd^2 A^2 Y^2)), its
+  length l the passage and its end corrections, Y the compressible expansion factor of the
+  pressure ratio: once steady exactly the quasi-steady compressible (and choked) flow. The
+  quasi-steady flow alone, ~ sqrt(dp), has infinite conductance at no flow: between small
+  volumes (a 50 cc rotor space, a 30 cc turbine outlet) it chattered at idle, 6-9.5 kHz up
+  30 dB at the turbine's outlet, heard as bit crushing; with the slug's mass it is 60 dB down.
+  `tests/duct.rs` checks the steady flow against the orifice's and a vessel's Helmholtz
+  frequency through a hole.
 - Perforated walls (a silencer's core): each cell's holes a slug of gas driven by the
   pressure across it against its jet's loss and viscous drag, its mass the holes' gas over
   the wall and their end corrections.

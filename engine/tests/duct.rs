@@ -588,7 +588,7 @@ fn nozzles_conserve() {
     net.link(p, Side::A, atm, 0.0);
     net.link(p, Side::B, atm, 0.0);
     let n = net.pipes[p].cells();
-    net.nozzles.push(Nozzles { pipe: p, first: 0, node: plenum, cda: vec![4.8e-4 / n as f64; n], flow: 0.0 });
+    net.nozzles.push(Nozzles::new(p, 0, plenum, vec![4.8e-4 / n as f64; n], 0.02));
     let (m0, e0) = net.totals();
     for (k, span) in [0.01, 0.04].iter().enumerate() {
         run(&mut net, *span);
@@ -602,4 +602,54 @@ fn nozzles_conserve() {
     println!("mass {:.1e}, energy {:.1e}; plenum {:.0} Pa, pipe {:.0} Pa", m1 / m0 - 1.0, e1 / e0 - 1.0, pp, pmean);
     assert!((m1 / m0 - 1.0).abs() < 1e-10 && (e1 / e0 - 1.0).abs() < 1e-10);
     assert!((pp / pmean - 1.0).abs() < 0.01);
+}
+
+#[test]
+fn slug_steady_is_orifice() {
+    // A slug's flow is steady exactly at the compressible orifice's, subsonic and choked,
+    // either way round.
+    let (p0, t0) = (2.0e5, 900.0);
+    let (cda, l) = (3e-4, 0.03);
+    for r in [0.999, 0.95, 0.8, 0.6, 0.5, 0.3] {
+        let g = gamma(t0);
+        let (p, t) = (r * p0, 600.0);
+        let up = (p0, t0, g, p0 / (RS * t0));
+        let down = (p, t, gamma(t), p / (RS * t));
+        let m = cda * orifice(p0, t0, g, p);
+        let scale = cda / l * (p0 - p);
+        let forward = slug_rate(cda, l, m, up, down) / scale;
+        let backward = slug_rate(cda, l, -m, down, up) / scale;
+        println!("r {r}: m {m:.5} kg/s, rates {forward:.2e} {backward:.2e}");
+        assert!(forward.abs() < 1e-9 && backward.abs() < 1e-9);
+        // Less flow is accelerated, more held back.
+        assert!(slug_rate(cda, l, 0.9 * m, up, down) > 0.0 && slug_rate(cda, l, 1.1 * m, up, down) < 0.0);
+    }
+}
+
+#[test]
+fn orifice_helmholtz() {
+    // A litre opening to the air through a hole whose gas slug has length l rings at the
+    // Helmholtz frequency, sqrt(cda c^2 / (l V)) / 2 pi.
+    let (v, cda, l, t0) = (1e-3, 1e-4, 0.02, 300.0);
+    let mut net = Network::default();
+    let vessel = net.add_node(Node::volume(v, ATM + 10.0, t0, 0.0, 0.25));
+    let atm = net.add_node(Node::atmosphere(ATM, t0, 0.0, 0.25));
+    let o = net.orifice(vessel, atm, cda, 0.0);
+    net.orifices[o].length = l;
+    let c2 = gamma(t0) * RS * t0;
+    let expected = (cda * c2 / (l * v)).sqrt() / (2.0 * std::f64::consts::PI);
+    let dt = 1e-6;
+    let (mut last, mut crossings) = (net.nodes[vessel].pressure() - ATM, vec![]);
+    for k in 1..=60_000 {
+        net.step(dt);
+        let x = net.nodes[vessel].pressure() - ATM;
+        if last > 0.0 && x <= 0.0 {
+            crossings.push(k as f64 * dt - dt * x / (x - last));
+        }
+        last = x;
+    }
+    let n = crossings.len() - 1;
+    let f = n as f64 / (crossings[n] - crossings[0]);
+    println!("{f:.2} Hz over {n} periods, Helmholtz {expected:.2} Hz");
+    assert!(n >= 5 && (f / expected - 1.0).abs() < 0.01);
 }

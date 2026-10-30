@@ -108,6 +108,30 @@ pub fn orifice(p0: f64, t0: f64, g: f64, p: f64) -> f64 {
     p0 / (RS * t0).sqrt() * psi.max(0.0).sqrt()
 }
 
+/// The rate of a gas slug's flow `m` (kg/s) through an opening of discharge area `cda` and
+/// slug length `l`, between gas at `a` and `b` (pressure, temperature, ratio of specific
+/// heats, density): d m/dt = cda/l (p_a - p_b - its jet's loss), the loss m|m| / (2 rho
+/// cda^2 Y^2) of the gas it comes from, with the compressible expansion factor Y of its
+/// pressure ratio. Once steady the flow is so exactly `orifice`'s, choked included.
+pub fn slug_rate(cda: f64, l: f64, m: f64, a: (f64, f64, f64, f64), b: (f64, f64, f64, f64)) -> f64 {
+    let (src, dst) = if m > 0.0 || (m == 0.0 && a.0 >= b.0) { (a, b) } else { (b, a) };
+    let y2 = expansion2(src.0, src.2, dst.0);
+    cda / l * (a.0 - b.0 - m * m.abs() / (2.0 * src.3 * cda * cda * y2))
+}
+
+/// The square of the compressible expansion factor Y of `orifice`'s flow from p0 to p, by
+/// which it falls short of the incompressible flow, cda sqrt(2 rho0 (p0 - p)): psi / (2 (1 - r)).
+pub fn expansion2(p0: f64, g: f64, p: f64) -> f64 {
+    let e = 1.0 - p / p0;
+    if !(e > 1e-6) {
+        return 1.0;
+    }
+    let critical = (2.0 / (g + 1.0)).powf(g / (g - 1.0));
+    let r = (1.0 - e).max(critical);
+    let psi = 2.0 * g / (g - 1.0) * (r.powf(2.0 / g) - r.powf((g + 1.0) / g));
+    psi.max(0.0) / (2.0 * e)
+}
+
 /// The gas in a cell: primitive variables, and what follows from them.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Prim {
@@ -1268,8 +1292,23 @@ pub struct Nozzles {
     pub node: usize,
     /// Effective area per cell (m^2).
     pub cda: Vec<f64>,
+    /// The channels' gas slug length (m), and each cell's flow into the node with its saved
+    /// value and rate (the slugs' inertia, as an Orifice's).
+    pub length: f64,
+    pub m: Vec<f64>,
+    m0: Vec<f64>,
+    dm: Vec<f64>,
     /// The last total flow into the node (kg/s).
     pub flow: f64,
+}
+
+impl Nozzles {
+    /// Nozzles from `pipe`'s cells from `first` into `node`, of effective area `cda` per cell
+    /// and gas slug length `length`.
+    pub fn new(pipe: usize, first: usize, node: usize, cda: Vec<f64>, length: f64) -> Nozzles {
+        let n = cda.len();
+        Nozzles { pipe, first, node, cda, length, m: vec![0.0; n], m0: vec![0.0; n], dm: vec![0.0; n], flow: 0.0 }
+    }
 }
 
 /// Two nodes joined through an opening (from `a` to `b`, positive), optionally a turbine's
@@ -1278,6 +1317,12 @@ pub struct Orifice {
     pub a: usize,
     pub b: usize,
     pub cda: f64,
+    /// The length of the gas slug in the opening (its passage and end corrections), whose
+    /// inertia the flow has; and that flow (a to b), saved and its rate.
+    pub length: f64,
+    pub m: f64,
+    m0: f64,
+    dm: f64,
     pub efficiency: f64,
     /// A turbine's stage: the nodes whose mean pressure is its inlet's (the volutes' feeds),
     /// the work being the stage's isentropic work from there to `b`, taken from the gas
@@ -1353,7 +1398,9 @@ impl Network {
     }
 
     pub fn orifice(&mut self, a: usize, b: usize, cda: f64, efficiency: f64) -> usize {
-        self.orifices.push(Orifice { a, b, cda, efficiency, stage: vec![], flow: 0.0, power: 0.0 });
+        // A thin plate's end corrections, both sides of a round hole of the area: 0.85 d.
+        let length = 0.85 * (4.0 * cda.max(1e-6) / std::f64::consts::PI).sqrt();
+        self.orifices.push(Orifice { a, b, cda, length, m: 0.0, m0: 0.0, dm: 0.0, efficiency, stage: vec![], flow: 0.0, power: 0.0 });
         self.work.push(0.0);
         self.orifices.len() - 1
     }
@@ -1418,6 +1465,12 @@ impl Network {
         for f in &mut self.perforations {
             f.v.clone_from(&f.v0);
         }
+        for o in &mut self.orifices {
+            o.m = o.m0;
+        }
+        for z in &mut self.nozzles {
+            z.m.clone_from(&z.m0);
+        }
         self.work = work;
         self.rejected += 1;
         if depth < 4 {
@@ -1456,6 +1509,12 @@ impl Network {
         }
         for f in &mut self.perforations {
             f.v0.clone_from(&f.v);
+        }
+        for o in &mut self.orifices {
+            o.m0 = o.m;
+        }
+        for z in &mut self.nozzles {
+            z.m0.clone_from(&z.m);
         }
         // Shu and Osher's third-order strong-stability-preserving Runge-Kutta: the stages'
         // rates weigh 1/6, 1/6 and 2/3 in the step.
@@ -1520,32 +1579,43 @@ impl Network {
         }
         for (o, work) in self.orifices.iter_mut().zip(&mut self.work) {
             let (a, b) = (self.nodes[o.a].reservoir(), self.nodes[o.b].reservoir());
-            let (forward, up, down) = if a.p >= b.p { (true, a, b) } else { (false, b, a) };
-            let g = gamma(up.t);
-            let m = o.cda * orifice(up.p, up.t, g, down.p);
-            let h0 = enthalpy(up.t);
+            // The flow has the slug's inertia (`slug_rate`): smooth through no flow, where the
+            // quasi-steady flow (~ sqrt dp, of infinite conductance) chatters between small
+            // volumes, and the compressible quasi-steady flow once steady.
+            let m = o.m;
+            let forward = m >= 0.0;
+            let (src, dst) = if forward { (a, b) } else { (b, a) };
+            o.dm = if o.cda > 0.0 {
+                let gas = |r: &Reservoir| (r.p, r.t, gamma(r.t), r.p / (RS * r.t));
+                slug_rate(o.cda, o.length, m, gas(&a), gas(&b))
+            } else {
+                -o.m / 1e-4
+            };
+            let flow = m.abs();
+            let h0 = enthalpy(src.t);
             let mut w = 0.0;
-            if forward && o.efficiency > 0.0 {
+            if forward && o.efficiency > 0.0 && flow > 0.0 {
+                let g = gamma(src.t);
                 let p_in = if o.stage.is_empty() {
-                    up.p
+                    src.p
                 } else {
                     o.stage.iter().map(|&n| self.nodes[n].pressure()).sum::<f64>() / o.stage.len() as f64
                 };
-                let ts = up.t * (down.p / p_in.max(down.p)).powf((g - 1.0) / g);
+                let ts = src.t * (dst.p / p_in.max(dst.p)).powf((g - 1.0) / g);
                 w = o.efficiency * (h0 - enthalpy(ts));
             }
             let (from, to) = if forward { (o.a, o.b) } else { (o.b, o.a) };
             if !self.nodes[from].atmosphere {
-                self.nodes[from].gain(-m, -m * h0, up.yf, up.yo);
+                self.nodes[from].gain(-flow, -flow * h0, src.yf, src.yo);
             }
             if !self.nodes[to].atmosphere {
-                self.nodes[to].gain(m, m * (h0 - w), up.yf, up.yo);
+                self.nodes[to].gain(flow, flow * (h0 - w), src.yf, src.yo);
             }
             if debug_checks() && !(m.is_finite() && w.is_finite()) {
                 panic!("orifice {} -> {}: {:?} {:?} cda {} m {m} w {w}", o.a, o.b, a, b, o.cda);
             }
-            o.flow = if forward { m } else { -m };
-            o.power = m * w;
+            o.flow = m;
+            o.power = flow * w;
             *work += weight * dt * o.power;
         }
         #[cfg(feature = "parallel")]
@@ -1585,11 +1655,12 @@ impl Network {
         for (c, &cda) in z.cda.iter().enumerate() {
             let i = z.first + c;
             let cell = pipe.prim[i];
-            let (m, h0, yf, yo, u) = if cell.p >= res.p {
-                let m = cda * orifice(cell.p, cell.t, cell.g, res.p);
-                (m, cell.e + RS * cell.t + 0.5 * cell.u * cell.u, cell.yf, cell.yo, cell.u)
+            let m = z.m[c];
+            z.dm[c] = slug_rate(cda, z.length, m, (cell.p, cell.t, cell.g, cell.rho), (res.p, res.t, res_g, res.p / (RS * res.t)));
+            let (h0, yf, yo, u) = if m >= 0.0 {
+                (cell.e + RS * cell.t + 0.5 * cell.u * cell.u, cell.yf, cell.yo, cell.u)
             } else {
-                (-cda * orifice(res.p, res.t, res_g, cell.p), res_h, res.yf, res.yo, 0.0)
+                (res_h, res.yf, res.yo, 0.0)
             };
             let inv_v = 1.0 / pipe.cell_volume(i);
             let r = &mut pipe.rate[i];
@@ -1704,6 +1775,14 @@ impl Network {
         for f in &mut self.perforations {
             for i in 0..f.v.len() {
                 f.v[i] = keep * f.v0[i] + step * (f.v[i] + dt * f.dv[i]);
+            }
+        }
+        for o in &mut self.orifices {
+            o.m = keep * o.m0 + step * (o.m + dt * o.dm);
+        }
+        for z in &mut self.nozzles {
+            for i in 0..z.m.len() {
+                z.m[i] = keep * z.m0[i] + step * (z.m[i] + dt * z.dm[i]);
             }
         }
     }
@@ -1891,7 +1970,7 @@ impl Ducts {
             }
             let n = (last - first) as f64;
             let cda = vec![z.area / n; last - first];
-            net.nozzles.push(Nozzles { pipe, first, node: node(&z.node)?, cda, flow: 0.0 });
+            net.nozzles.push(Nozzles::new(pipe, first, node(&z.node)?, cda, z.length));
         }
         let mut flaps = Vec::new();
         for f in &spec.flaps {
@@ -1914,6 +1993,9 @@ impl Ducts {
             let (a, b) = (node(&t.a)?, node(&t.b)?);
             // The efficiency is the turbo's, set by the engine.
             let o = net.orifice(a, b, t.area, 1.0);
+            if let Some(l) = t.length {
+                net.orifices[o].length = l;
+            }
             net.orifices[o].stage = t.stage.iter().map(|n| node(n)).collect::<Result<_, _>>()?;
             turbines.push(o);
             if t.wastegate_from.is_empty() {

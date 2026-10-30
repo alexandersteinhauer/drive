@@ -464,7 +464,8 @@
     "wastegateFrom": [
      "right merge A",
      "right merge B"
-    ]
+    ],
+    "length": 0.03
    },
    {
     "a": "left rotor",
@@ -478,7 +479,8 @@
     "wastegateFrom": [
      "left merge A",
      "left merge B"
-    ]
+    ],
+    "length": 0.03
    }
   ],
   "perforations": [],
@@ -516,28 +518,32 @@
     "from": 0.0,
     "to": 0.29,
     "node": "right rotor",
-    "area": 0.0004808326112068524
+    "area": 0.0004808326112068524,
+    "length": 0.02
    },
    {
     "pipe": "right volute B",
     "from": 0.0,
     "to": 0.29,
     "node": "right rotor",
-    "area": 0.0004808326112068524
+    "area": 0.0004808326112068524,
+    "length": 0.02
    },
    {
     "pipe": "left volute A",
     "from": 0.0,
     "to": 0.29,
     "node": "left rotor",
-    "area": 0.0004808326112068524
+    "area": 0.0004808326112068524,
+    "length": 0.02
    },
    {
     "pipe": "left volute B",
     "from": 0.0,
     "to": 0.29,
     "node": "left rotor",
-    "area": 0.0004808326112068524
+    "area": 0.0004808326112068524,
+    "length": 0.02
    }
   ]
  },
