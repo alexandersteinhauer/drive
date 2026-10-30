@@ -116,7 +116,10 @@ The voice approximates what the exhaust does to the valves' flow (linear acousti
 steepener, losses fitted to a recording). The reference simulation computes it instead,
 offline: `src/duct.rs` replaces the exhaust runners and collectors with pipes and volumes
 (`ducts` in the spec), and the sound is the pressure their open ends radiate.
-`examples/reference.rs` runs an engine with them on the dynamometer and writes it.
+`examples/reference.rs` runs an engine with them on the dynamometer and writes it;
+`scripts/reference-drive.ts` drives the game's car with them (through the native library,
+`scripts/native-engine.ts`), the 488 Pista's exhaust from `scripts/pista-reference.json`; and
+`scripts/reference_sound.py` makes what was recorded the sound heard.
 
 - Each pipe is a column of finite volumes of the one-dimensional Euler equations with the
   gas's composition, fifth order in space (WENO-Z) and third in time (SSP Runge-Kutta), HLLC
