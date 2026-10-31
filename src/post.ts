@@ -46,7 +46,7 @@ const FLASH_FLOOR = 0.8;
 /**
  * The picture after a fatal crash: black but for the highlights, in a bright, glowing red,
  * which `crash` then darkens and blurs. A pipeline of its own, so the blur costs nothing
- * while driving; render it once at load so its shaders are ready.
+ * while driving; `warmUpPipelines` (main.ts) builds its shaders at load.
  */
 export function createCrashPipeline(
   renderer: THREE.WebGPURenderer,

@@ -457,6 +457,26 @@ function respawn(): void {
   accumulator = 0;
 }
 
+/**
+ * Builds the post-processing shaders of both pipelines (the crash look's too), so none is
+ * built at the first frame or the first crash. `compileAsync` covers only the scene. It
+ * takes a few animation frames: bloom and the render-to-texture passes run once per frame,
+ * and building them re-creates their inner materials, so their final shaders only appear
+ * in the next frame. Drawn behind the loading screen.
+ */
+function warmUpPipelines(frames = 5): Promise<void> {
+  return new Promise((resolve) => {
+    let drawn = 0;
+    void renderer.setAnimationLoop(() => {
+      crashPipeline.render();
+      pipeline.render();
+      if (++drawn < frames) return;
+      void renderer.setAnimationLoop(null);
+      resolve();
+    });
+  });
+}
+
 /** Draws the frame: the crash look while crashed, else the normal picture. */
 function render(): void {
   // Fully black, waiting for a key: the canvas keeps the last (black) frame.
@@ -607,8 +627,7 @@ vegetation.flush(car.position);
 roadView.update(car.position);
 loading.enter("shaders");
 await renderer.compileAsync(scene, camera);
-// Build the crash look's shaders now, not at the moment of a crash.
-crashPipeline.render();
+await warmUpPipelines();
 // Keys pressed while loading shouldn't act now; time starts from the first frame.
 input.reset();
 last = performance.now();
